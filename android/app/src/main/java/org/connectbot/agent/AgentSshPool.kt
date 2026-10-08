@@ -36,6 +36,7 @@ import net.schmizz.keepalive.KeepAliveProvider
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.Buffer
+import net.schmizz.sshj.common.SecurityUtils
 import net.schmizz.sshj.connection.channel.direct.DirectConnection
 import net.schmizz.sshj.transport.verification.HostKeyVerifier
 import net.schmizz.sshj.userauth.UserAuthException
@@ -163,7 +164,7 @@ class AgentSshPool @Inject constructor(
         }
         delay(reconnect.waiting(host.id, android.os.SystemClock.elapsedRealtime()))
         val parent = currentCoroutineContext()[Job]
-        val client = SSHClient(DefaultConfig().apply { keepAliveProvider = KeepAliveProvider.KEEP_ALIVE })
+        val client = SSHClient(androidCompatibleConfig())
         var tunnel: DirectConnection? = null
         connecting.add(client)
         try {
@@ -343,5 +344,29 @@ class AgentSshPool @Inject constructor(
             entry.tunnel?.close()
         } catch (_: IOException) { }
         mutableCount.value = entries.values.count { it.client.isConnected && it.client.isAuthenticated }
+    }
+
+    private companion object {
+        /**
+         * Android registers a stripped "BC" provider without EC or X25519 key agreement,
+         * and sshj resolves algorithms by provider name, so it lands on that stripped
+         * implementation and the handshake aborts with "no such algorithm" before
+         * authentication. Selecting the platform default provider instead routes key
+         * agreement to AndroidOpenSSL, which implements ECDH/X25519 and the DH groups.
+         */
+        val configured = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        fun androidCompatibleConfig(): DefaultConfig {
+            installProvider()
+            return DefaultConfig().apply { keepAliveProvider = KeepAliveProvider.KEEP_ALIVE }
+        }
+
+        fun installProvider() {
+            if (!configured.compareAndSet(false, true)) return
+            // Order matters: setSecurityProvider(null) also resets sshj's BouncyCastle flag,
+            // so the opt-out has to be applied afterwards to stick.
+            SecurityUtils.setSecurityProvider(null)
+            SecurityUtils.setRegisterBouncyCastle(false)
+        }
     }
 }

@@ -27,6 +27,8 @@ val prepareOssMoshArtifacts = tasks.register<PrepareMoshArtifacts>("prepareOssMo
 }
 
 appVersioning {
+    // The unified repository root is the parent directory of this Gradle project.
+    gitRootDirectory.set(rootProject.layout.projectDirectory.dir(".."))
     tagFilter.set("v[0-9].*")
     overrideVersionCode { gitTag, _, _ ->
         val semVer = gitTag.toSemVer()
