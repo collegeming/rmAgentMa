@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+ * rmAgentMa
+ * Copyright 2026 rmAgentMa contributors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ -->
+<resources>
+    <!-- Persistent warning above the SSH key list, including empty and loading states. -->
+    <string name="private_key_security_notice">System backups do not include private keys. Before uninstalling, clearing app data, or moving to another device, export your exportable private keys from the key menu. Keep exported files secure, especially files without a passphrase. Biometric keys cannot be exported; arrange another way to sign in before removing this app.</string>
+    <!-- Settings toggle for backing up records that already contain only a public key, never private keys. -->
+    <string name="private_key_security_backup_public_only_title">Back up public-only key records</string>
+    <!-- Explains the limited scope of the public-only key backup toggle; private key exports remain separate. -->
+    <string name="private_key_security_backup_public_only_summary">Includes only key records with no private key. Private keys are excluded even when this is on; export them separately before uninstalling, clearing app data, or changing devices.</string>
+</resources>

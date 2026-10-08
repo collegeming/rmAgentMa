@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Notification channel for agent-only SSH connections. -->
+    <string name="agent_notification_channel">Agent connections</string>
+    <!-- Title of the foreground notification while agent connections are maintained. -->
+    <string name="agent_notification_title">Remote agents</string>
+    <!-- Disconnect action on the agent foreground notification. -->
+    <string name="agent_disconnect_all">Disconnect all agents</string>
+    <!-- Number of connected SSH hosts, including jump hosts. -->
+    <plurals name="agent_connection_count">
+        <item quantity="one">%d SSH host connected</item>
+        <item quantity="other">%d SSH hosts connected</item>
+    </plurals>
+    <!-- Security error when the server does not match any trusted key for the host. -->
+    <string name="agent_host_key_changed">The host key for %1$s has changed. Connection refused. Verify the server using the terminal before updating trusted keys.</string>
+    <!-- First connection confirmation; arguments are hostname, port, and SHA256 fingerprint. -->
+    <string name="agent_verify_host">Verify %1$s:%2$d\n%3$s\nAccept only if this fingerprint matches the server.</string>
+    <!-- Password challenge; arguments are username and hostname. -->
+    <string name="agent_backend_password">Password for %1$s@%2$s. This entry will not be saved.</string>
+    <!-- Private-key passphrase challenge; argument is the key nickname. -->
+    <string name="agent_key_passphrase">Passphrase for SSH key %1$s. This entry will not be saved.</string>
+    <!-- Confirmation challenge for keys requiring approval before use. -->
+    <string name="agent_confirm_key">Allow SSH authentication with key %1$s? Enter accept to allow.</string>
+    <!-- Actionable error for biometric-protected keys unsupported by agent SSH. -->
+    <string name="agent_biometric_terminal">Agent connections cannot unlock biometric-protected SSH keys. Use the terminal for this host.</string>
+    <!-- Error when a non-ACP agent is opened through the structured conversation interface. -->
+    <string name="agent_use_terminal">Continue or create this agent session in the terminal.</string>
+</resources>

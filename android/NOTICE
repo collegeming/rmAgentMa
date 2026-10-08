@@ -1,0 +1,14 @@
+rmAgentMa
+
+Android client derived from ConnectBot, https://github.com/connectbot/connectbot
+Upstream revision: c3c69b82055142d9db9a7466fedbefff509c688a (v1.11.0)
+ConnectBot copyright notices are retained in the source files.
+ConnectBot is licensed under Apache License 2.0; see LICENSE.
+
+rmAgentMa modifications include agent-core and agent-ui modules, SSH exec
+connections, remote session scanners, agent session screens, navigation,
+application identity, and build configuration.
+Independently written rmAgentMa source files are attributed to rmAgentMa
+contributors and are licensed under Apache License 2.0.
+
+This application is not an official release of ConnectBot or any agent vendor.

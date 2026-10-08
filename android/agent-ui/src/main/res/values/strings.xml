@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Action to expand an event details card. -->
+    <string name="agent_ui_expand">Show details</string>
+    <!-- Action to collapse an event details card. -->
+    <string name="agent_ui_collapse">Hide details</string>
+</resources>

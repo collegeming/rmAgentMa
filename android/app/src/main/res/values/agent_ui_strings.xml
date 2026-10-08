@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Title of the unified agent session screen. -->
+    <string name="agent_title">Agent sessions</string>
+    <!-- Back navigation, including returning from a conversation to the list. -->
+    <string name="agent_back">Back</string>
+    <!-- Refresh remote session lists. -->
+    <string name="agent_refresh">Refresh</string>
+    <!-- Create a new remote agent conversation. -->
+    <string name="agent_new">New session</string>
+    <!-- Disconnect all agent SSH connections. -->
+    <string name="agent_disconnect">Disconnect agents</string>
+    <!-- Confirmation warning before disconnecting agent connections. -->
+    <string name="agent_disconnect_warning">Disconnect all agent connections? Running conversations may be interrupted.</string>
+    <!-- Generic confirmation action. -->
+    <string name="agent_confirm">Confirm</string>
+    <!-- Dismiss a dialog or cancel an operation. -->
+    <string name="agent_cancel">Cancel</string>
+    <!-- Device filter label. -->
+    <string name="agent_device">Device</string>
+    <!-- Agent filter and new session label. -->
+    <string name="agent_kind">Agent</string>
+    <!-- All devices or agent kinds in a filter. -->
+    <string name="agent_all">All</string>
+    <!-- Session title and preview search field. -->
+    <string name="agent_search">Search title and last message</string>
+    <!-- Explain absence of saved SSH devices. -->
+    <string name="agent_no_devices">Add an SSH device from the device list first.</string>
+    <!-- Empty or filtered session list. -->
+    <string name="agent_no_sessions">No matching sessions. Refresh to read remote history, or create a session.</string>
+    <!-- Historical sessions remain visible when disconnected. -->
+    <string name="agent_cache_hint">History may be cached. Refresh requires a connection; errors do not mean cached sessions are available online.</string>
+    <!-- Explicit distinction between structured and terminal-only integrations. -->
+    <string name="agent_support_hint">Kimi, OpenCode and oh-my-pi use structured conversation. deepseek-harness and zcode continue in the terminal only.</string>
+    <!-- Continue a structured session, or open the terminal for terminal-only agents. -->
+    <string name="agent_continue">Continue</string>
+    <!-- Open a session in the existing SSH terminal. -->
+    <string name="agent_terminal">Terminal</string>
+    <!-- Label for agents which are terminal-only. -->
+    <string name="agent_terminal_only">Terminal only</string>
+    <!-- Missing host referenced by a cached session. -->
+    <string name="agent_missing_host">Device unavailable</string>
+    <!-- Empty native title uses the session identifier. -->
+    <string name="agent_untitled">Untitled session</string>
+    <!-- Session metadata: agent, host and working directory are displayed separately. -->
+    <string name="agent_updated">Updated: %1$s</string>
+    <!-- New session absolute remote working directory field. -->
+    <string name="agent_cwd">Absolute working directory</string>
+    <!-- Working directory validation error. -->
+    <string name="agent_cwd_error">Use an absolute Linux/WSL path starting with /, without control characters.</string>
+    <!-- Button creating either a structured or terminal session. -->
+    <string name="agent_start">Start</string>
+    <!-- Missing local-network permission; no remote refresh is attempted. -->
+    <string name="agent_network_denied">Nearby devices permission is required for local-network connections on Android 16 and later. No network request was started. Grant permission in system settings or try again.</string>
+    <!-- Action explicitly retrying the runtime permission request. -->
+    <string name="agent_network_retry">Allow local-network access</string>
+    <!-- Message input label in a conversation. -->
+    <string name="agent_prompt">Message</string>
+    <!-- Submit a prompt or free-text answer. -->
+    <string name="agent_send">Send</string>
+    <!-- Cancel the currently running agent turn. -->
+    <string name="agent_stop">Stop</string>
+    <!-- Empty conversation instructions. -->
+    <string name="agent_conversation_empty">Send a message to begin. Replies, tools and approvals appear here.</string>
+    <!-- User message heading. -->
+    <string name="agent_event_user">You</string>
+    <!-- Assistant content heading. -->
+    <string name="agent_event_content">Assistant</string>
+    <!-- Collapsible reasoning heading. -->
+    <string name="agent_event_thinking">Thinking</string>
+    <!-- Tool event heading. -->
+    <string name="agent_event_tool">Tool</string>
+    <!-- Plan event heading. -->
+    <string name="agent_event_plan">Plan</string>
+    <!-- Permission event heading. -->
+    <string name="agent_event_permission">Permission required</string>
+    <!-- Question event heading. -->
+    <string name="agent_event_question">Question</string>
+    <!-- Token/context event heading. -->
+    <string name="agent_event_usage">Usage</string>
+    <!-- Native session information heading. -->
+    <string name="agent_event_session">Session information</string>
+    <!-- Completed turn event heading. -->
+    <string name="agent_event_complete">Turn complete</string>
+    <!-- Remote error heading. -->
+    <string name="agent_event_error">Agent error</string>
+    <!-- Unknown protocol event heading. -->
+    <string name="agent_event_unknown">Unrecognized event</string>
+    <!-- Raw event disclosure. -->
+    <string name="agent_raw">Raw event / input / output</string>
+    <!-- File diff section heading. -->
+    <string name="agent_diff">File changes</string>
+    <!-- Free-form answer to an agent question. -->
+    <string name="agent_answer">Your answer</string>
+    <!-- Event that lacks a usable response identifier or options. -->
+    <string name="agent_no_response">This event has no response identifier or options. Use the terminal if interaction is required.</string>
+    <!-- An interaction is in flight; only removal by the repository confirms resolution. -->
+    <string name="agent_response_pending">Sending response…</string>
+    <!-- Host-key verification dialog title; host is shown in body. -->
+    <string name="agent_host_key">Verify host fingerprint</string>
+    <!-- Password authentication dialog title. -->
+    <string name="agent_password">SSH password</string>
+    <!-- Private-key passphrase authentication dialog title. -->
+    <string name="agent_passphrase">Private-key passphrase</string>
+    <!-- Fallback title for an authentication challenge. -->
+    <string name="agent_auth">SSH authentication</string>
+    <!-- Explicitly approve a presented SSH host fingerprint. -->
+    <string name="agent_accept">Accept fingerprint</string>
+    <!-- Explicitly reject a presented SSH host fingerprint. -->
+    <string name="agent_reject">Reject</string>
+    <!-- Secret input label for SSH authentication. -->
+    <string name="agent_secret">Password or passphrase</string>
+    <!-- Unknown authentication challenge must not be accepted implicitly. -->
+    <string name="agent_unknown_challenge">Unsupported authentication request. Cancel and use the terminal.</string>
+    <!-- Display name for Kimi Code. -->
+    <string name="agent_name_kimi">Kimi Code</string>
+    <!-- Display name for OpenCode. -->
+    <string name="agent_name_opencode">OpenCode</string>
+    <!-- Display name for oh-my-pi. -->
+    <string name="agent_name_omp">oh-my-pi</string>
+    <!-- Display name for deepseek-harness. -->
+    <string name="agent_name_dsh">deepseek-harness</string>
+    <!-- Display name for zcode. -->
+    <string name="agent_name_zcode">zcode</string>
+    <!-- Plan entry priority and execution status, using values supplied by the agent. -->
+    <string name="agent_plan_priority">Priority: %1$s</string>
+    <!-- Plan entry execution status. -->
+    <string name="agent_plan_status">Status: %1$s</string>
+    <!-- ACP plan updates are notifications, not approval requests. -->
+    <string name="agent_plan_notice">This plan is an update, not an approval request. Approve only when a permission request appears.</string>
+    <!-- Context use reported by the agent, without inferred token counts. -->
+    <string name="agent_usage_used">Context used: %1$s</string>
+    <!-- Context capacity reported by the agent. -->
+    <string name="agent_usage_size">Context capacity: %1$s</string>
+    <!-- Monetary cost as reported by the agent. -->
+    <string name="agent_usage_cost">Cost: %1$s</string>
+    <!-- Native session title supplied by a session information event. -->
+    <string name="agent_info_title">Title: %1$s</string>
+    <!-- Native creation timestamp; display its actual representation. -->
+    <string name="agent_info_created">Created: %1$s</string>
+    <!-- Native last-update timestamp; display its actual representation. -->
+    <string name="agent_info_updated">Updated: %1$s</string>
+    <!-- Collapsible tool input section. -->
+    <string name="agent_tool_input">Tool input</string>
+    <!-- Collapsible tool output section. -->
+    <string name="agent_tool_output">Tool output</string>
+    <!-- Collapsible tool content and result blocks. -->
+    <string name="agent_tool_content">Tool result content</string>
+    <!-- Visible warning when transport or history truncated an event. -->
+    <string name="agent_truncated">This event was truncated. Some details are missing; inspect the remote session in the terminal for the full result.</string>
+    <!-- Describe a schema field and its primitive type. -->
+    <string name="agent_question_field">%1$s (%2$s)</string>
+    <!-- Marker for a required schema field. -->
+    <string name="agent_question_required">Required</string>
+    <!-- Free JSON input for forms with more than one field or non-string fields. -->
+    <string name="agent_question_json">Answer as a JSON object</string>
+    <!-- Explain the exact multi-field answer format; no guessed values are inserted. -->
+    <string name="agent_question_json_hint">Use the field names shown above as JSON keys. Match each type and include required fields. Booleans and numbers must not be quoted.</string>
+    <!-- Invalid or incomplete schema answer; submission remains disabled. -->
+    <string name="agent_question_invalid">The answer does not match the requested fields, types or allowed values.</string>
+    <!-- Schema was absent or too complex for a safe phone form. -->
+    <string name="agent_question_unsupported">No supported question schema is available. Inspect raw details or use the terminal.</string>
+</resources>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Main menu entry for all remote agent sessions. -->
+    <string name="agent_navigation_title">Agent sessions</string>
+    <!-- Confirmation before pasting a remote agent launch command into the terminal. -->
+    <string name="agent_terminal_launch_title">Continue in terminal</string>
+    <!-- Reminds users to wait until the terminal is a shell before running a command. -->
+    <string name="agent_terminal_launch_warning">Confirm the terminal is at a shell prompt before sending this command. If another program is running, exit it first.</string>
+    <!-- Sends the displayed command to the connected SSH terminal. -->
+    <string name="agent_terminal_launch_send">Send command</string>
+    <!-- Keeps the terminal open without sending a launch command. -->
+    <string name="agent_terminal_launch_cancel">Do not send</string>
+</resources>
