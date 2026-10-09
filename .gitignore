@@ -1,0 +1,5 @@
+/Probe*.java
+/classes*/
+/dexout*/
+/ci-artifacts/
+/.device-test/

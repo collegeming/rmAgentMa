@@ -1,0 +1,160 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+    working-directory: android
+
+jobs:
+  build:
+    name: OSS debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout history and tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle and validate wrapper
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic
+          cache-read-only: ${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}
+          dependency-graph: disabled
+
+      - name: Set up Android SDK and native toolchain
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: 'platform-tools platforms;android-37 ndk;28.2.13676358 cmake;3.22.1'
+
+      - name: Build OSS debug APK
+        run: ./gradlew --no-daemon --stacktrace --profile :app:assembleOssDebug
+
+      - name: Package APK and build metadata
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REF: ${{ github.ref }}
+          SOURCE_EVENT: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          output=ci-artifacts/oss-debug
+          mkdir -p "$output"
+          cp app/build/outputs/apk/oss/debug/app-oss-debug.apk "$output/rmAgentMa-oss-debug.apk"
+          cp app/build/outputs/apk/oss/debug/output-metadata.json "$output/output-metadata.json"
+          apk_sha256=$(sha256sum "$output/rmAgentMa-oss-debug.apk" | cut -d ' ' -f 1)
+          jq -n \
+            --arg repository "$SOURCE_REPOSITORY" \
+            --arg ref "$SOURCE_REF" \
+            --arg event "$SOURCE_EVENT" \
+            --arg event_sha "$EVENT_SHA" \
+            --arg checkout_sha "$(git rev-parse HEAD)" \
+            --arg describe "$(git describe --tags --match 'v[0-9].*' --always)" \
+            --arg run_id "$RUN_ID" \
+            --arg run_attempt "$RUN_ATTEMPT" \
+            --arg run_url "$SERVER_URL/$SOURCE_REPOSITORY/actions/runs/$RUN_ID" \
+            --arg apk_sha256 "$apk_sha256" \
+            --slurpfile apk_metadata "$output/output-metadata.json" \
+            '{repository: $repository, ref: $ref, event: $event,
+              event_sha: $event_sha, checkout_sha: $checkout_sha,
+              describe: $describe, run_id: $run_id, run_attempt: $run_attempt,
+              run_url: $run_url, variant: "ossDebug",
+              signing: "runner-generated default debug keystore",
+              apk: "rmAgentMa-oss-debug.apk", apk_sha256: $apk_sha256,
+              apk_metadata: $apk_metadata[0]}' > "$output/build-metadata.json"
+          (cd "$output" && sha256sum rmAgentMa-oss-debug.apk output-metadata.json build-metadata.json > SHA256SUMS)
+
+      - name: Upload installable OSS debug APK
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rmAgentMa-oss-debug-${{ github.run_id }}-${{ github.run_attempt }}
+          path: android/ci-artifacts/oss-debug/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-build-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            android/**/build/reports/
+            android/**/build/test-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+  verify:
+    name: Formatting, lint and tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout history and tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle and validate wrapper
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic
+          cache-read-only: ${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}
+          dependency-graph: disabled
+
+      - name: Set up Android SDK and native toolchain
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: 'platform-tools platforms;android-37 ndk;28.2.13676358 cmake;3.22.1'
+
+      - name: Run scanner Python unit tests
+        run: |
+          mkdir -p ci-reports
+          python3 -m unittest discover -s agent-core/src/test/python -p 'test_*.py' -v 2>&1 | tee ci-reports/python-unittest.txt
+
+      - name: Run formatting, lint and JVM checks
+        if: ${{ !cancelled() }}
+        run: ./gradlew --no-daemon --stacktrace --profile --continue spotlessCheck lint check test
+
+      - name: Upload verification reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-verify-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            android/**/build/reports/
+            android/**/build/test-results/
+            android/ci-reports/
+          if-no-files-found: warn
+          retention-days: 14
