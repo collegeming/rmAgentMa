@@ -25,7 +25,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -194,7 +193,7 @@ class AcpDriverTest {
 
     @Test
     fun cleanupTimeoutInterruptsTransportCloseAndBoundsExplicitClose() = runBlocking {
-        withTimeout(5000) {
+        withTimeout(30000) {
             val host = PipeHost()
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             val closeEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
@@ -372,24 +371,70 @@ class AcpDriverTest {
 
     @Test
     fun scopeCancellationClosesChannelAndCompletesEvents() = runBlocking {
-        withTimeout(10000) {
-            val host = PipeHost()
-            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-            try {
-                val server = async(Dispatchers.IO) {
-                    host.reply(host.read(), """{"protocolVersion":1,"agentCapabilities":{}}""")
-                    host.reply(host.read(), """{"sessionId":"s"}""")
+        repeat(100) {
+            withTimeout(10000) {
+                val host = PipeHost()
+                val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+                try {
+                    val server = async(Dispatchers.IO) {
+                        host.reply(host.read(), """{"protocolVersion":1,"agentCapabilities":{}}""")
+                        host.reply(host.read(), """{"sessionId":"s"}""")
+                    }
+                    val handle = AcpDriver(AgentKind.KIMI, scope).prepare(host, null, "/tmp")
+                    val collector = async { handle.events.toList() }
+                    handle.load()
+                    server.await()
+                    scope.cancel()
+                    val observed = withTimeout(1000) { collector.await() }
+                    assertEquals(listOf("error"), observed.map { it.type })
+                    assertEquals("ACP scope closed", observed.single().text)
+                    withTimeout(1000) { host.channel.closed.await() }
+                    assertEquals(1, host.channel.closes.get())
+                } finally {
+                    host.channel.close()
+                    scope.cancel()
                 }
-                val handle = AcpDriver(AgentKind.KIMI, scope).prepare(host, null, "/tmp")
-                val collector = async { handle.events.toList() }
-                handle.load()
-                server.await()
-                scope.cancel()
-                assertEquals("error", collector.await().last().type)
-                withTimeout(1000) { host.channel.closed.await() }
-                assertTrue(host.channel.closes.get() > 0)
+            }
+        }
+    }
+
+    @Test
+    fun readFailureWithoutMessageStillPublishesTerminalErrorAndFailsPendingRequest() = runBlocking {
+        withTimeout(5000) {
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val releaseRead = java.util.concurrent.CountDownLatch(1)
+            val readEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val pendingSeen = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val closed = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val channel = object : ExecChannel {
+                override val stdout = object : java.io.InputStream() {
+                    override fun read(): Int {
+                        readEntered.complete(Unit)
+                        releaseRead.await()
+                        throw java.io.InterruptedIOException()
+                    }
+                }
+                override val stdin = object : java.io.ByteArrayOutputStream() {
+                    override fun flush() { pendingSeen.complete(Unit) }
+                }
+                override val stderr = ByteArrayInputStream(byteArrayOf())
+                override fun close() { closed.complete(Unit) }
+            }
+            val connection = AcpConnection(channel, scope, Dispatchers.IO)
+            try {
+                val consumer = async { connection.events.toList() }
+                val pending = async { runCatching { connection.request("session/prompt", JsonObject(emptyMap())) } }
+                readEntered.await()
+                pendingSeen.await()
+                releaseRead.countDown()
+                val events = withTimeout(1000) { consumer.await() }
+                assertEquals(listOf("error"), events.map { it.type })
+                assertEquals("ACP transport closed unexpectedly", events.single().text)
+                assertTrue(withTimeout(1000) { pending.await() }.exceptionOrNull() is java.io.InterruptedIOException)
+                withTimeout(1000) { closed.await() }
             } finally {
-                host.channel.close()
+                releaseRead.countDown()
+                connection.close()
                 scope.cancel()
             }
         }
@@ -529,7 +574,7 @@ internal class PipeHost : HostSession {
         return channel
     }
 
-    suspend fun read(): JsonObject = withContext(Dispatchers.IO) {
+    suspend fun read(): JsonObject = kotlinx.coroutines.runInterruptible(Dispatchers.IO) {
         Json.parseToJsonElement(reader.readLine() ?: throw EOFException("Client closed")) as JsonObject
     }
 

@@ -156,6 +156,7 @@ class ZcodeDriverTest {
                 server.await()
                 assertEquals(identity, records.single().workspaceIdentity)
                 assertEquals(42L, records.single().session.updatedAt)
+                host.channel.awaitClosed()
                 assertTrue(host.channel.closes.get() > 0)
             } finally {
                 host.channel.dispose()
@@ -270,6 +271,7 @@ class ZcodeDriverTest {
                     handle.load()
                     throw AssertionError("Missing consumer should time out")
                 } catch (_: TimeoutCancellationException) {
+                    host.channel.awaitClosed()
                     assertTrue(host.channel.closes.get() > 0)
                 }
             } finally {
@@ -292,6 +294,7 @@ class ZcodeDriverTest {
                         throw AssertionError("Invalid startup should fail")
                     } catch (e: IOException) {
                         assertFalse(e.message.orEmpty().contains("private-invalid-json"))
+                        host.channel.awaitClosed()
                         assertTrue(host.channel.closes.get() > 0)
                     }
                     server.await()
@@ -388,6 +391,8 @@ internal class ZcodePipeChannel : ExecChannel {
     override val stderr = ByteArrayInputStream("private-stderr-body".toByteArray())
     val closes = AtomicInteger()
     val closed = CompletableDeferred<Unit>()
+
+    suspend fun awaitClosed() = withTimeout(5000) { closed.await() }
 
     override fun close() {
         closes.incrementAndGet()

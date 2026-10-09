@@ -357,8 +357,9 @@ internal class AcpConnection(
 
     private fun finish(cause: IOException? = null) {
         if (!stopped.compareAndSet(false, true)) return
-        eventBuffer.close(cause?.message)
-        pending.values.forEach { it.result.completeExceptionally(cause ?: EOFException("ACP channel closed")) }
+        val terminalCause = if (!scope.isActive) IOException("ACP scope closed", cause) else cause
+        eventBuffer.close(terminalCause?.message?.takeIf { it.isNotBlank() } ?: terminalCause?.let { "ACP transport closed unexpectedly" })
+        pending.values.forEach { it.result.completeExceptionally(terminalCause ?: EOFException("ACP channel closed")) }
         pending.clear()
         synchronized(incomingLock) {
             incoming.clear()

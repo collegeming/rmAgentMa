@@ -26,14 +26,17 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
@@ -56,6 +59,7 @@ internal class ZcodeConnection(
     parentScope: CoroutineScope,
     private val ioDispatcher: CoroutineDispatcher,
     private val requestTimeoutMs: Long,
+    private val cleanupTimeoutMs: Long = 1000,
 ) {
     internal data class Incoming(val token: String, val id: JsonPrimitive, val method: String, val params: JsonObject, val bytes: Long)
     private data class Turn(val inputId: String, val result: CompletableDeferred<Unit>)
@@ -63,6 +67,8 @@ internal class ZcodeConnection(
 
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[Job]))
     private val stopped = AtomicBoolean(false)
+    private val cleanupScope = CoroutineScope(ioDispatcher)
+    private val cleanupFinished = CompletableDeferred<Unit>()
     private val ids = AtomicLong()
     private val pending = ConcurrentHashMap<JsonPrimitive, Pending>()
     private val lock = Any()
@@ -86,7 +92,7 @@ internal class ZcodeConnection(
     private var lastSeq = -1L
 
     init {
-        require(requestTimeoutMs > 0)
+        require(requestTimeoutMs > 0 && cleanupTimeoutMs > 0)
         scope.launch(ioDispatcher, start = CoroutineStart.UNDISPATCHED) {
             try {
                 awaitCancellation()
@@ -370,12 +376,20 @@ internal class ZcodeConnection(
         },
     )
 
-    suspend fun close() = withContext(NonCancellable + ioDispatcher) { finish() }
+    suspend fun close() {
+        finish()
+        if (currentCoroutineContext().isActive) {
+            withContext(NonCancellable) {
+                withTimeoutOrNull(cleanupTimeoutMs) { cleanupFinished.await() }
+            }
+        }
+    }
 
     private fun finish(cause: IOException? = null) {
         if (!stopped.compareAndSet(false, true)) return
-        val failure = cause ?: EOFException("ZCode channel closed")
-        buffer.close(cause?.message)
+        val terminalCause = if (!scope.isActive) IOException("ZCode scope closed", cause) else cause
+        val failure = terminalCause ?: EOFException("ZCode channel closed")
+        buffer.close(terminalCause?.message?.takeIf { it.isNotBlank() } ?: terminalCause?.let { "ZCode transport closed unexpectedly" })
         storageReady.completeExceptionally(failure)
         pending.values.forEach { it.result.completeExceptionally(failure) }
         pending.clear()
@@ -385,8 +399,15 @@ internal class ZcodeConnection(
             incoming.clear()
             incomingBytes = 0
         }
-        runCatching { channel.close() }
         scope.cancel()
+        cleanupScope.launch {
+            try {
+                runCatching { withTimeout(cleanupTimeoutMs) { runInterruptible { channel.close() } } }
+            } finally {
+                cleanupFinished.complete(Unit)
+                cleanupScope.cancel()
+            }
+        }
     }
 }
 

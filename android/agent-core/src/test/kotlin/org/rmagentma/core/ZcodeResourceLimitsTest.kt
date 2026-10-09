@@ -68,6 +68,7 @@ class ZcodeResourceLimitsTest {
                 assertFalse(producer.isCompleted)
                 collector.cancelAndJoin()
                 assertTrue(producer.await())
+                host.channel.awaitClosed()
                 assertTrue(host.channel.closes.get() > 0)
             } finally {
                 connection.close()
@@ -90,7 +91,7 @@ class ZcodeResourceLimitsTest {
                     repeat(MAX_INCOMING_REQUESTS + 1) { id ->
                         host.write("""{"id":$id,"method":"interaction/requestPermission","params":{"requestId":"p$id","sessionId":"s","options":[{"optionId":"deny","name":"Deny","response":{"decision":"deny"}}]}}""")
                     }
-                    host.channel.closed.await()
+                    host.channel.awaitClosed()
                     val error = host.read()
                     assertEquals(MAX_INCOMING_REQUESTS.toString(), error.string("id"))
                     assertEquals(-32000, (error["error"] as JsonObject).string("code").toInt())
@@ -105,6 +106,7 @@ class ZcodeResourceLimitsTest {
                 val events = collector.await()
                 assertEquals(MAX_INCOMING_REQUESTS, events.count { it.type == "permission" })
                 assertEquals("error", events.last().type)
+                host.channel.awaitClosed()
                 assertTrue(host.channel.closes.get() > 0)
             } finally {
                 connection.close()
@@ -128,6 +130,7 @@ class ZcodeResourceLimitsTest {
                     try {
                         repeat(MAX_FRAME_BYTES / chunk.size + 1) { host.channel.agentOutput.write(chunk) }
                     } catch (_: IOException) {
+                        host.channel.awaitClosed()
                         assertTrue(host.channel.closes.get() > 0)
                     }
                 }
@@ -135,6 +138,7 @@ class ZcodeResourceLimitsTest {
                     connection.request("runtime/capabilities", buildJsonObject {})
                     throw AssertionError("Oversized frame must fail")
                 } catch (_: IOException) {
+                    host.channel.awaitClosed()
                     assertTrue(host.channel.closes.get() > 0)
                 }
                 server.await()
@@ -258,10 +262,70 @@ class ZcodeResourceLimitsTest {
                 server.await()
                 scope.cancel()
                 collector.await()
+                host.channel.awaitClosed()
                 assertTrue(host.channel.closes.get() > 0)
             } finally {
                 host.channel.dispose()
                 scope.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun blockedPhysicalCloseDoesNotDelayPendingFailureOrTerminalEvents() = runBlocking {
+        withTimeout(10000) {
+            for (cancelScope in listOf(false, true)) {
+                val host = ZcodePipeHost()
+                val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+                val started = CompletableDeferred<Unit>()
+                val finished = CompletableDeferred<Unit>()
+                val release = java.util.concurrent.CountDownLatch(1)
+                val channel = object : ExecChannel by host.channel {
+                    override fun close() {
+                        started.complete(Unit)
+                        while (release.count > 0) {
+                            try {
+                                release.await()
+                            } catch (_: InterruptedException) {
+                                Thread.interrupted()
+                            }
+                        }
+                        host.channel.close()
+                        finished.complete(Unit)
+                    }
+                }
+                val connection = ZcodeConnection(channel, scope, Dispatchers.IO, 1000, cleanupTimeoutMs = 200)
+                try {
+                    val collector = async { connection.events.toList() }
+                    val pending = async {
+                        try {
+                            connection.request("runtime/capabilities", buildJsonObject {})
+                            throw AssertionError("Closed connection must fail its pending request")
+                        } catch (_: IOException) {
+                            Unit
+                        }
+                    }
+                    host.read()
+                    if (cancelScope) scope.cancel() else host.channel.agentOutput.close()
+                    withTimeout(1000) {
+                        started.await()
+                        pending.await()
+                        assertEquals("error", collector.await().last().type)
+                        connection.close()
+                    }
+                    assertFalse(finished.isCompleted)
+                    assertEquals(0, host.channel.closes.get())
+                    release.countDown()
+                    withTimeout(1000) { finished.await() }
+                    host.channel.awaitClosed()
+                    assertEquals(1, host.channel.closes.get())
+                } finally {
+                    release.countDown()
+                    connection.close()
+                    withTimeout(1000) { finished.await() }
+                    host.channel.dispose()
+                    scope.cancel()
+                }
             }
         }
     }

@@ -39,11 +39,15 @@ import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import net.schmizz.sshj.common.SSHException
+import net.schmizz.sshj.common.SecurityUtils
 import org.connectbot.data.HostRepository
 import org.connectbot.data.PubkeyRepository
 import org.connectbot.di.DatabaseModule
 import org.connectbot.di.DispatcherModule
 import org.connectbot.util.AndroidKeyStorePrivateKeyProtector
+import org.connectbot.util.ProviderLoader
+import org.connectbot.util.ProviderLoaderListener
 import org.connectbot.util.SecurePasswordStorage
 import org.junit.Assume.assumeTrue
 import org.junit.Before
@@ -54,10 +58,17 @@ import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.HostSession
 import org.rmagentma.core.ShellCommands
+import java.security.KeyFactory
+import java.security.KeyPairGenerator
 import java.security.MessageDigest
+import java.security.Security
+import java.security.Signature
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import javax.crypto.Cipher
+import javax.crypto.KeyAgreement
+import javax.crypto.Mac
 
 @HiltAndroidTest
 @RunWith(AndroidJUnit4::class)
@@ -124,7 +135,27 @@ class AgentDeviceConversationTest {
         }
         var interactionCollector: kotlinx.coroutines.Job? = null
         var realRepository: AgentRepository? = null
+        var phase = "configuration"
+        var currentAgent = "none"
         try {
+            cryptoEvidence("before_connect")
+            if (args.getString("agentDeviceLoadProvider") == "true") {
+                val initialized = CompletableDeferred<Boolean>()
+                ProviderLoader.load(
+                    context,
+                    object : ProviderLoaderListener {
+                        override fun onProviderLoaderSuccess() {
+                            initialized.complete(true)
+                        }
+                        override fun onProviderLoaderError() {
+                            initialized.complete(false)
+                        }
+                    },
+                )
+                check(withTimeout(15_000) { initialized.await() }) { "Production crypto provider initialization failed" }
+                evidence("productionProviderLoader initialized=true explicitOptIn=true")
+                cryptoEvidence("after_provider_loader")
+            }
             val host = hosts.getHosts().singleOrNull { it.nickname == "ci-test" } ?: error("Seeded ci-test host is required")
             check(
                 host.id == 1L && host.protocol == "ssh" && host.hostname == "127.0.0.1" && host.port == 2222 &&
@@ -167,21 +198,28 @@ class AgentDeviceConversationTest {
                 }
             }
             for (kind in kinds) {
+                currentAgent = kind.wireName
                 val cwd = "/tmp/rmagentma-device-e2e-${UUID.randomUUID()}"
                 val remote = realPool.hostSession(host.id)
                 withTimeout(120_000) {
+                    phase = "ssh_mkdir"
+                    evidence("agent=$currentAgent phase=$phase started=true")
                     shell(remote, "umask 077; mkdir -- ${ShellCommands.quote(cwd)} && printf '%s' RMAGENTMA_DIR_OK", "RMAGENTMA_DIR_OK")
+                    cryptoEvidence("after_connect")
+                    phase = "new_session"
                     real.newSession(host.id, kind, cwd)
                     healthy(real, rejected)
                     val session = real.activeSession.value ?: error("Agent did not become active")
                     check(session.sessionId.isNotBlank() && session.cwd == cwd && session.agent == kind)
                     evidence("agent=${kind.wireName} agentReady=true newSidLength=${session.sessionId.length} newSidHash=${hash(session.sessionId)}")
+                    phase = "first_prompt"
                     sendAndVerify(real, FIRST_PROMPT, FIRST_TOKEN, rejected)
                     val first = fullHistory(real)
                     val firstReply = first.filter { it.type == "content" }.joinToString("") { it.text }
                     check(first.any { it.type == "user" && it.text == FIRST_PROMPT } && firstReply.contains(FIRST_TOKEN)) {
                         "First turn lacks complete user and assistant content"
                     }
+                    phase = "close_and_resume"
                     real.closeConversation()
                     check(real.conversationState.value == AgentConversationState.Closed && real.activeSession.value == null)
                     real.open(session)
@@ -195,6 +233,7 @@ class AgentDeviceConversationTest {
                         "Native replay lacks the complete first user and assistant message"
                     }
                     evidence("agent=${kind.wireName} resumed=true historyUsers=${replay.count { it.type == "user" }} historyAssistant=${replay.count { it.type == "content" }} historyReplyLength=${replayReply.length} historyReplyHash=${hash(replayReply)}")
+                    phase = "second_prompt"
                     sendAndVerify(real, SECOND_PROMPT, SECOND_TOKEN, rejected)
                     healthy(real, rejected)
                     evidence("agent=${kind.wireName} complete=true permissionCount=${permissions.get()} questionCount=${questions.get()} approvalPhase=not_run")
@@ -202,8 +241,10 @@ class AgentDeviceConversationTest {
                 }
             }
         } catch (failure: Throwable) {
-            evidence("complete=false failureType=${failure.javaClass.simpleName} permissionCount=${permissions.get()} questionCount=${questions.get()} approvalPhase=not_run")
-            throw AssertionError("Agent device E2E failed; see redacted evidence (no response or credential body)")
+            val causeChain = safeCauseChain(failure)
+            evidence("agent=$currentAgent phase=$phase complete=false causeChain=$causeChain permissionCount=${permissions.get()} questionCount=${questions.get()} approvalPhase=not_run")
+            cryptoEvidence("failure")
+            throw AssertionError("Agent device E2E failed: phase=$phase causeChain=$causeChain")
         } finally {
             withContext(NonCancellable) {
                 withTimeoutOrNull(10_000) {
@@ -285,6 +326,61 @@ class AgentDeviceConversationTest {
         }
     }
 
+    private fun safeCauseChain(failure: Throwable): String {
+        val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
+        return generateSequence(failure) { it.cause }.takeWhile { seen.add(it) }.take(8).joinToString("<-") { cause ->
+            val type = cause.javaClass.name.replace(Regex("[^A-Za-z0-9_.$]"), "_").take(180)
+            val message = cause.message.orEmpty()
+            val reason = (cause as? SSHException)?.disconnectReason?.name ?: "none"
+            val categories = listOf(
+                "no such algorithm", "no such provider", "algorithm not available", "not supported", "key exchange",
+                "key agreement", "invalid key", "invalid curve", "cannot find", "connection refused", "connection reset",
+                "socket closed", "timed out", "unable to negotiate", "host key", "signature", "authentication",
+                "permission denied", "MAC error", "decrypt", "encrypt", "EOF",
+            ).filter { message.contains(it, ignoreCase = true) }.joinToString("+") { it.replace(' ', '_') }.ifEmpty { "redacted" }
+            val algorithms = CRYPTO_NAMES.filter { name ->
+                Regex("(?<![A-Za-z0-9])${Regex.escape(name)}(?![A-Za-z0-9])", RegexOption.IGNORE_CASE).containsMatchIn(message)
+            }.joinToString(",").ifEmpty { "none" }
+            "$type[sshCode=$reason;category=$categories;crypto=$algorithms;messageLength=${message.length}]"
+        }
+    }
+
+    private fun cryptoEvidence(stage: String) {
+        val providers = Security.getProviders().joinToString(",") { providerName(it.name) }
+        val selected = if (stage in setOf("failure", "after_connect")) {
+            runCatching { SecurityUtils.getSecurityProvider()?.let(::providerName) ?: "platform_default" }
+                .getOrElse { safeCauseChain(it) }
+        } else {
+            "not_queried_before_connect"
+        }
+        evidence("cryptoStage=$stage providers=$providers sshjProvider=$selected")
+        val probes: List<Pair<String, () -> String>> = listOf(
+            "KeyAgreement:ECDH" to { KeyAgreement.getInstance("ECDH").provider.name },
+            "KeyAgreement:X25519" to { KeyAgreement.getInstance("X25519").provider.name },
+            "KeyAgreement:DH" to { KeyAgreement.getInstance("DH").provider.name },
+            "KeyPairGenerator:EC" to { KeyPairGenerator.getInstance("EC").provider.name },
+            "KeyFactory:EC" to { KeyFactory.getInstance("EC").provider.name },
+            "Signature:Ed25519" to { Signature.getInstance("Ed25519").provider.name },
+            "Signature:SHA256withRSA" to { Signature.getInstance("SHA256withRSA").provider.name },
+            "Cipher:AES/CTR/NoPadding" to { Cipher.getInstance("AES/CTR/NoPadding").provider.name },
+            "Mac:HmacSHA256" to { Mac.getInstance("HmacSHA256").provider.name },
+        )
+        probes.forEach { (algorithm, probe) ->
+            val result = runCatching { "provider=${providerName(probe())}" }.getOrElse { "causeChain=${safeCauseChain(it)}" }
+            evidence("cryptoStage=$stage algorithm=$algorithm $result")
+        }
+    }
+
+    private fun providerName(name: String): String = if (
+        name in setOf(
+            "AndroidOpenSSL", "Conscrypt", "BC", "SC", "AndroidKeyStore", "AndroidKeyStoreBCWorkaround", "AndroidNSSP", "Crypto", "HarmonyJSSE", "Ed25519",
+        )
+    ) {
+        name
+    } else {
+        "other_${hash(name)}"
+    }
+
     private fun fingerprint(bytes: ByteArray): String = "SHA256:" + Base64.encodeToString(
         MessageDigest.getInstance("SHA-256").digest(bytes),
         Base64.NO_WRAP or Base64.NO_PADDING,
@@ -300,6 +396,11 @@ class AgentDeviceConversationTest {
     }
 
     private companion object {
+        val CRYPTO_NAMES = listOf(
+            "BC", "SC", "Conscrypt", "AndroidOpenSSL", "ECDH", "EC", "X25519", "XDH", "DH", "DiffieHellman", "RSA", "Ed25519",
+            "SHA256withRSA", "SHA256withECDSA", "SHA-256", "HmacSHA256", "AES/CTR/NoPadding", "AES/GCM/NoPadding",
+            "curve25519-sha256", "curve25519-sha256@libssh.org", "ecdh-sha2-nistp256", "ssh-ed25519", "rsa-sha2-256", "rsa-sha2-512",
+        )
         const val CI_PACKAGE = "org.rmagentma.android.debug.ci"
         const val VERIFIED_FINGERPRINT = "SHA256:PHtyTe2zZp+MZUBbF64v3uHF6jumV1GjSDXG58N1BNA"
         const val FIRST_TOKEN = "RMAGENTMA_E2E_OK"

@@ -31,7 +31,9 @@ gh run download <run-id> -n rmAgentMa-oss-debug-<run-id>-<attempt> -D ci-artifac
 
 远端构建不保证比本地缓存构建更快；它把编译负担移到 runner，并留下可重复检查的构建记录。首次运行仍需下载依赖与原生工具链。构建与校验结果必须分别检查，APK 可下载不表示测试已全部通过。
 
-CI debug 使用 `-PciDebug=true`，包名为 `org.rmagentma.android.debug.ci`，与本地 `.debug` 包并存，不覆盖现有用户数据。runner 默认 debug 签名不用于正式发布，后续覆盖安装仍须比较证书；不能为绕过签名错误卸载应用或清数据。发布签名需单独配置，不上传本机私钥或用户数据库。
+CI debug 使用 `-PciDebug=true`，包名为 `org.rmagentma.android.debug.ci`，与本地 `.debug` 包并存，不覆盖现有用户数据。runner 默认 debug 证书每次运行可能不同，不能保证两次 artifact 可覆盖安装；已有数据时必须保留实例，使用固定的自管测试证书在本机重签 app 与 test APK，并保留原 artifact 与来源校验记录，或单独配置稳定签名。重签包不是原 CI 签名交付，不能混淆其 SHA-256。发布签名需单独配置，不上传本机私钥或用户数据库。
+
+artifact 中的 `rmAgentMa-device-tests.apk` 用于显式启用的真机验收。`AgentDeviceSeedTest` 在设备内生成测试密钥，经正常 Repository 和 Keystore 保存，仅输出公钥；不开启 `seedAgentHost=true` 时跳过。`AgentDeviceConversationTest` 的远端对话需要 `agentDeviceE2e=true` 和已人工核验的主机指纹，在隔离目录运行。两者都不得通过会清除应用数据的 Orchestrator 执行，也不进入生产 APK。
 
 ### 本地构建
 
