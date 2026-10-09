@@ -128,7 +128,7 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard.cfg", "proguard-debug.cfg")
             testProguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard.cfg", "proguard-tests.cfg")
 
-            applicationIdSuffix = ".debug"
+            applicationIdSuffix = if (providers.gradleProperty("ciDebug").orNull == "true") ".debug.ci" else ".debug"
             enableAndroidTestCoverage = true
         }
     }

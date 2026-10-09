@@ -44,13 +44,18 @@ jobs:
           cache-read-only: ${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}
           dependency-graph: disabled
 
-      - name: Set up Android SDK and native toolchain
+      - name: Set up Android SDK tools
+        id: sdk-tools
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         with:
-          packages: 'platform-tools platforms;android-37 ndk;28.2.13676358 cmake;3.22.1'
+          packages: platform-tools
+
+      - name: Install official Android SDK and native toolchain
+        id: sdk
+        run: bash ../.github/scripts/install-android-sdk.sh
 
       - name: Build OSS debug APK
-        run: ./gradlew --no-daemon --stacktrace --profile :app:assembleOssDebug
+        run: ./gradlew --no-daemon --stacktrace --profile -PciDebug=true :app:assembleOssDebug
 
       - name: Package APK and build metadata
         env:
@@ -105,6 +110,7 @@ jobs:
           path: |
             android/**/build/reports/
             android/**/build/test-results/
+            android/ci-reports/
           if-no-files-found: warn
           retention-days: 14
 
@@ -133,18 +139,18 @@ jobs:
           cache-read-only: ${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}
           dependency-graph: disabled
 
-      - name: Set up Android SDK and native toolchain
+      - name: Set up Android SDK tools
+        id: sdk-tools
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         with:
-          packages: 'platform-tools platforms;android-37 ndk;28.2.13676358 cmake;3.22.1'
+          packages: platform-tools
 
-      - name: Run scanner Python unit tests
-        run: |
-          mkdir -p ci-reports
-          python3 -m unittest discover -s agent-core/src/test/python -p 'test_*.py' -v 2>&1 | tee ci-reports/python-unittest.txt
+      - name: Install official Android SDK and native toolchain
+        id: sdk
+        run: bash ../.github/scripts/install-android-sdk.sh
 
       - name: Run formatting, lint and JVM checks
-        if: ${{ !cancelled() }}
+        if: ${{ success() && steps.sdk-tools.outcome == 'success' && steps.sdk.outcome == 'success' }}
         run: ./gradlew --no-daemon --stacktrace --profile --continue spotlessCheck lint check test
 
       - name: Upload verification reports
@@ -155,6 +161,60 @@ jobs:
           path: |
             android/**/build/reports/
             android/**/build/test-results/
+            android/ci-reports/
+          if-no-files-found: warn
+          retention-days: 14
+
+  core-tests:
+    name: SDK-independent core tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout history and tags
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Run scanner Python unit tests
+        run: |
+          mkdir -p ci-reports
+          python3 -m unittest discover -s agent-core/src/test/python -p 'test_*.py' -v 2>&1 | tee ci-reports/python-unittest.txt
+
+      - name: Set up Java 17
+        id: java
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle and validate wrapper
+        id: gradle
+        if: ${{ !cancelled() && steps.java.outcome == 'success' }}
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic
+          cache-read-only: ${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}
+          dependency-graph: disabled
+
+      - name: Run SDK-independent JVM core tests
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && steps.java.outcome == 'success' && steps.gradle.outcome == 'success' }}
+        run: |
+          mkdir -p ci-reports
+          ./gradlew --no-daemon --no-configuration-cache --configure-on-demand --stacktrace --profile :agent-core:test 2>&1 | tee ci-reports/core-gradle.txt
+
+      - name: Upload core test reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-core-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            android/agent-core/build/reports/
+            android/agent-core/build/test-results/
+            android/build/reports/
             android/ci-reports/
           if-no-files-found: warn
           retention-days: 14
