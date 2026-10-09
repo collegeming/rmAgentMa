@@ -71,6 +71,7 @@ class ZcodeResourceLimitsTest {
                 assertTrue(host.channel.closes.get() > 0)
             } finally {
                 connection.close()
+                host.channel.dispose()
                 scope.cancel()
             }
         }
@@ -89,8 +90,16 @@ class ZcodeResourceLimitsTest {
                     repeat(MAX_INCOMING_REQUESTS + 1) { id ->
                         host.write("""{"id":$id,"method":"interaction/requestPermission","params":{"requestId":"p$id","sessionId":"s","options":[{"optionId":"deny","name":"Deny","response":{"decision":"deny"}}]}}""")
                     }
+                    host.channel.closed.await()
                     val error = host.read()
+                    assertEquals(MAX_INCOMING_REQUESTS.toString(), error.string("id"))
                     assertEquals(-32000, (error["error"] as JsonObject).string("code").toInt())
+                    try {
+                        host.read()
+                        throw AssertionError("Budget rejection must close the protocol after its error response")
+                    } catch (_: java.io.EOFException) {
+                        assertTrue(host.channel.closed.isCompleted)
+                    }
                 }
                 server.await()
                 val events = collector.await()
@@ -99,6 +108,7 @@ class ZcodeResourceLimitsTest {
                 assertTrue(host.channel.closes.get() > 0)
             } finally {
                 connection.close()
+                host.channel.dispose()
                 scope.cancel()
             }
         }
@@ -106,10 +116,10 @@ class ZcodeResourceLimitsTest {
 
     @Test
     fun oversizedFrameClosesPendingRequestAndDoesNotRetainFrame() = runBlocking {
-        withTimeout(10000) {
+        withTimeout(40000) {
             val host = ZcodePipeHost()
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-            val connection = ZcodeConnection(host.channel, scope, Dispatchers.IO, 5000)
+            val connection = ZcodeConnection(host.channel, scope, Dispatchers.IO, 30000)
             try {
                 val collector = async { connection.events.toList() }
                 val server = async(Dispatchers.IO) {
@@ -131,6 +141,7 @@ class ZcodeResourceLimitsTest {
                 assertTrue(collector.await().last().text.contains("byte limit"))
             } finally {
                 connection.close()
+                host.channel.dispose()
                 scope.cancel()
             }
         }
@@ -170,7 +181,7 @@ class ZcodeResourceLimitsTest {
                 handle.close()
                 collector.await()
             } finally {
-                host.channel.close()
+                host.channel.dispose()
                 scope.cancel()
             }
         }
@@ -206,6 +217,7 @@ class ZcodeResourceLimitsTest {
                 collector.await()
             } finally {
                 connection.close()
+                host.channel.dispose()
                 scope.cancel()
             }
         }
@@ -248,7 +260,7 @@ class ZcodeResourceLimitsTest {
                 collector.await()
                 assertTrue(host.channel.closes.get() > 0)
             } finally {
-                host.channel.close()
+                host.channel.dispose()
                 scope.cancel()
             }
         }
@@ -269,6 +281,7 @@ class ZcodeResourceLimitsTest {
                 }
             } finally {
                 connection.close()
+                host.channel.dispose()
                 scope.cancel()
             }
         }

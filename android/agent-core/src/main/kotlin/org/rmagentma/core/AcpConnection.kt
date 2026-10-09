@@ -26,11 +26,15 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -52,12 +56,15 @@ internal class AcpConnection(
     private val channel: ExecChannel,
     parentScope: CoroutineScope,
     private val ioDispatcher: CoroutineDispatcher,
+    private val cleanupTimeoutMillis: Long = 1000,
 ) {
     private data class Pending(val method: String, val result: CompletableDeferred<JsonObject>)
     internal data class Incoming(val id: JsonPrimitive, val method: String, val params: JsonObject, val bytes: Long)
 
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[Job]))
     private val stopped = AtomicBoolean(false)
+    private val cleanupScope = CoroutineScope(ioDispatcher)
+    private val cleanupFinished = CompletableDeferred<Unit>()
     private val ids = AtomicLong()
     private val pending = ConcurrentHashMap<JsonPrimitive, Pending>()
     private val incomingLock = Any()
@@ -339,12 +346,18 @@ internal class AcpConnection(
         },
     )
 
-    suspend fun close() = withContext(NonCancellable + ioDispatcher) { finish() }
+    suspend fun close() {
+        finish()
+        if (currentCoroutineContext().isActive) {
+            withContext(NonCancellable) {
+                withTimeoutOrNull(cleanupTimeoutMillis) { cleanupFinished.await() }
+            }
+        }
+    }
 
     private fun finish(cause: IOException? = null) {
         if (!stopped.compareAndSet(false, true)) return
         eventBuffer.close(cause?.message)
-        runCatching { channel.close() }
         pending.values.forEach { it.result.completeExceptionally(cause ?: EOFException("ACP channel closed")) }
         pending.clear()
         synchronized(incomingLock) {
@@ -352,6 +365,14 @@ internal class AcpConnection(
             incomingBytes = 0
         }
         scope.cancel()
+        cleanupScope.launch {
+            try {
+                runCatching { withTimeout(cleanupTimeoutMillis) { runInterruptible { channel.close() } } }
+            } finally {
+                cleanupFinished.complete(Unit)
+                cleanupScope.cancel()
+            }
+        }
     }
 
     private companion object {

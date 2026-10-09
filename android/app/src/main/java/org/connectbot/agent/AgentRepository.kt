@@ -600,8 +600,6 @@ class AgentRepository @Inject constructor(
 
     private fun report(error: Exception, prefix: String = "") {
         val message = listOf(prefix, describe(error)).filter { it.isNotBlank() }.joinToString(": ")
-        // Log the full chain: the UI shows a short message, but the cause is what makes
-        // remote transport failures diagnosable.
         Timber.w(error, "Agent operation failed: %s", message)
         mutableErrors.update { (it + message).takeLast(100) }
     }

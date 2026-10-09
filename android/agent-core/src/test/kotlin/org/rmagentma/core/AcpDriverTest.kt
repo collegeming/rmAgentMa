@@ -97,6 +97,7 @@ class AcpDriverTest {
                 assertEquals(listOf("user", "error", "permission", "question", "unknown", "content", "complete", "error"), events.map { it.type })
                 assertEquals("history", events.first().text)
                 assertTrue(events.none { it.text.contains("private-body") })
+                withTimeout(1000) { host.channel.closed.await() }
                 assertTrue(host.channel.closes.get() > 0)
                 handle.close()
             } finally {
@@ -136,6 +137,155 @@ class AcpDriverTest {
                 server.await()
                 handle.close()
             } finally {
+                host.channel.close()
+                scope.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun eofPublishesTerminalEventAndFailsPendingRequestWhileTransportCloseBlocks() = runBlocking {
+        withTimeout(10000) {
+            val host = PipeHost()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val closeEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val releaseClose = java.util.concurrent.CountDownLatch(1)
+            val transportClosed = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val channel = object : ExecChannel {
+                override val stdout = host.channel.stdout
+                override val stdin = host.channel.stdin
+                override val stderr = host.channel.stderr
+
+                override fun close() {
+                    closeEntered.complete(Unit)
+                    check(releaseClose.await(5, java.util.concurrent.TimeUnit.SECONDS)) { "Close was not released" }
+                    host.channel.close()
+                    transportClosed.complete(Unit)
+                }
+            }
+            val connection = AcpConnection(channel, scope, Dispatchers.IO)
+            try {
+                val collector = async { connection.events.toList() }
+                val pending = async { runCatching { connection.request("session/prompt", JsonObject(emptyMap())) } }
+                host.read()
+                connection.emit(AgentEvent("content", text = "last content"))
+                connection.emit(AgentEvent("complete", status = "end_turn"))
+                host.end()
+                closeEntered.await()
+                val events = withTimeout(500) { collector.await() }
+                assertTrue(withTimeout(500) { pending.await() }.exceptionOrNull() is EOFException)
+                assertFalse(transportClosed.isCompleted)
+                val closing = async { connection.close() }
+                assertEquals(null, kotlinx.coroutines.withTimeoutOrNull(100) { closing.await() })
+                assertEquals(listOf("content", "complete", "error"), events.map { it.type })
+                assertEquals("ACP stdout reached EOF", events.last().text)
+                releaseClose.countDown()
+                withTimeout(1000) { transportClosed.await() }
+                closing.await()
+                assertEquals(1, host.channel.closes.get())
+            } finally {
+                releaseClose.countDown()
+                connection.close()
+                host.channel.close()
+                scope.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun cleanupTimeoutInterruptsTransportCloseAndBoundsExplicitClose() = runBlocking {
+        withTimeout(5000) {
+            val host = PipeHost()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val closeEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val cleanupExited = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val interrupted = java.util.concurrent.atomic.AtomicBoolean(false)
+            val channel = object : ExecChannel {
+                override val stdout = host.channel.stdout
+                override val stdin = host.channel.stdin
+                override val stderr = host.channel.stderr
+
+                override fun close() {
+                    closeEntered.complete(Unit)
+                    try {
+                        java.util.concurrent.CountDownLatch(1).await()
+                    } catch (_: InterruptedException) {
+                        interrupted.set(true)
+                    } finally {
+                        host.channel.close()
+                        cleanupExited.complete(Unit)
+                    }
+                }
+            }
+            val connection = AcpConnection(channel, scope, Dispatchers.IO, cleanupTimeoutMillis = 100)
+            try {
+                val collector = async { connection.events.toList() }
+                val pending = async { runCatching { connection.request("session/prompt", JsonObject(emptyMap())) } }
+                host.read()
+                val closing = async { connection.close() }
+                closeEntered.await()
+                assertTrue(withTimeout(500) { pending.await() }.exceptionOrNull() is EOFException)
+                withTimeout(500) { collector.await() }
+                withTimeout(1000) { closing.await() }
+                withTimeout(1000) { cleanupExited.await() }
+                assertTrue(interrupted.get())
+                assertEquals(1, host.channel.closes.get())
+                connection.close()
+                assertEquals(1, host.channel.closes.get())
+            } finally {
+                host.channel.close()
+                scope.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun cancelledLoadDoesNotWaitForBlockedTransportCleanup() = runBlocking {
+        withTimeout(10000) {
+            val host = PipeHost()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val closeEntered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val releaseClose = java.util.concurrent.CountDownLatch(1)
+            val cleanupExited = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val wrapped = object : HostSession {
+                override val hostId = host.hostId
+                override suspend fun exec(command: String): ExecChannel {
+                    host.exec(command)
+                    return object : ExecChannel {
+                        override val stdout = host.channel.stdout
+                        override val stdin = host.channel.stdin
+                        override val stderr = host.channel.stderr
+
+                        override fun close() {
+                            closeEntered.complete(Unit)
+                            try {
+                                releaseClose.await()
+                            } finally {
+                                host.channel.close()
+                                cleanupExited.complete(Unit)
+                            }
+                        }
+                    }
+                }
+            }
+            try {
+                val server = async(Dispatchers.IO) {
+                    host.reply(host.read(), """{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}""")
+                    assertEquals("session/load", host.read().string("method"))
+                }
+                val handle = AcpDriver(AgentKind.KIMI, scope).prepare(wrapped, "s", "/tmp")
+                val collector = async { handle.events.toList() }
+                val loading = async { handle.load() }
+                server.await()
+                loading.cancel()
+                withTimeout(500) { loading.join() }
+                closeEntered.await()
+                withTimeout(500) { collector.await() }
+                assertFalse(cleanupExited.isCompleted)
+                releaseClose.countDown()
+                withTimeout(1000) { cleanupExited.await() }
+            } finally {
+                releaseClose.countDown()
                 host.channel.close()
                 scope.cancel()
             }
@@ -236,6 +386,7 @@ class AcpDriverTest {
                 server.await()
                 scope.cancel()
                 assertEquals("error", collector.await().last().type)
+                withTimeout(1000) { host.channel.closed.await() }
                 assertTrue(host.channel.closes.get() > 0)
             } finally {
                 host.channel.close()
@@ -419,9 +570,11 @@ internal class PipeChannel : ExecChannel {
     override val stdin = PipedOutputStream(agentInput)
     override val stderr = ByteArrayInputStream("private-stderr-body".toByteArray())
     val closes = AtomicInteger()
+    val closed = kotlinx.coroutines.CompletableDeferred<Unit>()
 
     override fun close() {
         closes.incrementAndGet()
         listOf(stdout, stdin, stderr, agentOutput, agentInput).forEach { runCatching { it.close() } }
+        closed.complete(Unit)
     }
 }

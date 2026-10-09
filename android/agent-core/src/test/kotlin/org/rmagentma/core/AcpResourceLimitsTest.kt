@@ -139,6 +139,7 @@ class AcpResourceLimitsTest {
                 load.cancel()
                 load.join()
                 server.await()
+                withTimeout(1000) { host.channel.closed.await() }
                 assertTrue(host.channel.closes.get() > 0)
             } finally {
                 host.channel.close()

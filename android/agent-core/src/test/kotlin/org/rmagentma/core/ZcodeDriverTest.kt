@@ -38,8 +38,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
 import java.io.EOFException
 import java.io.IOException
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
+import java.util.concurrent.atomic.AtomicInteger
 
 class ZcodeDriverTest {
     @Test
@@ -127,7 +131,7 @@ class ZcodeDriverTest {
                 assertTrue(host.command.contains("ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"))
                 assertFalse(host.command.contains("--stdio"))
             } finally {
-                host.channel.close()
+                host.channel.dispose()
                 scope.cancel()
             }
         }
@@ -154,7 +158,7 @@ class ZcodeDriverTest {
                 assertEquals(42L, records.single().session.updatedAt)
                 assertTrue(host.channel.closes.get() > 0)
             } finally {
-                host.channel.close()
+                host.channel.dispose()
                 scope.cancel()
             }
             val resumeHost = ZcodePipeHost()
@@ -174,7 +178,7 @@ class ZcodeDriverTest {
                 handle.close()
                 collector.await()
             } finally {
-                resumeHost.channel.close()
+                resumeHost.channel.dispose()
                 resumeScope.cancel()
             }
         }
@@ -201,7 +205,7 @@ class ZcodeDriverTest {
                     Unit
                 }
             } finally {
-                host.channel.close()
+                host.channel.dispose()
                 scope.cancel()
             }
         }
@@ -247,7 +251,7 @@ class ZcodeDriverTest {
                 assertTrue(prompt.await())
                 assertEquals("error", collector.await().last().type)
             } finally {
-                host.channel.close()
+                host.channel.dispose()
                 scope.cancel()
             }
         }
@@ -269,7 +273,7 @@ class ZcodeDriverTest {
                     assertTrue(host.channel.closes.get() > 0)
                 }
             } finally {
-                host.channel.close()
+                host.channel.dispose()
                 scope.cancel()
             }
         }
@@ -292,7 +296,7 @@ class ZcodeDriverTest {
                     }
                     server.await()
                 } finally {
-                    host.channel.close()
+                    host.channel.dispose()
                     scope.cancel()
                 }
             }
@@ -316,7 +320,7 @@ class ZcodeDriverTest {
 }
 
 internal class ZcodePipeHost : HostSession {
-    val channel = PipeChannel()
+    val channel = ZcodePipeChannel()
     override val hostId = 42L
     var command = ""
     private val reader = NdjsonReader(channel.agentInput)
@@ -374,4 +378,25 @@ internal class ZcodePipeHost : HostSession {
             )
         }.toString(),
     )
+}
+
+internal class ZcodePipeChannel : ExecChannel {
+    override val stdout = PipedInputStream(65536)
+    val agentOutput = PipedOutputStream(stdout)
+    val agentInput = PipedInputStream(65536)
+    override val stdin = PipedOutputStream(agentInput)
+    override val stderr = ByteArrayInputStream("private-stderr-body".toByteArray())
+    val closes = AtomicInteger()
+    val closed = CompletableDeferred<Unit>()
+
+    override fun close() {
+        closes.incrementAndGet()
+        listOf(stdout, stdin, stderr).forEach { runCatching { it.close() } }
+        closed.complete(Unit)
+    }
+
+    fun dispose() {
+        close()
+        listOf(agentInput, agentOutput).forEach { runCatching { it.close() } }
+    }
 }
