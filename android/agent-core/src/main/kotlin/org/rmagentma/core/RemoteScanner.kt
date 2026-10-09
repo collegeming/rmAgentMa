@@ -67,13 +67,14 @@ class RemoteScanner(private val ioDispatcher: CoroutineDispatcher = Dispatchers.
                             runCatching { channel.close() }
                         }
                     }
+                    val shuttingDown = java.util.concurrent.atomic.AtomicBoolean(false)
                     val stderr = launch {
                         try {
                             runInterruptible { drainStderr(channel.stderr) }
                         } catch (e: CancellationException) {
                             throw e
                         } catch (_: Exception) {
-                            errors += "Remote scanner stderr stream closed unexpectedly"
+                            if (!shuttingDown.get()) errors += "Remote scanner stderr stream closed unexpectedly"
                         }
                     }
                     try {
@@ -99,6 +100,7 @@ class RemoteScanner(private val ioDispatcher: CoroutineDispatcher = Dispatchers.
                                 val agent = AgentKind.fromWire(row.string("agent"))
                                 errors += when (row.string("category")) {
                                     "python_missing" -> "Remote scanner requires python3 on the remote host"
+                                    "base64_missing" -> "Remote scanner requires base64 on the remote host"
                                     "scanner_exit_failed" -> "Remote scanner exited unsuccessfully; cached sessions must be retained"
                                     else -> "${agent?.wireName ?: "scanner"}: remote scan failed"
                                 }
@@ -124,16 +126,17 @@ class RemoteScanner(private val ioDispatcher: CoroutineDispatcher = Dispatchers.
                             )
                         }
                     } finally {
+                        shuttingDown.set(true)
+                        stderr.cancel()
                         runCatching { channel.close() }
                         closer.cancel()
-                        stderr.cancel()
                     }
                 }
             }
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
-            errors += "Remote scanner transport failed"
+        } catch (e: Exception) {
+            errors += "Remote scanner transport failed: ${e.javaClass.simpleName}"
         }
         return ScanResult(sessions.distinctBy { it.agent to it.sessionId }, errors.distinct())
     }

@@ -38,30 +38,36 @@ import java.io.IOException
 
 class AcpResourceLimitsTest {
     @Test
-    fun eventCountLimitNeverBlocksLoadResponse() = runBlocking {
-        withTimeout(15000) {
+    fun replaysTwentyFiveMegabytesAndMoreThan4096EventsInOrderBeforeLoadReturns() = runBlocking {
+        withTimeout(30000) {
             val host = PipeHost()
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val count = MAX_BUFFERED_EVENTS + 1000
+            val text = "x".repeat(5200)
             try {
                 val server = async(Dispatchers.IO) {
                     host.reply(host.read(), """{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}""")
-                    host.read()
-                    try {
-                        repeat(MAX_BUFFERED_EVENTS + 1) {
-                            host.update("""{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"x"}}""")
-                        }
-                    } catch (_: IOException) {
-                        // The client closes the channel on overflow before the load response.
+                    val load = host.read()
+                    repeat(count) { sequence ->
+                        host.update("""{"sessionUpdate":"agent_message_chunk","messageId":"$sequence","content":{"type":"text","text":"$text"}}""")
+                    }
+                    host.reply(load, "{}")
+                }
+                val handle = AcpDriver(AgentKind.KIMI, scope).prepare(host, "s", "/tmp")
+                var consumed = 0
+                val collector = async {
+                    handle.events.collect { event ->
+                        assertEquals(consumed.toString(), event.id)
+                        assertEquals(text, event.text)
+                        consumed++
                     }
                 }
-                try {
-                    AcpDriver(AgentKind.KIMI, scope).open(host, "s", "/tmp")
-                    throw AssertionError("History overflow should fail open")
-                } catch (e: AcpBufferOverflowException) {
-                    assertTrue(e.message!!.contains("terminal fallback"))
-                }
+                handle.load()
+                assertEquals(count, consumed)
+                assertTrue(count.toLong() * text.length > 25L * 1024 * 1024)
                 server.await()
-                assertTrue(host.channel.closes.get() > 0)
+                handle.close()
+                collector.await()
             } finally {
                 host.channel.close()
                 scope.cancel()
@@ -70,30 +76,18 @@ class AcpResourceLimitsTest {
     }
 
     @Test
-    fun eventByteOverflowClosesPendingAndProvidesOneTerminalDiagnostic() = runBlocking {
-        withTimeout(15000) {
-            val host = PipeHost()
-            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-            val connection = AcpConnection(host.channel, scope, Dispatchers.IO)
-            try {
-                val request = async { runCatching { connection.request("session/load", JsonObject(emptyMap())) } }
-                host.read()
-                connection.emit(AgentEvent("content", text = "x".repeat(MAX_BUFFERED_EVENT_BYTES)))
-                assertTrue(request.await().exceptionOrNull() is AcpBufferOverflowException)
-                val events = connection.events.toList()
-                assertEquals(1, events.size)
-                assertEquals("error", events.single().type)
-                assertTrue(events.single().text.contains("terminal fallback"))
-                assertTrue(host.channel.closes.get() > 0)
-            } finally {
-                connection.close()
-                scope.cancel()
-            }
+    fun oversizedEventFailsExplicitlyInsteadOfDisappearing() = runBlocking {
+        val buffer = BoundedEventBuffer(maxBytes = 1024)
+        try {
+            buffer.offer(AgentEvent("content", text = "x".repeat(1024)))
+            throw AssertionError("Oversized event must fail")
+        } catch (e: IOException) {
+            assertTrue(e.message!!.contains("budget"))
         }
     }
 
     @Test
-    fun activeSlowConsumerStillCountsItsInFlightEvent() = runBlocking {
+    fun activeSlowConsumerBackpressuresWithoutEvictingItsInFlightEvent() = runBlocking {
         withTimeout(10000) {
             val buffer = BoundedEventBuffer(maxBytes = 4096, maxEvents = 2)
             val started = CompletableDeferred<Unit>()
@@ -110,26 +104,123 @@ class AcpResourceLimitsTest {
                 }
             }
             started.await()
-            assertTrue(buffer.offer(AgentEvent("content", text = "second")))
-            assertFalse(buffer.offer(AgentEvent("content", text = "third")))
-            buffer.close("buffer full", discard = true)
+            assertTrue(buffer.offer(AgentEvent("permission", id = "approval", text = "second")))
+            val producer = async { buffer.offer(AgentEvent("user", text = "third")) }
+            kotlinx.coroutines.yield()
+            assertFalse(producer.isCompleted)
             release.complete(Unit)
+            assertTrue(producer.await())
+            buffer.barrier()
+            buffer.close()
             consumer.await()
-            assertEquals(listOf("first", "buffer full"), collected.map { it.text })
+            assertEquals(listOf("first", "second", "third"), collected.map { it.text })
         }
     }
 
     @Test
-    fun consumedEventsReleaseByteBudget() = runBlocking {
+    fun waitingProducerAndWaitingLoadAreCancellable() = runBlocking {
         withTimeout(10000) {
-            val buffer = BoundedEventBuffer(maxBytes = 1200, maxEvents = 1)
-            val first = AgentEvent("content", text = "é".repeat(50))
-            assertTrue(buffer.offer(first))
-            assertFalse(buffer.offer(AgentEvent("content", text = "x")))
-            val consumer = async { buffer.events.toList() }
-            while (!buffer.offer(first)) kotlinx.coroutines.yield()
-            buffer.close()
-            assertEquals(listOf(first, first), consumer.await())
+            val buffer = BoundedEventBuffer(maxBytes = 4096, maxEvents = 1)
+            buffer.offer(AgentEvent("user", text = "first"))
+            val blocked = async { buffer.offer(AgentEvent("question", id = "q")) }
+            kotlinx.coroutines.yield()
+            assertFalse(blocked.isCompleted)
+            blocked.cancel()
+            blocked.join()
+            val host = PipeHost()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            try {
+                val server = async(Dispatchers.IO) {
+                    host.reply(host.read(), """{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}""")
+                }
+                val handle = AcpDriver(AgentKind.KIMI, scope).prepare(host, "s", "/tmp")
+                val load = async { handle.load() }
+                kotlinx.coroutines.yield()
+                load.cancel()
+                load.join()
+                server.await()
+                assertTrue(host.channel.closes.get() > 0)
+            } finally {
+                host.channel.close()
+                scope.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun cancelDuringReplayClosesTransportWithoutWaitingForLoadResponse() = runBlocking {
+        withTimeout(10000) {
+            val host = PipeHost()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val seen = CompletableDeferred<Unit>()
+            try {
+                val server = async(Dispatchers.IO) {
+                    host.reply(host.read(), """{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}""")
+                    host.read()
+                    host.update("""{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"history"}}""")
+                }
+                val handle = AcpDriver(AgentKind.KIMI, scope).prepare(host, "s", "/tmp")
+                val collector = async { handle.events.collect { if (it.type == "content") seen.complete(Unit) } }
+                val loading = async { runCatching { handle.load() } }
+                seen.await()
+                handle.cancel()
+                assertTrue(loading.await().isFailure)
+                collector.await()
+                server.await()
+                assertTrue(host.channel.closes.get() > 0)
+            } finally {
+                host.channel.close()
+                scope.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun permissionDuringReplayCanBeAnsweredBeforeTheLoadResponseAndBarrierWaitsForConsumer() = runBlocking {
+        withTimeout(10000) {
+            val host = PipeHost()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val historySeen = CompletableDeferred<Unit>()
+            val releaseHistory = CompletableDeferred<Unit>()
+            try {
+                val server = async(Dispatchers.IO) {
+                    host.reply(host.read(), """{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}""")
+                    val load = host.read()
+                    host.write("""{"jsonrpc":"2.0","id":"p","method":"session/request_permission","params":{"sessionId":"s","options":[{"optionId":"allow","name":"Allow"}]}}""" + "\n")
+                    val response = host.read()["result"] as JsonObject
+                    assertEquals("allow", (response["outcome"] as JsonObject).string("optionId"))
+                    host.update("""{"sessionUpdate":"user_message_chunk","content":{"type":"image"}}""")
+                    host.reply(load, "{}")
+                }
+                val handle = AcpDriver(AgentKind.KIMI, scope).prepare(host, "s", "/tmp")
+                val collector = async {
+                    handle.events.collect { event ->
+                        if (event.type == "permission") handle.respondPermission(event.id, "allow")
+                        if (event.type == "user") {
+                            assertEquals("[image]", event.text)
+                            historySeen.complete(Unit)
+                            releaseHistory.await()
+                        }
+                    }
+                }
+                val loading = async { handle.load() }
+                historySeen.await()
+                assertFalse(loading.isCompleted)
+                releaseHistory.complete(Unit)
+                loading.await()
+                server.await()
+                handle.close()
+                collector.await()
+                try {
+                    handle.send("closed")
+                    throw AssertionError("Closed session must reject send")
+                } catch (_: IllegalStateException) {
+                    // expected
+                }
+            } finally {
+                host.channel.close()
+                scope.cancel()
+            }
         }
     }
 
@@ -170,8 +261,9 @@ class AcpResourceLimitsTest {
                     assertTrue(failure!!.message!!.contains("server request buffer"))
                     server.await()
                     val events = connection.events.toList()
-                    assertEquals(1, events.size)
-                    assertEquals("error", events.single().type)
+                    assertEquals(if (oversized) 1 else MAX_INCOMING_REQUESTS + 1, events.size)
+                    assertEquals("error", events.last().type)
+                    assertTrue(events.dropLast(1).all { it.type == "permission" })
                     try {
                         connection.incoming("0", "session/request_permission")
                         throw AssertionError("Incoming requests must be cleared")

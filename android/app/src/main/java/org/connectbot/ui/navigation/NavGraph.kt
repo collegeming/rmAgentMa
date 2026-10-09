@@ -57,7 +57,7 @@ fun ConnectBotNavHost(
     navController: NavHostController,
     onNavigateToConsole: (Host) -> Unit,
     modifier: Modifier = Modifier,
-    startDestination: String = NavDestinations.HOST_LIST,
+    startDestination: String = NavDestinations.AGENTS,
     makingShortcut: Boolean = false,
     onSelectShortcut: (Host, String?, IconStyle) -> Unit = { _, _, _ -> },
 ) {
@@ -113,6 +113,9 @@ fun ConnectBotNavHost(
         ) {
             AgentScreen(
                 onNavigateBack = { navController.safePopBackStack() },
+                onSettings = { navController.navigateSafely(NavDestinations.SETTINGS) },
+                onKeys = { navController.navigateSafely(NavDestinations.PUBKEY_LIST) },
+                onHosts = { navController.navigateSafely(NavDestinations.HOST_LIST) },
                 onOpenTerminal = { host, command ->
                     terminalLaunch = command?.let { host.id to it }
                     onNavigateToConsole(host)

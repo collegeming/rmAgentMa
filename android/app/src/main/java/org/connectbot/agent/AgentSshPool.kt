@@ -35,7 +35,6 @@ import kotlinx.coroutines.withContext
 import net.schmizz.keepalive.KeepAliveProvider
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
-import net.schmizz.sshj.common.Buffer
 import net.schmizz.sshj.common.SecurityUtils
 import net.schmizz.sshj.connection.channel.direct.DirectConnection
 import net.schmizz.sshj.transport.verification.HostKeyVerifier
@@ -47,6 +46,7 @@ import org.connectbot.data.entity.Host
 import org.connectbot.di.IoDispatcher
 import org.connectbot.util.PubkeyUtils
 import org.connectbot.util.SecurePasswordStorage
+import org.connectbot.util.encodeSshHostKey
 import org.rmagentma.core.ExecChannel
 import org.rmagentma.core.HostSession
 import java.io.IOException
@@ -180,9 +180,11 @@ class AgentSshPool @Inject constructor(
                 }
 
                 override fun verify(hostname: String, port: Int, key: PublicKey): Boolean = runBlocking(parent?.takeIf { it.isActive } ?: kotlin.coroutines.EmptyCoroutineContext) {
-                    val wire = Buffer.PlainBuffer().putPublicKey(key).compactData
+                    val encoded = encodeSshHostKey(key)
+                        ?: throw AgentConnectionNeedsUser("Unsupported SSH host key type: ${key.algorithm}")
+                    val wire = encoded.wire
                     val known = hosts.getKnownHostsForHost(host.id)
-                    val algorithm = Buffer.PlainBuffer(wire).readString()
+                    val algorithm = encoded.algorithm
                     if (known.isNotEmpty()) {
                         if (trustedAgentHostKey(known, algorithm, wire)) return@runBlocking true
                         reconnect.block(host.id)
@@ -198,7 +200,7 @@ class AgentSshPool @Inject constructor(
                         reconnect.block(host.id)
                         throw AgentConnectionNeedsUser("Host key rejected")
                     }
-                    hosts.saveKnownHost(host, host.hostname, host.port, Buffer.PlainBuffer(wire).readString(), wire)
+                    hosts.saveKnownHost(host, host.hostname, host.port, algorithm, wire)
                     true
                 }
             })

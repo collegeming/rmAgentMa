@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Title of the unified agent session screen. -->
-    <string name="agent_title">Agent sessions</string>
-    <!-- Back navigation, including returning from a conversation to the list. -->
+    <!-- Title of the native chat shell before a conversation is selected. -->
+    <string name="agent_title">rmAgentMa</string>
+    <!-- Back navigation from the chat shell. -->
     <string name="agent_back">Back</string>
     <!-- Refresh remote session lists. -->
     <string name="agent_refresh">Refresh</string>
@@ -22,17 +22,17 @@
     <string name="agent_kind">Agent</string>
     <!-- All devices or agent kinds in a filter. -->
     <string name="agent_all">All</string>
-    <!-- Session title and preview search field. -->
-    <string name="agent_search">Search title and last message</string>
+    <!-- Drawer search across session titles, message previews and working directories. -->
+    <string name="agent_search">Search title, message or directory</string>
     <!-- Explain absence of saved SSH devices. -->
     <string name="agent_no_devices">Add an SSH device from the device list first.</string>
     <!-- Empty or filtered session list. -->
     <string name="agent_no_sessions">No matching sessions. Refresh to read remote history, or create a session.</string>
     <!-- Historical sessions remain visible when disconnected. -->
     <string name="agent_cache_hint">History may be cached. Refresh requires a connection; errors do not mean cached sessions are available online.</string>
-    <!-- Explicit distinction between structured and terminal-only integrations. -->
-    <string name="agent_support_hint">Kimi, OpenCode and oh-my-pi use structured conversation. deepseek-harness and zcode continue in the terminal only.</string>
-    <!-- Continue a structured session, or open the terminal for terminal-only agents. -->
+    <!-- Native driver support is distinct from availability on a particular host. -->
+    <string name="agent_support_hint">Native chat integration supports Kimi, OpenCode, oh-my-pi, deepseek-harness and zcode. Installation and capabilities are verified separately for each host.</string>
+    <!-- Continue a supported native session. -->
     <string name="agent_continue">Continue</string>
     <!-- Open a session in the existing SSH terminal. -->
     <string name="agent_terminal">Terminal</string>

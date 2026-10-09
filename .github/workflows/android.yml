@@ -54,8 +54,8 @@ jobs:
         id: sdk
         run: bash ../.github/scripts/install-android-sdk.sh
 
-      - name: Build OSS debug APK
-        run: ./gradlew --no-daemon --stacktrace --profile -PciDebug=true :app:assembleOssDebug
+      - name: Build OSS debug APK and device tests
+        run: ./gradlew --no-daemon --stacktrace --profile -PciDebug=true :app:assembleOssDebug :app:assembleOssDebugAndroidTest
 
       - name: Package APK and build metadata
         env:
@@ -71,6 +71,7 @@ jobs:
           mkdir -p "$output"
           cp app/build/outputs/apk/oss/debug/app-oss-debug.apk "$output/rmAgentMa-oss-debug.apk"
           cp app/build/outputs/apk/oss/debug/output-metadata.json "$output/output-metadata.json"
+          cp app/build/outputs/apk/androidTest/oss/debug/app-oss-debug-androidTest.apk "$output/rmAgentMa-device-tests.apk"
           apk_sha256=$(sha256sum "$output/rmAgentMa-oss-debug.apk" | cut -d ' ' -f 1)
           jq -n \
             --arg repository "$SOURCE_REPOSITORY" \
@@ -91,7 +92,7 @@ jobs:
               signing: "runner-generated default debug keystore",
               apk: "rmAgentMa-oss-debug.apk", apk_sha256: $apk_sha256,
               apk_metadata: $apk_metadata[0]}' > "$output/build-metadata.json"
-          (cd "$output" && sha256sum rmAgentMa-oss-debug.apk output-metadata.json build-metadata.json > SHA256SUMS)
+          (cd "$output" && sha256sum rmAgentMa-oss-debug.apk rmAgentMa-device-tests.apk output-metadata.json build-metadata.json > SHA256SUMS)
 
       - name: Upload installable OSS debug APK
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

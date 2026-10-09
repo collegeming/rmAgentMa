@@ -41,36 +41,52 @@ class AcpDriver(
     override val agent: AgentKind,
     private val scope: CoroutineScope,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val executable: String? = null,
 ) : AgentDriver {
     init {
-        require(agent in setOf(AgentKind.KIMI, AgentKind.OPENCODE, AgentKind.OMP)) { "Agent does not support ACP" }
+        require(agent in setOf(AgentKind.KIMI, AgentKind.OPENCODE, AgentKind.OMP, AgentKind.DSH)) { "Agent does not support ACP" }
     }
 
-    suspend fun open(host: HostSession, sessionId: String?, cwd: String): AcpSessionHandle {
+    suspend fun prepare(host: HostSession, sessionId: String?, cwd: String): AcpSessionHandle {
         require(sessionId == null || sessionId.isNotBlank()) { "Session ID cannot be blank" }
         val connection = connect(host, cwd)
         try {
             val capabilities = initialize(connection)
-            if (sessionId != null && (capabilities["loadSession"] as? JsonPrimitive)?.booleanOrNull != true) {
-                throw UnsupportedOperationException("Agent does not advertise loadSession")
+            val resumeOnly = agent == AgentKind.DSH
+            if (sessionId != null) {
+                val supported = if (resumeOnly) {
+                    val sessions = capabilities["sessionCapabilities"] as? JsonObject
+                    sessions?.get("resume") is JsonObject
+                } else {
+                    (capabilities["loadSession"] as? JsonPrimitive)?.booleanOrNull == true
+                }
+                if (!supported) throw UnsupportedOperationException("Agent does not advertise ${if (resumeOnly) "sessionCapabilities.resume" else "loadSession"}")
             }
             connection.sessionId = sessionId
-            val response = connection.request(
-                if (sessionId == null) "session/new" else "session/load",
-                buildJsonObject {
-                    if (sessionId != null) put("sessionId", sessionId)
-                    put("cwd", cwd)
-                    put("mcpServers", JsonArray(emptyList()))
-                },
-            )
-            val id = sessionId ?: response.string("sessionId").takeIf { it.isNotBlank() }
-                ?: throw IOException("Agent did not return a session ID")
-            connection.sessionId = id
-            return AcpSessionHandle(id, connection)
+            val replay: (suspend (suspend (AgentEvent) -> Unit) -> Unit)? = if (resumeOnly && sessionId != null) {
+                { emit -> readTranscript(host, AgentSession(host.hostId, agent, sessionId, cwd), emit) }
+            } else {
+                null
+            }
+            return AcpSessionHandle(sessionId.orEmpty(), connection, cwd, resumeOnly, replay)
         } catch (e: Exception) {
             connection.close()
             throw e
         }
+    }
+
+    suspend fun open(host: HostSession, sessionId: String?, cwd: String): AcpSessionHandle = prepare(host, sessionId, cwd)
+
+    private suspend fun readTranscript(host: HostSession, session: AgentSession, emit: suspend (AgentEvent) -> Unit) {
+        val reader = RemoteTranscriptReader(ioDispatcher)
+        val seen = mutableSetOf<String>()
+        var cursor: String? = null
+        do {
+            val page = reader.readPage(host, session, cursor, onEvent = emit)
+            page.error?.let { throw IOException("Agent history read failed: $it") }
+            cursor = page.nextCursor
+            if (cursor != null && !seen.add(cursor)) throw IOException("Agent repeated a history cursor")
+        } while (cursor != null)
     }
 
     override suspend fun listSessions(host: HostSession, limit: Int): List<AgentSession> {
@@ -113,7 +129,7 @@ class AcpDriver(
     }
 
     private suspend fun connect(host: HostSession, cwd: String): AcpConnection = withContext(ioDispatcher) {
-        val channel = host.exec(ShellCommands.acp(agent, cwd))
+        val channel = host.exec(ShellCommands.acp(agent, cwd, executable))
         try {
             AcpConnection(channel, scope, ioDispatcher)
         } catch (e: Exception) {
@@ -158,13 +174,58 @@ class AcpDriver(
 }
 
 class AcpSessionHandle internal constructor(
-    override val sessionId: String,
+    initialSessionId: String,
     private val connection: AcpConnection,
+    private val cwd: String,
+    private val resumeOnly: Boolean = false,
+    private val replay: (suspend (suspend (AgentEvent) -> Unit) -> Unit)? = null,
 ) : AgentSessionHandle {
+    override var sessionId: String = initialSessionId
+        private set
     override val events: Flow<AgentEvent> = connection.events
     private val prompt = Mutex()
+    private val loading = Mutex()
+
+    @Volatile
+    private var ready = false
+
+    @Volatile
+    private var closed = false
+
+    suspend fun load() = loading.withLock {
+        check(!closed && !ready) { "Session is already loaded or closed" }
+        try {
+            connection.awaitConsumer()
+            val existing = sessionId.takeIf { it.isNotEmpty() }
+            replay?.invoke { connection.emit(it) }
+            if (replay != null) connection.consumeBarrier()
+            val response = connection.request(
+                if (existing == null) {
+                    "session/new"
+                } else if (resumeOnly) {
+                    "session/resume"
+                } else {
+                    "session/load"
+                },
+                buildJsonObject {
+                    if (existing != null) put("sessionId", existing)
+                    put("cwd", cwd)
+                    put("mcpServers", JsonArray(emptyList()))
+                },
+            )
+            sessionId = existing ?: response.string("sessionId").takeIf { it.isNotBlank() }
+                ?: throw IOException("Agent did not return a session ID")
+            connection.sessionId = sessionId
+            check(!closed) { "Session closed while loading" }
+            ready = true
+        } catch (e: Exception) {
+            close()
+            throw e
+        }
+    }
 
     override suspend fun send(text: String) {
+        check(ready && !closed) { "Session is not ready" }
         prompt.withLock {
             try {
                 connection.request(
@@ -185,13 +246,17 @@ class AcpSessionHandle internal constructor(
                     },
                 )
             } catch (e: CancellationException) {
-                withContext(NonCancellable) { runCatching { cancel() } }
+                withContext(NonCancellable) { kotlinx.coroutines.withTimeoutOrNull(1000) { runCatching { cancel() } } }
                 throw e
             }
         }
     }
 
     override suspend fun cancel() {
+        if (!ready) {
+            close()
+            return
+        }
         connection.notify("session/cancel", buildJsonObject { put("sessionId", sessionId) })
         connection.cancelInteractions()
     }
@@ -238,5 +303,9 @@ class AcpSessionHandle internal constructor(
         )
     }
 
-    override suspend fun close() = connection.close()
+    override suspend fun close() {
+        closed = true
+        ready = false
+        connection.close()
+    }
 }

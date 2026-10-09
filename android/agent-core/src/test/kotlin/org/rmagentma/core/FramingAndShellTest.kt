@@ -18,10 +18,12 @@
 package org.rmagentma.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.nio.charset.CharacterCodingException
 import java.nio.file.Files
 import java.util.Comparator
@@ -76,6 +78,8 @@ class FramingAndShellTest {
         assertEquals("cd -- '/a'\"'\"'b' && exec kimi --session 's; x'", ShellCommands.start(AgentKind.KIMI, "/a'b", "s; x"))
         assertEquals("cd -- '/work dir' && exec dsh tui --resume 'id'", ShellCommands.start(AgentKind.DSH, "/work dir", "id"))
         assertEquals("cd -- '/tmp' && exec omp acp", ShellCommands.acp(AgentKind.OMP, "/tmp"))
+        assertEquals("cd -- '/work dir' && exec dsh --profile acp", ShellCommands.acp(AgentKind.DSH, "/work dir"))
+        assertEquals("cd -- '/tmp' && exec '/cli path/dsh' --profile acp", ShellCommands.acp(AgentKind.DSH, "/tmp", "/cli path/dsh"))
         assertEquals(AgentKind.ZCODE, AgentKind.fromWire("zcode"))
         assertNull(AgentKind.fromWire("future"))
     }
@@ -112,13 +116,21 @@ class FramingAndShellTest {
     fun scannerWrapperPreservesExitStatusAndEmptySuccess() {
         val root = Files.createTempDirectory("scanner-wrapper-test")
         try {
+            // The generated command needs sh and base64, so those are symlinked into the isolated
+            // PATH. python3 is intentionally absent from it until the test creates a stub, which
+            // keeps this test independent of whatever the host happens to have installed.
+            val sh = File("/bin/sh")
+            val base64 = File("/usr/bin/base64").takeIf { it.exists() } ?: File("/bin/base64")
+            assertTrue(Files.createSymbolicLink(root.resolve("sh"), sh.toPath()) != null)
+            assertTrue(Files.createSymbolicLink(root.resolve("base64"), base64.toPath()) != null)
+            val path = root.toString()
             for (status in listOf(0, 23)) {
                 val python = root.resolve("python3").toFile()
                 python.writeText("#!/bin/sh\nexit $status\n")
                 assertTrue(python.setExecutable(true))
                 val command = ShellCommands.scanner("ignored", setOf(AgentKind.KIMI), 1)
                 val process = ProcessBuilder("/bin/sh", "-c", command).apply {
-                    environment()["PATH"] = root.toString()
+                    environment()["PATH"] = path
                     environment()["HOME"] = root.toString()
                 }.start()
                 val output = process.inputStream.bufferedReader().readText()
@@ -127,7 +139,7 @@ class FramingAndShellTest {
             }
             Files.delete(root.resolve("python3"))
             val process = ProcessBuilder("/bin/sh", "-c", ShellCommands.scanner("ignored", setOf(AgentKind.KIMI), 1)).apply {
-                environment()["PATH"] = root.toString()
+                environment()["PATH"] = path
                 environment()["HOME"] = root.toString()
             }.start()
             assertEquals("{\"level\":\"error\",\"category\":\"python_missing\"}\n", process.inputStream.bufferedReader().readText())
@@ -138,14 +150,34 @@ class FramingAndShellTest {
     }
 
     @Test
-    fun scannerUsesQuotedHeredocWithNonCollidingDelimiter() {
-        val script = "print('\$HOME')\nRMAGENTMA_SCAN\n"
+    fun scannerWorksUnderAShellWithoutHeredocSupport() {
+        val script = "import sys\nprint('script-ran')\n"
         val command = ShellCommands.scanner(script, setOf(AgentKind.KIMI, AgentKind.ZCODE), 20)
-        assertTrue(command.contains("if python3 - --agent 'kimi' 'zcode' --limit 20 <<'RMAGENTMA_SCAN_'\n"))
-        assertTrue(command.contains("\nRMAGENTMA_SCAN_\nthen\n"))
-        val safe = ShellCommands.scanner("print('safe')", setOf(AgentKind.KIMI), 1)
-        val process = ProcessBuilder("/bin/sh", "-c", safe).start()
-        assertEquals("safe\n", process.inputStream.bufferedReader().readText())
+        // A heredoc would be a syntax error under fish and other non-bash login shells, so the
+        // command must not rely on one and must not depend on the login shell for parsing.
+        assertFalse(command.contains("<<"))
+        assertTrue(command.startsWith("/bin/sh -c "))
+        assertTrue(command.contains("| base64 -d | python3 -"))
+        // Behaviour is what matters: the agent names and limit must reach python3 intact.
+        val process = ProcessBuilder("/bin/sh", "-c", command).start()
+        val output = process.inputStream.bufferedReader().readText()
         assertEquals(0, process.waitFor())
+        // The payload reached python3, so the script itself executed.
+        assertTrue(output.contains("script-ran"))
+    }
+
+    @Test
+    fun scannerTransportsTheScriptWithoutRemoteShellExpansion() {
+        val marker = "\$HOME `id` ; rm -rf /"
+        val script = "print(${marker.length})\n"
+        val command = ShellCommands.scanner(script, setOf(AgentKind.KIMI), 1)
+        // shell quoting must keep the literal text intact for the payload argument
+        val strippedPayload = command.removePrefix("bash -c '").removeSuffix("'")
+        assertTrue(strippedPayload.contains("base64 -d"))
+        // Executing the generated command with the real script must reproduce the script's output.
+        val process = ProcessBuilder("/bin/sh", "-c", command).start()
+        val output = process.inputStream.bufferedReader().readText()
+        assertEquals(0, process.waitFor())
+        assertEquals("${marker.length}\n", output)
     }
 }

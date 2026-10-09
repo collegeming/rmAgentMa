@@ -85,7 +85,7 @@ fun ConnectBotApp(
                     CompositionLocalProvider(LocalTerminalManager provides appUiState.terminalManager) {
                         ConnectBotNavHost(
                             navController = navController,
-                            startDestination = NavDestinations.HOST_LIST,
+                            startDestination = if (makingShortcut) NavDestinations.HOST_LIST else NavDestinations.AGENTS,
                             makingShortcut = makingShortcut,
                             onSelectShortcut = onSelectShortcut,
                             onNavigateToConsole = onNavigateToConsole,

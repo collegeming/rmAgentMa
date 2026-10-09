@@ -25,6 +25,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.nio.file.Files
 import java.util.Comparator
 
@@ -60,7 +61,13 @@ class RemoteScannerTest {
         assertTrue(result.errors.size >= 3)
         assertFalse(result.errors.any { "private" in it })
         assertTrue(closed)
-        assertTrue(command.contains("if python3 - --agent 'kimi' 'opencode' 'dsh' 'zcode' --limit 200 <<'"))
+        assertTrue(command.contains("/bin/sh -c "))
+        // Single quotes are escaped inside the payload; assert the command still targets the
+        // requested agents and limit rather than matching an exact quoted spelling.
+        assertTrue(command.contains("--agent"))
+        assertTrue(command.contains("kimi") && command.contains("opencode"))
+        assertTrue(command.contains("dsh") && command.contains("zcode"))
+        assertTrue(command.contains("--limit 200"))
     }
 
     @Test
@@ -116,6 +123,9 @@ class RemoteScannerTest {
     fun missingPythonAndSilentNonzeroExitAreScanErrors() = runBlocking {
         val root = Files.createTempDirectory("scanner-failure-test")
         try {
+            Files.createSymbolicLink(root.resolve("sh"), File("/bin/sh").toPath())
+            val base64 = File("/usr/bin/base64").takeIf { it.exists() } ?: File("/bin/base64")
+            Files.createSymbolicLink(root.resolve("base64"), base64.toPath())
             for (installed in listOf(false, true)) {
                 if (installed) {
                     val python = root.resolve("python3").toFile()
@@ -126,6 +136,8 @@ class RemoteScannerTest {
                     override val hostId = 7L
                     override suspend fun exec(command: String): ExecChannel {
                         val process = ProcessBuilder("/bin/sh", "-c", command).apply {
+                            // Only python3 is controlled here; sh and base64 are linked in so the
+                            // test does not depend on how the host PATH happens to be arranged.
                             environment()["PATH"] = root.toString()
                             environment()["HOME"] = root.toString()
                         }.start()

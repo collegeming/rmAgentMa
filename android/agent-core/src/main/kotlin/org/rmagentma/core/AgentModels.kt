@@ -69,6 +69,7 @@ data class AgentEvent(
     val status: String = "",
     val options: List<AgentOption> = emptyList(),
     val raw: JsonObject? = null,
+    val historyKey: Long = -1,
 )
 
 data class ScanResult(val sessions: List<AgentSession>, val errors: List<String>)
@@ -79,7 +80,7 @@ interface AgentDriver {
 }
 
 interface AgentSessionHandle {
-    /** Bounded single-consumer stream; oversized history fails with terminal fallback advice. */
+    /** Lossless bounded single-consumer stream with cancellable backpressure. */
     val events: Flow<AgentEvent>
     val sessionId: String
     suspend fun send(text: String)

@@ -96,9 +96,11 @@ internal fun AgentEventContent(
     onPermission: (String, String) -> Unit,
     onQuestion: (String, String) -> Unit,
     modifier: Modifier = Modifier,
+    onFullText: (AgentEvent) -> Unit = {},
+    interactionsEnabled: Boolean = true,
 ) {
-    var expanded by remember(event.id, event.type) { mutableStateOf(false) }
-    var rawExpanded by remember(event.id, event.type) { mutableStateOf(false) }
+    var expanded by remember(event.historyKey, event.id, event.type) { mutableStateOf(false) }
+    var rawExpanded by remember(event.historyKey, event.id, event.type) { mutableStateOf(false) }
     val headingId = when (event.type) {
         "user" -> R.string.agent_event_user
         "content" -> R.string.agent_event_content
@@ -118,37 +120,38 @@ internal fun AgentEventContent(
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             SelectionContainer {
                 Column {
-                    if (event.title.isNotBlank()) Text(event.title, style = MaterialTheme.typography.titleSmall)
-                    if (event.status.isNotBlank()) Text(event.status, style = MaterialTheme.typography.labelMedium)
+                    if (event.title.isNotBlank()) Text(event.title.take(512), style = MaterialTheme.typography.titleSmall, maxLines = 3)
+                    if (event.status.isNotBlank()) Text(event.status.take(256), style = MaterialTheme.typography.labelMedium, maxLines = 2)
                 }
             }
-            if (event.text.isNotEmpty()) AgentMarkdown(event.text)
-            when (event.type) {
-                "plan" -> AgentPlanContent(event.raw)
-                "usage" -> AgentUsageContent(event.raw)
-                "session_info" -> AgentSessionInfoContent(event.raw)
-                "tool", "tool_update" -> AgentToolContent(event.raw)
+            if (event.text.isNotEmpty()) AgentMarkdown(event.text.take(4_000))
+            val longCard = event.text.length > 4_000 || (event.raw?.toString()?.length ?: 0) > 8_000 || hasTruncatedAgentData(event.raw)
+            if (!longCard) {
+                when (event.type) {
+                    "plan" -> AgentPlanContent(event.raw)
+                    "usage" -> AgentUsageContent(event.raw)
+                    "session_info" -> AgentSessionInfoContent(event.raw)
+                    "tool", "tool_update" -> AgentToolContent(event.raw)
+                }
+                val diffs = remember(event.raw) { eventDiffs(event.raw) }
+                if (diffs.isNotEmpty()) {
+                    Text(stringResource(R.string.agent_diff), style = MaterialTheme.typography.labelLarge)
+                    diffs.forEach { AgentDiff(it.take(80)) }
+                }
             }
-            if (hasTruncatedAgentData(event.raw)) {
-                Text(stringResource(R.string.agent_truncated), color = MaterialTheme.colorScheme.error)
-            }
-            val diffs = remember(event.raw) { eventDiffs(event.raw) }
-            if (diffs.isNotEmpty()) {
-                Text(stringResource(R.string.agent_diff), style = MaterialTheme.typography.labelLarge)
-                diffs.forEach { AgentDiff(it) }
-            }
+            TextButton(onClick = { onFullText(event) }) { Text(stringResource(R.string.agent_full_text)) }
             when (event.type) {
                 "permission" -> {
                     event.options.forEach { option ->
                         TextButton(
                             onClick = { onPermission(event.id, option.id) },
-                            enabled = !responding && event.id.isNotBlank(),
+                            enabled = interactionsEnabled && !responding && event.id.isNotBlank(),
                         ) { Text(option.label) }
                     }
                     if (event.id.isBlank() || event.options.isEmpty()) Text(stringResource(R.string.agent_no_response))
                 }
 
-                "question" -> AgentQuestionContent(event, responding, onQuestion)
+                "question" -> if (interactionsEnabled) AgentQuestionContent(event, responding, onQuestion) else Text(stringResource(R.string.agent_state_closed))
             }
             if (responding) Text(stringResource(R.string.agent_response_pending))
             if (event.raw != null) {
@@ -158,7 +161,7 @@ internal fun AgentEventContent(
                     onToggle = { rawExpanded = !rawExpanded },
                 ) {
                     SelectionContainer {
-                        Text(event.raw.toString(), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                        Text(event.raw.toString().take(4_000), fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, maxLines = 24)
                     }
                 }
             }

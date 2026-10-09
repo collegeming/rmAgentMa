@@ -22,6 +22,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
@@ -63,11 +64,93 @@ class AgentPresentationTest {
     }
 
     @Test
-    fun onlyThreeAgentsSupportStructuredConversation() {
-        assertEquals(
-            setOf(AgentKind.KIMI, AgentKind.OPENCODE, AgentKind.OMP),
-            AgentKind.entries.filter(::supportsStructuredConversation).toSet(),
-        )
+    fun workspacesAggregateAgentsButNeverMixHostsOrDirectories() {
+        val kimi = AgentSession(1, AgentKind.KIMI, "k", "/work", updatedAt = 20)
+        val omp = kimi.copy(agent = AgentKind.OMP, sessionId = "o", updatedAt = 30)
+        val otherHost = kimi.copy(hostId = 2, updatedAt = 40)
+        val otherDirectory = kimi.copy(cwd = "/elsewhere", updatedAt = 10)
+        val groups = groupAgentWorkspaces(listOf(kimi, omp, otherHost, otherDirectory), "")
+        assertEquals(listOf(AgentWorkspaceKey(2, "/work"), AgentWorkspaceKey(1, "/work"), AgentWorkspaceKey(1, "/elsewhere")), groups.map { it.key })
+        assertEquals(listOf(omp, kimi), groups[1].sessions)
+    }
+
+    @Test
+    fun workspaceSearchFindsCwdTitleAndPreviewAcrossAllHostsAndAgents() {
+        val session = AgentSession(1, AgentKind.KIMI, "k", "/Work/Project", title = "Release", preview = "permissions")
+        val other = session.copy(hostId = 2, agent = AgentKind.OMP)
+        listOf("project", "RELEASE", " PERMISSIONS ").forEach { query ->
+            assertEquals(2, groupAgentWorkspaces(listOf(session, other), query).size)
+        }
+        assertTrue(groupAgentWorkspaces(listOf(session, other), "absent").isEmpty())
+    }
+
+    @Test
+    fun drawerCurrentScopeFiltersImmediatelyWhileAllScopeRetainsEveryAgent() {
+        val kimi = AgentSession(1, AgentKind.KIMI, "kimi", "/work")
+        val dsh = kimi.copy(agent = AgentKind.DSH, sessionId = "dsh")
+        val otherHost = dsh.copy(hostId = 2)
+        val sessions = listOf(kimi, dsh, otherHost)
+        assertEquals(listOf(dsh), groupAgentWorkspaces(sessions, "", 1, AgentKind.DSH).single().sessions)
+        assertEquals(listOf(kimi), groupAgentWorkspaces(sessions, "", 1, AgentKind.KIMI).single().sessions)
+        assertEquals(3, groupAgentWorkspaces(sessions, "").sumOf { it.sessions.size })
+        assertEquals(2, groupAgentWorkspaces(sessions, "", null, AgentKind.DSH).sumOf { it.sessions.size })
+    }
+
+    @Test
+    fun newSessionUsesActiveDirectoryThenMostRecentOnSelectedHostRegardlessOfAgent() {
+        val recent = AgentSession(1, AgentKind.OMP, "recent", "/recent", updatedAt = 50)
+        val older = recent.copy(agent = AgentKind.KIMI, cwd = "/old", updatedAt = 10)
+        val otherHost = recent.copy(hostId = 2, cwd = "/other", updatedAt = 100)
+        val active = older.copy(cwd = "/active")
+        assertEquals("/active", defaultAgentCwd(1, active, listOf(recent, older, otherHost)))
+        assertEquals("/recent", defaultAgentCwd(1, null, listOf(recent, older, otherHost)))
+        assertEquals("/recent", defaultAgentCwd(1, otherHost, listOf(recent, older, otherHost)))
+        assertEquals("", defaultAgentCwd(null, null, listOf(recent)))
+    }
+
+    @Test
+    fun highlightsOnlyTheSameHostAgentSessionAndWorkspace() {
+        val session = AgentSession(1, AgentKind.KIMI, "shared", "/work")
+        assertTrue(sameAgentSession(session, session.copy(title = "updated")))
+        assertFalse(sameAgentSession(session, session.copy(hostId = 2)))
+        assertFalse(sameAgentSession(session, session.copy(agent = AgentKind.OMP)))
+        assertFalse(sameAgentSession(session, session.copy(sessionId = "other")))
+        assertFalse(sameAgentSession(session, session.copy(cwd = "/other")))
+        assertFalse(sameAgentSession(session, null))
+    }
+
+    @Test
+    fun selectionRequiresExplicitCloseForEveryActiveOrBusyState() {
+        val session = AgentSession(1, AgentKind.KIMI, "k", "/work")
+        assertTrue(selectionNeedsConfirmation(session, false, false))
+        assertTrue(selectionNeedsConfirmation(null, true, false))
+        assertTrue(selectionNeedsConfirmation(null, false, true))
+        assertFalse(selectionNeedsConfirmation(null, false, false))
+    }
+
+    @Test
+    fun allFiveIntegratedAgentsUseNativeChat() {
+        assertEquals(AgentKind.entries.toSet(), AgentKind.entries.filter(::supportsStructuredConversation).toSet())
+    }
+
+    @Test
+    fun unknownAvailabilityAllowsRealProbeWithoutClaimingInstallation() {
+        assertEquals(null, agentAvailability(emptyList(), 1, AgentKind.ZCODE))
+        assertTrue(canOpenAgent(emptyList(), 1, AgentKind.ZCODE))
+    }
+
+    @Test
+    fun availabilityIsBoundToHostAndAgentNotTheCachedHistory() {
+        val unavailable = AgentAvailability(1, AgentKind.DSH, "/bin/dsh", false, error = "probe failed")
+        val installed = AgentAvailability(2, AgentKind.DSH, "/bin/dsh", true, version = "1.0")
+        val rows = listOf(unavailable, installed)
+        assertEquals(unavailable, agentAvailability(rows, 1, AgentKind.DSH))
+        assertFalse(canOpenAgent(rows, 1, AgentKind.DSH))
+        assertTrue(canOpenAgent(rows, 2, AgentKind.DSH))
+        assertTrue(canOpenAgent(rows, 1, AgentKind.ZCODE))
+        assertTrue(canOpenAgent(rows, null, AgentKind.DSH))
+        val cached = AgentSession(1, AgentKind.DSH, "old", "/work", preview = "retained history")
+        assertEquals(listOf(cached), filterAgentSessions(listOf(cached), 1, AgentKind.DSH, ""))
     }
 
     @Test

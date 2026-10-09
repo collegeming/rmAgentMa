@@ -33,18 +33,18 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -52,35 +52,42 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import kotlinx.coroutines.launch
 import org.connectbot.R
 import org.connectbot.agent.AgentChallenge
+import org.connectbot.agent.AgentConversationState
 import org.connectbot.data.entity.Host
+import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.ShellCommands
-import java.text.DateFormat
-import java.util.Date
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -88,10 +95,14 @@ fun AgentScreen(
     onNavigateBack: () -> Unit,
     onOpenTerminal: (Host, String?) -> Unit,
     modifier: Modifier = Modifier,
+    onSettings: () -> Unit = {},
+    onKeys: () -> Unit = {},
+    onHosts: () -> Unit = {},
     viewModel: AgentViewModel = hiltViewModel(),
 ) {
     val hosts by viewModel.hosts.collectAsState()
     val sessions by viewModel.sessions.collectAsState()
+    val availability by viewModel.availability.collectAsState()
     val events by viewModel.events.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val working by viewModel.working.collectAsState()
@@ -100,13 +111,24 @@ fun AgentScreen(
     val responding by viewModel.responding.collectAsState()
     val challenge by viewModel.challenge.collectAsState()
     val active by viewModel.activeSession.collectAsState()
-    var hostId by remember { mutableStateOf(viewModel.initialHostId) }
-    var agent by remember { mutableStateOf<AgentKind?>(null) }
-    var query by remember { mutableStateOf("") }
+    val selectedSession by viewModel.visibleSession.collectAsState()
+    val conversationState by viewModel.conversationState.collectAsState()
+    val hasEarlier by viewModel.hasEarlier.collectAsState()
+    val hasLatest by viewModel.hasLatest.collectAsState()
+    val fullText by viewModel.fullText.collectAsState()
+    val reading by viewModel.reading.collectAsState()
+    val hostId by viewModel.selectedHost.collectAsState()
+    val agent by viewModel.selectedAgent.collectAsState()
+    val pendingSelection by viewModel.pendingSelection.collectAsState()
     var showNew by remember { mutableStateOf(false) }
+    var newWorkspace by remember { mutableStateOf<AgentWorkspaceKey?>(null) }
     var showDisconnect by remember { mutableStateOf(false) }
+    var showDebugTerminal by remember { mutableStateOf(false) }
     var denied by remember { mutableStateOf(false) }
+    var prompt by rememberSaveable { mutableStateOf("") }
     var pendingNetworkAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val drawerState = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         val action = pendingNetworkAction
@@ -125,13 +147,22 @@ fun AgentScreen(
             action()
         }
     }
-    val back: () -> Unit = {
-        if (active != null) viewModel.closeConversation() else onNavigateBack()
+    val closeDrawer: () -> Unit = { scope.launch { drawerState.close() } }
+    val newConversation: (AgentWorkspaceKey?) -> Unit = { workspace ->
+        newWorkspace = workspace
+        showNew = true
+        closeDrawer()
     }
-    BackHandler(onBack = back)
+    BackHandler(enabled = drawerState.isOpen || selectedSession != null || busy || working) {
+        when {
+            drawerState.isOpen -> closeDrawer()
+            conversationState == AgentConversationState.Closed && !working -> onNavigateBack()
+            else -> viewModel.closeConversation()
+        }
+    }
     LaunchedEffect(Unit) {
-        if (viewModel.activeSession.value == null) {
-            withNetworkPermission { viewModel.refresh(viewModel.initialHostId) }
+        if (viewModel.selectedSession.value == null) {
+            withNetworkPermission { viewModel.refresh(viewModel.selectedHost.value) }
         }
     }
     val terminal: (Host, AgentKind, String, String?) -> Unit = { host, kind, cwd, id ->
@@ -141,121 +172,259 @@ fun AgentScreen(
             }
         }
     }
-    Scaffold(
-        modifier = modifier.imePadding(),
-        topBar = {
-            TopAppBar(
-                title = {
-                    val liveTitle = if (active != null) events.lastOrNull { it.type == "session_info" && it.raw.valueText("title") != null }?.raw.valueText("title") else null
-                    Text(liveTitle ?: active?.title?.takeIf { it.isNotBlank() } ?: stringResource(R.string.agent_title))
-                },
-                navigationIcon = {
-                    IconButton(onClick = back) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.agent_back))
-                    }
-                },
-                actions = {
-                    if (active == null) {
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet {
+                AgentWorkspaceDrawer(
+                    hosts = hosts,
+                    sessions = sessions,
+                    availability = availability,
+                    active = selectedSession,
+                    selectedHostId = hostId,
+                    selectedAgent = agent,
+                    drawerOpen = drawerState.isOpen,
+                    onOpen = { session ->
+                        closeDrawer()
+                        withNetworkPermission { viewModel.open(session) }
+                    },
+                    onNew = newConversation,
+                    onSettings = {
+                        closeDrawer()
+                        onSettings()
+                    },
+                    onKeys = {
+                        closeDrawer()
+                        onKeys()
+                    },
+                    onHosts = {
+                        closeDrawer()
+                        onHosts()
+                    },
+                    onTerminal = {
+                        closeDrawer()
+                        showDebugTerminal = true
+                    },
+                    onDisconnect = { showDisconnect = true },
+                )
+            }
+        },
+        modifier = modifier,
+    ) {
+        Scaffold(
+            modifier = Modifier.imePadding(),
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Text(
+                            selectedSession?.title?.takeIf { it.isNotBlank() } ?: stringResource(R.string.agent_title),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                            Icon(Icons.Default.Menu, stringResource(R.string.agent_workspaces))
+                        }
+                    },
+                    actions = {
                         IconButton(
                             onClick = { withNetworkPermission { viewModel.refresh(hostId) } },
                             enabled = !busy && !working,
                         ) { Icon(Icons.Default.Refresh, stringResource(R.string.agent_refresh)) }
-                        IconButton(onClick = { showNew = true }, enabled = !busy && !working) {
+                        IconButton(onClick = { newConversation(null) }, enabled = canOpenAgent(availability, hostId, agent)) {
                             Icon(Icons.Default.Add, stringResource(R.string.agent_new))
                         }
-                    } else {
-                        TextButton(
-                            onClick = {
-                                val session = active
-                                val host = hosts.firstOrNull { it.id == session?.hostId }
-                                if (session != null && host != null) terminal(host, session.agent, session.cwd, session.sessionId)
-                            },
-                            enabled = hosts.any { it.id == active?.hostId } && active?.cwd?.let(::validAgentCwd) == true,
-                        ) { Text(stringResource(R.string.agent_terminal)) }
+                    },
+                )
+            },
+        ) { padding ->
+            Column(Modifier.padding(padding).fillMaxSize()) {
+                Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AgentChoice(
+                        label = stringResource(R.string.agent_device),
+                        value = hosts.firstOrNull { it.id == hostId }?.nickname ?: stringResource(R.string.agent_select_host),
+                        options = listOf(null to stringResource(R.string.agent_all)) + hosts.map { it.id to it.nickname },
+                        onSelect = { withNetworkPermission { viewModel.selectHost(it) } },
+                        modifier = Modifier.weight(1f),
+                    )
+                    AgentChoice(
+                        label = stringResource(R.string.agent_kind),
+                        value = agentName(agent),
+                        options = AgentKind.entries.map { it to agentName(it) },
+                        onSelect = viewModel::selectAgent,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                AgentAvailabilityContent(agentAvailability(availability, hostId, agent), Modifier.padding(horizontal = 12.dp))
+                if (busy || working) LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (denied) {
+                    Text(stringResource(R.string.agent_network_denied), color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp))
+                    TextButton(onClick = { withNetworkPermission { viewModel.refresh(hostId) } }) {
+                        Text(stringResource(R.string.agent_network_retry))
                     }
-                },
-            )
-        },
-    ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize()) {
-            if (busy || working) LinearProgressIndicator(Modifier.fillMaxWidth())
-            if (denied) {
-                SelectionContainer {
-                    Text(
-                        stringResource(R.string.agent_network_denied),
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(12.dp),
-                    )
                 }
-                TextButton(onClick = { withNetworkPermission { viewModel.refresh(hostId) } }) {
-                    Text(stringResource(R.string.agent_network_retry))
+                if (errors.isNotEmpty() || operationError != null) {
+                    SelectionContainer {
+                        Text(
+                            (errors + listOfNotNull(operationError)).joinToString("\n").take(8_000),
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(12.dp).heightIn(max = 120.dp).verticalScroll(rememberScrollState()),
+                        )
+                    }
                 }
-            }
-            if (errors.isNotEmpty() || operationError != null) {
-                SelectionContainer {
-                    Text(
-                        (errors + listOfNotNull(operationError)).joinToString("\n"),
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(12.dp).heightIn(max = 120.dp).verticalScroll(rememberScrollState()),
-                    )
+                val session = selectedSession
+                if (session == null) {
+                    val recent = remember(sessions, hostId, agent) { filterAgentSessions(sessions, hostId, agent, "").take(5) }
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(24.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        item(key = "welcome") {
+                            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Text(stringResource(R.string.agent_chat_empty_title), style = MaterialTheme.typography.headlineSmall)
+                                Text(stringResource(R.string.agent_chat_empty_hint))
+                                if (hosts.isEmpty()) TextButton(onClick = onHosts) { Text(stringResource(R.string.agent_hosts)) }
+                                Button(onClick = { newConversation(null) }, enabled = !working && canOpenAgent(availability, hostId, agent)) { Text(stringResource(R.string.agent_new)) }
+                                TextButton(onClick = { scope.launch { drawerState.open() } }) { Text(stringResource(R.string.agent_workspaces)) }
+                                if (recent.isNotEmpty()) Text(stringResource(R.string.agent_recent_conversations), style = MaterialTheme.typography.titleSmall)
+                            }
+                        }
+                        itemsIndexed(recent, key = { _, item -> "recent:${item.hostId}:${item.agent.wireName}:${item.sessionId}:${item.cwd}" }) { _, item ->
+                            Column {
+                                Text(item.title.ifBlank { stringResource(R.string.agent_untitled) }, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(item.cwd, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (item.preview.isNotBlank()) Text(item.preview.take(240), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                val status = agentAvailability(availability, item.hostId, item.agent)
+                                if (status?.available == false) AgentAvailabilityContent(status)
+                                TextButton(
+                                    onClick = { withNetworkPermission { viewModel.open(item) } },
+                                    enabled = canOpenAgent(availability, item.hostId, item.agent),
+                                ) { Text(stringResource(R.string.agent_continue)) }
+                            }
+                        }
+                    }
+                } else {
+                    Row(Modifier.padding(horizontal = 12.dp)) {
+                        Text(
+                            stringResource(
+                                when (conversationState) {
+                                    AgentConversationState.Loading -> R.string.agent_state_loading
+                                    AgentConversationState.Ready -> R.string.agent_state_ready
+                                    AgentConversationState.Failed -> R.string.agent_state_failed
+                                    AgentConversationState.Closed -> R.string.agent_state_closed
+                                },
+                            ),
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (conversationState == AgentConversationState.Failed || conversationState == AgentConversationState.Closed) {
+                            TextButton(onClick = { withNetworkPermission { viewModel.retryConversation() } }, enabled = !working && canOpenAgent(availability, session.hostId, session.agent)) {
+                                Text(stringResource(R.string.agent_retry_conversation))
+                            }
+                        }
+                        TextButton(
+                            onClick = { hosts.firstOrNull { it.id == session.hostId }?.let { terminal(it, session.agent, session.cwd, session.sessionId) } },
+                            enabled = hosts.any { it.id == session.hostId } && validAgentCwd(session.cwd),
+                        ) {
+                            Text(stringResource(R.string.agent_terminal))
+                        }
+                        TextButton(onClick = viewModel::closeConversation) { Text(stringResource(R.string.agent_close_text)) }
+                    }
+                    androidx.compose.runtime.key(session.hostId, session.agent, session.sessionId, session.cwd) {
+                        AgentConversation(
+                            session = active ?: session,
+                            events = events,
+                            responding = responding,
+                            interactionsEnabled = conversationState == AgentConversationState.Loading || conversationState == AgentConversationState.Ready,
+                            hasEarlier = hasEarlier,
+                            hasLatest = hasLatest,
+                            reading = reading,
+                            onEarlier = viewModel::loadEarlier,
+                            onLatest = viewModel::loadLatest,
+                            onFullText = viewModel::readFullText,
+                            onPermission = viewModel::respondPermission,
+                            onQuestion = viewModel::respondQuestion,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
-            }
-            val session = active
-            if (session == null) {
-                AgentSessionList(
-                    hosts = hosts,
-                    sessions = remember(sessions, hostId, agent, query) { filterAgentSessions(sessions, hostId, agent, query) },
-                    hostId = hostId,
-                    agent = agent,
-                    query = query,
-                    onHost = { hostId = it },
-                    onAgent = { agent = it },
-                    onQuery = { query = it },
-                    onContinue = { selected ->
-                        val host = hosts.firstOrNull { it.id == selected.hostId }
-                        if (host != null) {
-                            if (supportsStructuredConversation(selected.agent)) {
-                                withNetworkPermission { viewModel.open(selected) }
-                            } else {
-                                terminal(host, selected.agent, selected.cwd, selected.sessionId)
+                AgentComposer(
+                    prompt = prompt,
+                    onPrompt = { prompt = it },
+                    busy = busy || working || (session == null && !canOpenAgent(availability, hostId, agent)),
+                    hasSession = session != null,
+                    ready = conversationState == AgentConversationState.Ready,
+                    onSend = {
+                        if (session == null) {
+                            newConversation(null)
+                        } else {
+                            withNetworkPermission {
+                                if (viewModel.send(prompt)) prompt = ""
                             }
                         }
                     },
-                    onTerminal = { selected ->
-                        hosts.firstOrNull { it.id == selected.hostId }?.let { terminal(it, selected.agent, selected.cwd, selected.sessionId) }
-                    },
-                    onDisconnect = { showDisconnect = true },
-                    enabled = !working && !busy,
-                    modifier = Modifier.weight(1f),
-                )
-            } else {
-                AgentConversation(
-                    session = session,
-                    events = events,
-                    responding = responding,
-                    busy = busy || working,
-                    onSend = { text -> withNetworkPermission { viewModel.send(text) } },
                     onCancel = viewModel::cancel,
-                    onPermission = viewModel::respondPermission,
-                    onQuestion = viewModel::respondQuestion,
-                    modifier = Modifier.weight(1f),
                 )
             }
         }
     }
     if (showNew) {
+        val initialHost = newWorkspace?.hostId ?: hostId
         NewAgentSessionDialog(
-            hosts = hosts.filter { it.protocol == "ssh" },
-            initialHostId = hostId,
+            hosts = hosts,
+            sessions = sessions,
+            availability = availability,
+            active = active,
+            initialHostId = initialHost,
+            initialAgent = agent,
+            initialCwd = newWorkspace?.cwd ?: defaultAgentCwd(initialHost, active, sessions),
             onDismiss = { showNew = false },
             onCreate = { host, kind, cwd ->
                 showNew = false
-                if (supportsStructuredConversation(kind)) {
-                    withNetworkPermission { viewModel.newSession(host.id, kind, cwd) }
-                } else {
-                    terminal(host, kind, cwd, null)
+                withNetworkPermission { viewModel.newSession(host.id, kind, cwd) }
+            },
+        )
+    }
+    if (pendingSelection != null) {
+        AlertDialog(
+            onDismissRequest = viewModel::keepConversation,
+            title = { Text(stringResource(R.string.agent_switch_title)) },
+            text = { Text(stringResource(R.string.agent_switch_warning)) },
+            confirmButton = {
+                TextButton(onClick = { withNetworkPermission { viewModel.confirmSelection() } }) {
+                    Text(stringResource(R.string.agent_close_and_switch))
                 }
             },
+            dismissButton = { TextButton(onClick = viewModel::keepConversation) { Text(stringResource(R.string.agent_keep_conversation)) } },
+        )
+    }
+    if (showDebugTerminal) {
+        var terminalHostId by remember { mutableStateOf(active?.hostId ?: hostId) }
+        AlertDialog(
+            onDismissRequest = { showDebugTerminal = false },
+            title = { Text(stringResource(R.string.agent_debug_terminal)) },
+            text = {
+                Column {
+                    Text(stringResource(R.string.agent_debug_terminal_hint))
+                    AgentChoice(
+                        label = stringResource(R.string.agent_device),
+                        value = hosts.firstOrNull { it.id == terminalHostId }?.nickname ?: stringResource(R.string.agent_select_host),
+                        options = hosts.map { it.id to it.nickname },
+                        onSelect = { terminalHostId = it },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = hosts.any { it.id == terminalHostId },
+                    onClick = {
+                        showDebugTerminal = false
+                        hosts.firstOrNull { it.id == terminalHostId }?.let { host -> withNetworkPermission { onOpenTerminal(host, null) } }
+                    },
+                ) { Text(stringResource(R.string.agent_terminal)) }
+            },
+            dismissButton = { TextButton(onClick = { showDebugTerminal = false }) { Text(stringResource(R.string.agent_cancel)) } },
         )
     }
     if (showDisconnect) {
@@ -267,117 +436,13 @@ fun AgentScreen(
                 TextButton(onClick = {
                     showDisconnect = false
                     viewModel.disconnectAll()
-                }) {
-                    Text(stringResource(R.string.agent_confirm))
-                }
+                }) { Text(stringResource(R.string.agent_confirm)) }
             },
-            dismissButton = {
-                TextButton(onClick = { showDisconnect = false }) { Text(stringResource(R.string.agent_cancel)) }
-            },
+            dismissButton = { TextButton(onClick = { showDisconnect = false }) { Text(stringResource(R.string.agent_cancel)) } },
         )
     }
+    fullText?.let { AgentFullTextDialog(it, viewModel::closeFullText) }
     challenge?.let { AgentChallengeDialog(it, viewModel::respondChallenge) }
-}
-
-@Composable
-private fun AgentSessionList(
-    hosts: List<Host>,
-    sessions: List<AgentSession>,
-    hostId: Long?,
-    agent: AgentKind?,
-    query: String,
-    onHost: (Long?) -> Unit,
-    onAgent: (AgentKind?) -> Unit,
-    onQuery: (String) -> Unit,
-    onContinue: (AgentSession) -> Unit,
-    onTerminal: (AgentSession) -> Unit,
-    onDisconnect: () -> Unit,
-    enabled: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    LazyColumn(
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                SelectionContainer {
-                    Column {
-                        Text(stringResource(R.string.agent_support_hint), style = MaterialTheme.typography.bodySmall)
-                        Text(stringResource(R.string.agent_cache_hint), style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AgentChoice(
-                        label = stringResource(R.string.agent_device),
-                        value = hosts.firstOrNull { it.id == hostId }?.nickname ?: stringResource(R.string.agent_all),
-                        options = listOf(null to stringResource(R.string.agent_all)) + hosts.map { it.id to it.nickname },
-                        onSelect = onHost,
-                        modifier = Modifier.weight(1f),
-                    )
-                    AgentChoice(
-                        label = stringResource(R.string.agent_kind),
-                        value = agent?.let { agentName(it) } ?: stringResource(R.string.agent_all),
-                        options = listOf(null to stringResource(R.string.agent_all)) + AgentKind.entries.map { it to agentName(it) },
-                        onSelect = onAgent,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = onQuery,
-                    label = { Text(stringResource(R.string.agent_search)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                TextButton(onClick = onDisconnect) { Text(stringResource(R.string.agent_disconnect)) }
-            }
-        }
-        if (hosts.isEmpty() || sessions.isEmpty()) {
-            item {
-                Text(stringResource(if (hosts.isEmpty()) R.string.agent_no_devices else R.string.agent_no_sessions))
-            }
-        }
-        items(sessions) { session ->
-            val host = hosts.firstOrNull { it.id == session.hostId }
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    SelectionContainer {
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(
-                                session.title.ifBlank { session.sessionId.ifBlank { stringResource(R.string.agent_untitled) } },
-                                style = MaterialTheme.typography.titleMedium,
-                            )
-                            Text("${host?.nickname ?: stringResource(R.string.agent_missing_host)} · ${agentName(session.agent)}")
-                            if (!supportsStructuredConversation(session.agent)) Text(stringResource(R.string.agent_terminal_only))
-                            Text(session.cwd, style = MaterialTheme.typography.bodySmall)
-                            Text(
-                                stringResource(
-                                    R.string.agent_updated,
-                                    remember(session.updatedAt) {
-                                        DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(session.updatedAt))
-                                    },
-                                ),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            if (session.preview.isNotEmpty()) Text(session.preview, maxLines = 3)
-                        }
-                    }
-                    Row {
-                        TextButton(
-                            onClick = { onContinue(session) },
-                            enabled = enabled && host != null && validAgentCwd(session.cwd),
-                        ) { Text(stringResource(R.string.agent_continue)) }
-                        TextButton(
-                            onClick = { onTerminal(session) },
-                            enabled = host != null && validAgentCwd(session.cwd),
-                        ) { Text(stringResource(R.string.agent_terminal)) }
-                    }
-                }
-            }
-        }
-    }
 }
 
 @Composable
@@ -385,58 +450,90 @@ private fun AgentConversation(
     session: AgentSession,
     events: List<AgentEvent>,
     responding: Set<AgentInteractionKey>,
-    busy: Boolean,
-    onSend: (String) -> Unit,
-    onCancel: () -> Unit,
+    interactionsEnabled: Boolean,
+    hasEarlier: Boolean,
+    hasLatest: Boolean,
+    reading: Boolean,
+    onEarlier: () -> Unit,
+    onLatest: () -> Unit,
+    onFullText: (AgentEvent) -> Unit,
     onPermission: (AgentInteractionKey, String) -> Unit,
     onQuestion: (AgentInteractionKey, String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var prompt by remember(session.hostId, session.agent, session.sessionId) { mutableStateOf("") }
     val listState = rememberLazyListState()
     val followLatest = !listState.canScrollForward
-    LaunchedEffect(events.size, events.lastOrNull()?.text, followLatest) {
-        if (followLatest && events.isNotEmpty()) listState.animateScrollToItem(events.lastIndex)
+    val pageStart = events.firstOrNull { it.type != "permission" && it.type != "question" }?.historyKey
+    var previousPageStart by remember { mutableStateOf(pageStart) }
+    var wasEarlier by remember { mutableStateOf(hasLatest) }
+    LaunchedEffect(events.size, events.lastOrNull()?.text, pageStart, hasLatest, reading, followLatest) {
+        if (!reading) {
+            if (hasLatest) {
+                if (!wasEarlier || previousPageStart != pageStart) listState.scrollToItem(0)
+            } else if ((wasEarlier || followLatest) && events.isNotEmpty()) {
+                listState.animateScrollToItem(events.lastIndex + if (hasEarlier) 1 else 0)
+            }
+            previousPageStart = pageStart
+            wasEarlier = hasLatest
+        }
     }
     Column(modifier.fillMaxSize()) {
-        SelectionContainer { Text(session.cwd, modifier = Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall) }
+        Text(session.cwd, modifier = Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall, maxLines = 2)
+        if (hasLatest) {
+            Text(stringResource(R.string.agent_viewing_earlier), modifier = Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = onLatest, enabled = !reading) { Text(stringResource(R.string.agent_latest_messages)) }
+        }
         LazyColumn(
             state = listState,
             modifier = Modifier.weight(1f),
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (events.isEmpty()) item { Text(stringResource(R.string.agent_conversation_empty)) }
-            items(events) { event ->
-                val interaction = AgentInteractionKey(session, event)
-                androidx.compose.runtime.key(interaction) {
-                    AgentEventContent(
-                        event = event,
-                        responding = interaction in responding,
-                        onPermission = { _, option -> onPermission(interaction, option) },
-                        onQuestion = { _, answer -> onQuestion(interaction, answer) },
-                    )
+            if (hasEarlier) {
+                item(key = "earlier") {
+                    TextButton(onClick = onEarlier, enabled = !reading) { Text(stringResource(R.string.agent_load_earlier)) }
                 }
             }
-        }
-        Row(Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-                value = prompt,
-                onValueChange = { prompt = it },
-                label = { Text(stringResource(R.string.agent_prompt)) },
-                modifier = Modifier.weight(1f),
-                maxLines = 6,
-            )
-            Column {
-                Button(
-                    onClick = {
-                        onSend(prompt)
-                        prompt = ""
-                    },
-                    enabled = !busy && prompt.isNotBlank(),
-                ) { Text(stringResource(R.string.agent_send)) }
-                if (busy) TextButton(onClick = onCancel) { Text(stringResource(R.string.agent_stop)) }
+            if (events.isEmpty()) item(key = "empty") { Text(stringResource(R.string.agent_conversation_empty)) }
+            itemsIndexed(events, key = { index, event -> if (event.historyKey >= 0) "history:${event.historyKey}" else "event:$index:${event.type}:${event.id}" }) { _, event ->
+                val interaction = AgentInteractionKey(session, event)
+                AgentEventContent(
+                    event = event,
+                    responding = interaction in responding,
+                    interactionsEnabled = interactionsEnabled,
+                    onFullText = onFullText,
+                    onPermission = { _, option -> onPermission(interaction, option) },
+                    onQuestion = { _, answer -> onQuestion(interaction, answer) },
+                )
             }
+        }
+    }
+}
+
+@Composable
+private fun AgentComposer(
+    prompt: String,
+    onPrompt: (String) -> Unit,
+    busy: Boolean,
+    hasSession: Boolean,
+    ready: Boolean,
+    onSend: () -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = prompt,
+            onValueChange = onPrompt,
+            label = { Text(stringResource(R.string.agent_prompt)) },
+            modifier = Modifier.weight(1f),
+            maxLines = 6,
+        )
+        Column {
+            Button(onClick = onSend, enabled = !busy && (!hasSession || (ready && prompt.isNotBlank()))) {
+                Text(stringResource(if (hasSession) R.string.agent_send else R.string.agent_start))
+            }
+            if (busy && hasSession) TextButton(onClick = onCancel) { Text(stringResource(R.string.agent_stop)) }
         }
     }
 }
@@ -444,13 +541,18 @@ private fun AgentConversation(
 @Composable
 private fun NewAgentSessionDialog(
     hosts: List<Host>,
+    sessions: List<AgentSession>,
+    availability: List<AgentAvailability>,
+    active: AgentSession?,
     initialHostId: Long?,
+    initialAgent: AgentKind,
+    initialCwd: String,
     onDismiss: () -> Unit,
     onCreate: (Host, AgentKind, String) -> Unit,
 ) {
-    var selectedHostId by remember { mutableStateOf(initialHostId ?: hosts.firstOrNull()?.id) }
-    var kind by remember { mutableStateOf(AgentKind.KIMI) }
-    var cwd by remember { mutableStateOf("") }
+    var selectedHostId by remember { mutableStateOf(initialHostId) }
+    var kind by remember { mutableStateOf(initialAgent) }
+    var cwd by remember { mutableStateOf(initialCwd) }
     val host = hosts.firstOrNull { it.id == selectedHostId }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -460,9 +562,12 @@ private fun NewAgentSessionDialog(
                 if (hosts.isEmpty()) Text(stringResource(R.string.agent_no_devices))
                 AgentChoice(
                     label = stringResource(R.string.agent_device),
-                    value = host?.nickname ?: stringResource(R.string.agent_missing_host),
+                    value = host?.nickname ?: stringResource(R.string.agent_select_host),
                     options = hosts.map { it.id to it.nickname },
-                    onSelect = { selectedHostId = it },
+                    onSelect = {
+                        selectedHostId = it
+                        cwd = defaultAgentCwd(it, active, sessions)
+                    },
                 )
                 AgentChoice(
                     label = stringResource(R.string.agent_kind),
@@ -470,7 +575,7 @@ private fun NewAgentSessionDialog(
                     options = AgentKind.entries.map { it to agentName(it) },
                     onSelect = { kind = it },
                 )
-                Text(stringResource(R.string.agent_support_hint), style = MaterialTheme.typography.bodySmall)
+                AgentAvailabilityContent(agentAvailability(availability, selectedHostId, kind))
                 OutlinedTextField(
                     value = cwd,
                     onValueChange = { cwd = it },
@@ -482,8 +587,11 @@ private fun NewAgentSessionDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { host?.let { onCreate(it, kind, cwd) } }, enabled = host != null && validAgentCwd(cwd)) {
-                Text(stringResource(if (supportsStructuredConversation(kind)) R.string.agent_start else R.string.agent_terminal))
+            TextButton(
+                onClick = { host?.let { onCreate(it, kind, cwd) } },
+                enabled = host != null && validAgentCwd(cwd) && canOpenAgent(availability, selectedHostId, kind),
+            ) {
+                Text(stringResource(R.string.agent_start))
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.agent_cancel)) } },
@@ -534,7 +642,9 @@ private fun AgentChallengeDialog(challenge: AgentChallenge, onRespond: (String, 
                 TextButton(onClick = {
                     onRespond(challenge.id, if (hostKey) "accept" else secret)
                     secret = ""
-                }) { Text(stringResource(if (hostKey) R.string.agent_accept else R.string.agent_confirm)) }
+                }) {
+                    Text(stringResource(if (hostKey) R.string.agent_accept else R.string.agent_confirm))
+                }
             }
         },
         dismissButton = {
@@ -559,7 +669,7 @@ private fun <T> AgentChoice(
     var expanded by remember { mutableStateOf(false) }
     Column(modifier) {
         OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth(), enabled = options.isNotEmpty()) {
-            Text("$label: $value")
+            Text(stringResource(R.string.agent_choice_value, label, value), maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             options.forEach { (id, title) ->

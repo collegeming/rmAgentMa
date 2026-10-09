@@ -38,19 +38,32 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import org.connectbot.R
 import org.connectbot.data.HostRepository
 import org.connectbot.data.entity.Host
 import org.connectbot.di.CoroutineDispatchers
 import org.connectbot.service.AgentConnectionService
 import org.rmagentma.core.AcpDriver
 import org.rmagentma.core.AcpSessionHandle
+import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
+import org.rmagentma.core.AgentSessionHandle
+import org.rmagentma.core.RemoteAgentProbe
 import org.rmagentma.core.RemoteScanner
+import org.rmagentma.core.ZcodeDriver
+import org.rmagentma.core.ZcodeLaunchConfig
+import org.rmagentma.core.ZcodeSessionHandle
+import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
+
+enum class AgentConversationState {
+    Loading,
+    Ready,
+    Failed,
+    Closed,
+}
 
 @Singleton
 class AgentRepository @Inject constructor(
@@ -73,17 +86,37 @@ class AgentRepository @Inject constructor(
     val challenge: StateFlow<AgentChallenge?> = challenges.challenge
     private val mutableActive = MutableStateFlow<AgentSession?>(null)
     val activeSession: StateFlow<AgentSession?> = mutableActive.asStateFlow()
+    private val mutableSelected = MutableStateFlow<AgentSession?>(null)
+    val selectedSession: StateFlow<AgentSession?> = mutableSelected.asStateFlow()
+    private val mutableConversationState = MutableStateFlow(AgentConversationState.Closed)
+    val conversationState: StateFlow<AgentConversationState> = mutableConversationState.asStateFlow()
+    private val mutableHasEarlier = MutableStateFlow(false)
+    val hasEarlier: StateFlow<Boolean> = mutableHasEarlier.asStateFlow()
+    private val mutableHasLatest = MutableStateFlow(false)
+    val hasLatest: StateFlow<Boolean> = mutableHasLatest.asStateFlow()
+    private val mutableAvailability = MutableStateFlow<List<AgentAvailability>>(emptyList())
+    val availability: StateFlow<List<AgentAvailability>> = mutableAvailability.asStateFlow()
+    private val probeMutex = Mutex()
 
     private val scope = CoroutineScope(SupervisorJob() + dispatchers.io)
     private val switchMutex = Mutex()
     private val refreshMutex = Mutex()
     private val stateLock = Any()
-    private val history = AgentEventHistory()
+    private val history = AgentEventHistory(directory = java.io.File(context.noBackupFilesDir, "agent-history"), cleanupExisting = true)
     private var generation = 0L
-    private var handle: AcpSessionHandle? = null
+    private var handle: AgentSessionHandle? = null
+
+    @Volatile
     private var conversationScope: CoroutineScope? = null
+
+    @Volatile
     private var promptJob: Job? = null
+
+    @Volatile
     private var openingJob: Job? = null
+
+    @Volatile
+    private var historyReadJob: Job? = null
     private val jobs = AgentJobs(scope)
     val operationCount: StateFlow<Int> = jobs.count
     private val foregroundLock = Mutex()
@@ -103,8 +136,9 @@ class AgentRepository @Inject constructor(
                 try {
                     val ids = currentHosts.map { it.id }.toSet()
                     refreshMutex.withLock { mutableSessions.value = index.retainHosts(ids) }
+                    probeMutex.withLock { mutableAvailability.update { rows -> rows.filter { it.hostId in ids } } }
                     pool.retainHosts(ids)
-                    if (activeSession.value?.hostId?.let { it !in ids } == true) closeConversation()
+                    if (selectedSession.value?.hostId?.let { it !in ids } == true) closeConversation()
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -133,6 +167,23 @@ class AgentRepository @Inject constructor(
         }.await()
     }
 
+    private suspend fun probeHost(hostId: Long, interactive: Boolean, force: Boolean): List<AgentAvailability> = probeMutex.withLock {
+        val cached = mutableAvailability.value.filter { it.hostId == hostId }
+        if (!force && cached.size == AgentKind.entries.size) return@withLock cached
+        val result = try {
+            RemoteAgentProbe(dispatchers.io).probe(pool.hostSession(hostId, interactive))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            AgentKind.entries.map { kind ->
+                val previous = cached.firstOrNull { it.kind == kind }
+                AgentAvailability(hostId, kind, previous?.executable.orEmpty(), false, describe(e), previous?.version.orEmpty(), previous?.capabilities)
+            }
+        }
+        mutableAvailability.update { previous -> previous.filterNot { it.hostId == hostId } + result }
+        return@withLock result
+    }
+
     private suspend fun refreshIndex(hostId: Long?, interactive: Boolean) = refreshMutex.withLock {
         if (interactive) mutableErrors.value = emptyList()
         val allHosts = hostRepository.getSshHosts()
@@ -140,12 +191,15 @@ class AgentRepository @Inject constructor(
         val selected = if (hostId == null) allHosts else allHosts.filter { it.id == hostId }
         for (host in selected) {
             if (interactive) pool.allowUserRetry(host.id)
+            val available = probeHost(host.id, interactive, force = true)
             for (agent in AgentKind.entries) {
                 currentCoroutineContext().ensureActive()
                 try {
                     val remote = pool.hostSession(host.id, interactive)
                     val found = if (agent == AgentKind.OMP) {
-                        AcpDriver(agent, scope, dispatchers.io).listSessions(remote)
+                        val runtime = available.single { it.kind == agent }
+                        if (!runtime.available) continue
+                        AcpDriver(agent, scope, dispatchers.io, runtime.executable.takeIf { it.isNotBlank() }).listSessions(remote)
                     } else {
                         val scan = RemoteScanner(dispatchers.io).scan(remote, setOf(agent), 200)
                         if (scan.errors.isNotEmpty()) {
@@ -173,29 +227,40 @@ class AgentRepository @Inject constructor(
     )
 
     private suspend fun openConversation(session: AgentSession, sessionId: String?) = operation {
-        require(session.agent in setOf(AgentKind.KIMI, AgentKind.OPENCODE, AgentKind.OMP)) {
-            context.getString(R.string.agent_use_terminal)
-        }
         switchMutex.withLock {
             closeCurrent()
             val actualOpening = currentCoroutineContext()[Job]!!
             val token = synchronized(stateLock) {
                 openingJob = actualOpening
-                mutableActive.value = session
+                mutableSelected.value = session
+                mutableActive.value = null
+                mutableConversationState.value = AgentConversationState.Loading
                 mutableEvents.value = emptyList()
-                history.clear()
+                mutableHasEarlier.value = false
+                mutableHasLatest.value = false
                 generation
             }
             val child = CoroutineScope(SupervisorJob(scope.coroutineContext[Job]) + dispatchers.io)
             synchronized(stateLock) { conversationScope = child }
             try {
+                synchronized(stateLock) { history.clear() }
                 pool.allowUserRetry(session.hostId)
                 currentCoroutineContext().ensureActive()
-                val opened = AcpDriver(session.agent, child, dispatchers.io).open(pool.hostSession(session.hostId), sessionId, session.cwd)
+                val runtime = probeHost(session.hostId, interactive = true, force = false).single { it.kind == session.agent }
+                if (!runtime.available) throw java.io.IOException("${session.agent.wireName} unavailable: ${runtime.error.ifBlank { "agent startup probe failed" }}")
+                val remote = pool.hostSession(session.hostId)
+                val opened: AgentSessionHandle = when (session.agent) {
+                    AgentKind.ZCODE -> ZcodeDriver(
+                        child,
+                        dispatchers.io,
+                        ZcodeLaunchConfig(executable = runtime.executable.takeIf { it.isNotBlank() } ?: "~/.zcode/server/agents/glm/zcode-agent"),
+                    ).prepare(remote, sessionId, session.cwd, workspaceIdentity = null, replayHistory = true)
+
+                    else -> AcpDriver(session.agent, child, dispatchers.io, runtime.executable.takeIf { it.isNotBlank() }).prepare(remote, sessionId, session.cwd)
+                }
                 val accepted = synchronized(stateLock) {
                     if (generation == token) {
                         handle = opened
-                        mutableActive.value = session.copy(sessionId = opened.sessionId)
                         true
                     } else {
                         false
@@ -206,35 +271,54 @@ class AgentRepository @Inject constructor(
                     child.cancel()
                     return@withLock
                 }
-                child.launch {
+                child.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
                     try {
                         opened.events.collect { event ->
+                            val collectingContext = currentCoroutineContext()
+                            collectingContext.ensureActive()
                             synchronized(stateLock) {
-                                if (generation == token) mutableEvents.value = history.append(event)
+                                if (generation == token) {
+                                    mutableEvents.value = history.append(event) { collectingContext.ensureActive() }
+                                    mutableHasEarlier.value = history.hasEarlier
+                                }
                             }
                         }
+                        failConversation(token, java.io.EOFException("Agent connection closed"))
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        synchronized(stateLock) {
-                            if (generation == token) report(e)
-                        }
+                        failConversation(token, e)
+                        opened.close()
+                    }
+                }
+                when (opened) {
+                    is AcpSessionHandle -> opened.load()
+                    is ZcodeSessionHandle -> opened.load()
+                    else -> error("Unsupported agent session handle")
+                }
+                synchronized(stateLock) {
+                    if (generation == token && mutableConversationState.value == AgentConversationState.Loading) {
+                        val loaded = session.copy(sessionId = opened.sessionId)
+                        mutableSelected.value = loaded
+                        mutableActive.value = loaded
+                        mutableConversationState.value = AgentConversationState.Ready
                     }
                 }
             } catch (e: CancellationException) {
                 child.cancel()
                 synchronized(stateLock) {
-                    if (generation == token) mutableActive.value = null
+                    if (generation == token) {
+                        mutableActive.value = null
+                        handle = null
+                        if (mutableConversationState.value != AgentConversationState.Failed) {
+                            mutableConversationState.value = AgentConversationState.Closed
+                        }
+                    }
                 }
                 throw e
             } catch (e: Exception) {
                 child.cancel()
-                synchronized(stateLock) {
-                    if (generation == token) {
-                        mutableActive.value = null
-                        report(e)
-                    }
-                }
+                failConversation(token, e)
             } finally {
                 synchronized(stateLock) {
                     if (openingJob === actualOpening) openingJob = null
@@ -243,15 +327,86 @@ class AgentRepository @Inject constructor(
         }
     }
 
+    private fun failConversation(token: Long, error: Exception) = synchronized(stateLock) {
+        if (generation == token) {
+            mutableActive.value = null
+            mutableConversationState.value = AgentConversationState.Failed
+            mutableBusy.value = false
+            promptJob?.cancel()
+            val failed = handle
+            handle = null
+            conversationScope?.cancel()
+            scope.launch { failed?.close() }
+            report(error)
+        }
+    }
+
+    suspend fun loadEarlier() = loadHistoryPage(latest = false)
+
+    suspend fun loadLatest() = loadHistoryPage(latest = true)
+
+    private suspend fun loadHistoryPage(latest: Boolean) = withContext(dispatchers.io) {
+        val readingContext = currentCoroutineContext()
+        historyReadJob = readingContext[Job]
+        try {
+            synchronized(stateLock) {
+                try {
+                    mutableEvents.value = if (latest) {
+                        history.loadLatest { readingContext.ensureActive() }
+                    } else {
+                        history.loadEarlier { readingContext.ensureActive() }
+                    }
+                    mutableHasEarlier.value = history.hasEarlier
+                    mutableHasLatest.value = history.hasLatest
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failConversation(generation, e)
+                    throw e
+                }
+            }
+        } finally {
+            if (historyReadJob === readingContext[Job]) historyReadJob = null
+        }
+    }
+
+    suspend fun fullText(event: AgentEvent): AgentEvent = withContext(dispatchers.io) {
+        val readingContext = currentCoroutineContext()
+        historyReadJob = readingContext[Job]
+        try {
+            synchronized(stateLock) {
+                require(mutableEvents.value.any { it === event }) { "Stale history item" }
+                try {
+                    history.fullText(event) { readingContext.ensureActive() }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    failConversation(generation, e)
+                    throw e
+                }
+            }
+        } finally {
+            if (historyReadJob === readingContext[Job]) historyReadJob = null
+        }
+    }
+
     suspend fun send(text: String) = operation {
         require(text.isNotBlank())
         val job = currentCoroutineContext()[Job]
         val (current, token) = synchronized(stateLock) {
             val current = handle ?: return@operation
-            if (mutableBusy.value) return@operation
+            if (mutableBusy.value || mutableConversationState.value != AgentConversationState.Ready) return@operation
+            try {
+                val appended = history.append(AgentEvent(type = "user", text = text, id = "local-${java.util.UUID.randomUUID()}"))
+                mutableEvents.value = if (history.hasLatest) history.loadLatest() else appended
+                mutableHasEarlier.value = history.hasEarlier
+                mutableHasLatest.value = history.hasLatest
+            } catch (e: Exception) {
+                failConversation(generation, e)
+                throw e
+            }
             mutableBusy.value = true
             promptJob = job
-            mutableEvents.value = history.append(AgentEvent(type = "user", text = text))
             current to generation
         }
         try {
@@ -270,8 +425,21 @@ class AgentRepository @Inject constructor(
         }
     }
 
-    suspend fun cancel() {
-        val (current, token) = synchronized(stateLock) { handle to generation }
+    suspend fun cancel() = withContext(dispatchers.io) {
+        openingJob?.cancel()
+        historyReadJob?.cancel()
+        promptJob?.cancel()
+        val (current, token) = synchronized(stateLock) {
+            if (mutableConversationState.value == AgentConversationState.Loading) {
+                openingJob?.cancel()
+                conversationScope?.cancel()
+                mutableConversationState.value = AgentConversationState.Closed
+                mutableActive.value = null
+                return@withContext
+            }
+            promptJob?.cancel()
+            handle to generation
+        }
         jobs.submit {
             try {
                 current?.cancel()
@@ -296,15 +464,15 @@ class AgentRepository @Inject constructor(
         expectedEvent: AgentEvent,
         id: String,
         type: String,
-        respond: suspend (AcpSessionHandle) -> Unit,
-    ) {
+        respond: suspend (AgentSessionHandle) -> Unit,
+    ) = withContext(dispatchers.io) {
         val snapshot = synchronized(stateLock) {
-            if (mutableActive.value !== expectedSession || !history.isPending(expectedEvent, id, type)) {
+            if (mutableSelected.value !== expectedSession || mutableConversationState.value !in setOf(AgentConversationState.Loading, AgentConversationState.Ready) || !history.isPending(expectedEvent, id, type)) {
                 null
             } else {
                 handle?.let { it to generation }
             }
-        } ?: return
+        } ?: return@withContext
         jobs.submit {
             try {
                 respond(snapshot.first)
@@ -321,14 +489,16 @@ class AgentRepository @Inject constructor(
     }
 
     suspend fun closeConversation() = withContext(dispatchers.io) {
-        synchronized(stateLock) {
-            openingJob?.cancel()
-            conversationScope?.cancel()
-        }
+        openingJob?.cancel()
+        historyReadJob?.cancel()
+        conversationScope?.cancel()
         switchMutex.withLock { closeCurrent() }
     }
 
     private suspend fun closeCurrent() {
+        historyReadJob?.cancel()
+        promptJob?.cancel()
+        conversationScope?.cancel()
         val previous = synchronized(stateLock) {
             generation++
             promptJob?.cancel()
@@ -339,6 +509,7 @@ class AgentRepository @Inject constructor(
             handle = null
             mutableBusy.value = false
             mutableActive.value = null
+            mutableConversationState.value = AgentConversationState.Closed
             previous
         }
         try {
@@ -374,10 +545,9 @@ class AgentRepository @Inject constructor(
         }
         challenges.cancelAll()
         jobs.cancelAll()
-        synchronized(stateLock) {
-            openingJob?.cancel()
-            conversationScope?.cancel()
-        }
+        openingJob?.cancel()
+        historyReadJob?.cancel()
+        conversationScope?.cancel()
     }
 
     private fun startMaintenance() = synchronized(maintenanceLock) {
@@ -429,7 +599,17 @@ class AgentRepository @Inject constructor(
     }
 
     private fun report(error: Exception, prefix: String = "") {
-        val message = listOf(prefix, error.message ?: error.javaClass.simpleName).filter { it.isNotBlank() }.joinToString(": ")
+        val message = listOf(prefix, describe(error)).filter { it.isNotBlank() }.joinToString(": ")
+        // Log the full chain: the UI shows a short message, but the cause is what makes
+        // remote transport failures diagnosable.
+        Timber.w(error, "Agent operation failed: %s", message)
         mutableErrors.update { (it + message).takeLast(100) }
+    }
+
+    private fun describe(error: Throwable): String {
+        val chain = generateSequence(error) { it.cause }.take(4).toList()
+        return chain.joinToString(" <- ") { throwable ->
+            throwable.message?.takeIf { it.isNotBlank() } ?: throwable.javaClass.simpleName
+        }
     }
 }

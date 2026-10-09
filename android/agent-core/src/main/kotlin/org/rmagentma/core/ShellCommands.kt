@@ -17,6 +17,8 @@
 
 package org.rmagentma.core
 
+import java.util.Base64
+
 object ShellCommands {
     fun quote(value: String): String {
         require('\u0000' !in value) { "Shell arguments cannot contain NUL" }
@@ -40,11 +42,17 @@ object ShellCommands {
             (sessionId?.let { " $flag ${quote(it)}" } ?: "")
     }
 
-    fun acp(agent: AgentKind, cwd: String): String {
-        require(agent in setOf(AgentKind.KIMI, AgentKind.OPENCODE, AgentKind.OMP)) { "Agent does not support ACP" }
+    fun acp(agent: AgentKind, cwd: String, executable: String? = null): String {
+        require(agent in setOf(AgentKind.KIMI, AgentKind.OPENCODE, AgentKind.OMP, AgentKind.DSH)) { "Agent does not support ACP" }
         require(cwd.startsWith('/')) { "Working directory must be absolute" }
         requireTerminalArgument(cwd)
-        return "cd -- ${quote(cwd)} && exec ${agent.command} acp"
+        executable?.let {
+            require(it.startsWith('/')) { "Executable must be absolute" }
+            requireTerminalArgument(it)
+        }
+        val command = executable?.let(::quote) ?: agent.command
+        val arguments = if (agent == AgentKind.DSH) "--profile acp" else "acp"
+        return "cd -- ${quote(cwd)} && exec $command $arguments"
     }
 
     private fun requireTerminalArgument(value: String) {
@@ -53,17 +61,26 @@ object ShellCommands {
 
     internal fun scanner(script: String, agents: Set<AgentKind>, limit: Int): String {
         require(limit in 1..1000) { "Limit must be between 1 and 1000" }
-        var delimiter = "RMAGENTMA_SCAN"
-        val lines = script.lineSequence().toSet()
-        while (delimiter in lines) delimiter += "_"
         val names = agents.sortedBy { it.ordinal }.joinToString(" ") { quote(it.wireName) }
-        return "if ! command -v python3 >/dev/null 2>&1; then\n" +
-            "printf '%s\\n' '{\"level\":\"error\",\"category\":\"python_missing\"}'\nexit 127\nfi\n" +
-            "if python3 - --agent $names --limit $limit <<'$delimiter'\n" +
-            script.trimEnd('\n') + "\n$delimiter\n" +
-            "then\nexit 0\nelse\nrmagentma_status=\$?\n" +
-            "printf '%s\\n' '{\"level\":\"error\",\"category\":\"scanner_exit_failed\"}'\n" +
-            "exit \"\$rmagentma_status\"\nfi\n"
+        // The remote login shell belongs to the user and may be fish, zsh or csh, where bash
+        // syntax such as heredocs is invalid. The script therefore travels as a base64 argument
+        // and is decoded into an explicitly invoked POSIX shell, which keeps the command valid
+        // for any default shell. The payload is single-quoted so the login shell does not expand
+        // anything inside it.
+        val encoded = Base64.getEncoder().encodeToString(script.toByteArray(Charsets.UTF_8))
+        // /bin/sh is the POSIX shell guaranteed by every Unix-like target, while the login
+        // shell is user-controlled. base64 is resolved through PATH because it may live in
+        // /usr/bin or /bin depending on the distribution.
+        val payload = "if ! command -v python3 >/dev/null 2>&1; then " +
+            "printf '%s\\n' '{\"level\":\"error\",\"category\":\"python_missing\"}'; exit 127; fi; " +
+            "if ! command -v base64 >/dev/null 2>&1; then " +
+            "printf '%s\\n' '{\"level\":\"error\",\"category\":\"base64_missing\"}'; exit 127; fi; " +
+            "printf '%s' '$encoded' | base64 -d | python3 - --agent $names --limit $limit; " +
+            "rmagentma_status=\$?; " +
+            "if [ \$rmagentma_status -ne 0 ]; then " +
+            "printf '%s\\n' '{\"level\":\"error\",\"category\":\"scanner_exit_failed\"}'; fi; " +
+            "exit \$rmagentma_status"
+        return "/bin/sh -c ${quote(payload)}"
     }
 }
 

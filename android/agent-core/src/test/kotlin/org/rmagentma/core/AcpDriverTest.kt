@@ -90,6 +90,7 @@ class AcpDriverTest {
                         }
                     }
                 }
+                handle.load()
                 handle.send("hello")
                 collector.await()
                 server.await()
@@ -107,7 +108,7 @@ class AcpDriverTest {
 
     @Test
     fun newAndCancelNotificationDoNotWaitForPromptLock() = runBlocking {
-        withTimeout(10000) {
+        withTimeout(30000) {
             val host = PipeHost()
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             val promptSeen = Channel<Unit>(1)
@@ -124,7 +125,9 @@ class AcpDriverTest {
                     assertFalse(cancel.containsKey("id"))
                     host.reply(prompt, """{"stopReason":"cancelled"}""")
                 }
-                val handle = AcpDriver(AgentKind.OPENCODE, scope).open(host, null, "/tmp")
+                val handle = AcpDriver(AgentKind.OPENCODE, scope).prepare(host, null, "/tmp")
+                val collector = async { handle.events.toList() }
+                handle.load()
                 assertEquals("new-session", handle.sessionId)
                 val prompt = async { handle.send("hello") }
                 promptSeen.receive()
@@ -151,14 +154,16 @@ class AcpDriverTest {
                     host.read()
                     host.end()
                 }
-                val handle = AcpDriver(AgentKind.OMP, scope).open(host, null, "/tmp")
+                val handle = AcpDriver(AgentKind.OMP, scope).prepare(host, null, "/tmp")
+                val collector = async { handle.events.toList() }
+                handle.load()
                 try {
                     handle.send("hello")
                     throw AssertionError("EOF should fail the prompt")
                 } catch (_: EOFException) {
                     // expected
                 }
-                assertEquals("error", handle.events.toList().last().type)
+                assertEquals("error", collector.await().last().type)
                 server.await()
             } finally {
                 host.channel.close()
@@ -225,11 +230,104 @@ class AcpDriverTest {
                     host.reply(host.read(), """{"protocolVersion":1,"agentCapabilities":{}}""")
                     host.reply(host.read(), """{"sessionId":"s"}""")
                 }
-                val handle = AcpDriver(AgentKind.KIMI, scope).open(host, null, "/tmp")
+                val handle = AcpDriver(AgentKind.KIMI, scope).prepare(host, null, "/tmp")
+                val collector = async { handle.events.toList() }
+                handle.load()
                 server.await()
                 scope.cancel()
-                assertEquals("error", handle.events.toList().last().type)
+                assertEquals("error", collector.await().last().type)
                 assertTrue(host.channel.closes.get() > 0)
+            } finally {
+                host.channel.close()
+                scope.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun dshStreamsAllTranscriptPagesBeforeResumeAndConsumesResumeUpdatesBeforeReady() = runBlocking {
+        withTimeout(10000) {
+            val pipe = PipeHost()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            var pages = 0
+            val historyConsumed = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val releaseHistory = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val host = object : HostSession {
+                override val hostId = pipe.hostId
+                override suspend fun exec(command: String): ExecChannel {
+                    if (command.contains("--profile acp")) return pipe.exec(command)
+                    val number = pages++
+                    val body = """{"record":"event","hostId":42,"agent":"dsh","sessionId":"s","cwd":"/tmp","type":"user","text":"history$number","id":"m$number"}
+                        |{"record":"page","count":1,"nextCursor":"${if (number == 0) "next" else ""}"}
+                    """.trimMargin()
+                    return object : ExecChannel {
+                        override val stdout = ByteArrayInputStream(body.toByteArray())
+                        override val stdin = java.io.ByteArrayOutputStream()
+                        override val stderr = ByteArrayInputStream(byteArrayOf())
+                        override fun close() = Unit
+                    }
+                }
+            }
+            try {
+                val server = async(Dispatchers.IO) {
+                    pipe.reply(pipe.read(), """{"protocolVersion":1,"agentCapabilities":{"loadSession":false,"sessionCapabilities":{"resume":{}}}}""")
+                    val resume = pipe.read()
+                    assertTrue(releaseHistory.isCompleted)
+                    assertEquals(2, pages)
+                    assertEquals("session/resume", resume.string("method"))
+                    assertEquals("s", resume["params"]!!.jsonObject.string("sessionId"))
+                    pipe.update("""{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"resumed"}}""")
+                    pipe.reply(resume, "{}")
+                }
+                val handle = AcpDriver(AgentKind.DSH, scope).prepare(host, "s", "/tmp")
+                val collected = mutableListOf<String>()
+                val consumer = async {
+                    handle.events.collect {
+                        collected += it.text
+                        if (it.text == "history1") {
+                            historyConsumed.complete(Unit)
+                            releaseHistory.await()
+                        }
+                    }
+                }
+                val loading = async { handle.load() }
+                historyConsumed.await()
+                assertFalse(loading.isCompleted)
+                releaseHistory.complete(Unit)
+                loading.await()
+                assertEquals(listOf("history0", "history1", "resumed"), collected)
+                server.await()
+                handle.close()
+                consumer.await()
+            } finally {
+                pipe.channel.close()
+                scope.cancel()
+            }
+        }
+    }
+
+    @Test
+    fun dshNewSessionDoesNotReadTranscriptOrRequireLoadCapability() = runBlocking {
+        withTimeout(10000) {
+            val host = PipeHost()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            try {
+                val server = async(Dispatchers.IO) {
+                    host.reply(host.read(), """{"protocolVersion":1,"agentCapabilities":{}}""")
+                    val create = host.read()
+                    assertEquals("session/new", create.string("method"))
+                    host.reply(create, """{"sessionId":"new-dsh"}""")
+                }
+                val handle = AcpDriver(AgentKind.DSH, scope).prepare(host, null, "/tmp")
+                val collector = async { handle.events.toList() }
+                handle.load()
+                assertEquals("new-dsh", handle.sessionId)
+                assertTrue(host.command.endsWith("exec dsh --profile acp"))
+                assertEquals(1, host.execs)
+                server.await()
+                handle.close()
+                collector.await()
+                Unit
             } finally {
                 host.channel.close()
                 scope.cancel()

@@ -1649,4 +1649,88 @@
 	<string name="pref_connection_lost_notification_title">Lost connection notifications</string>
 	<!-- Settings switch summary explaining when connection failure alerts appear. -->
 	<string name="pref_connection_lost_notification_summary">Show a soundless pop-up when a session you are not viewing unexpectedly disconnects.</string>
+	<!-- Drawer heading and accessibility label for opening all hosts and agents. -->
+	<string name="agent_workspaces">Workspaces</string>
+	<!-- Empty chat heading before a native session has been created. -->
+	<string name="agent_chat_empty_title">Start a conversation</string>
+	<!-- Empty chat setup instructions; a saved SSH host is not opened as a terminal. -->
+	<string name="agent_chat_empty_hint">Choose a host, Agent, and working directory to create a conversation, or open one from Workspaces. Your draft stays here until you send it.</string>
+	<!-- Host selector placeholder before an explicit host is selected. -->
+	<string name="agent_select_host">Select host</string>
+	<!-- Drawer action that creates a session in the group directory. -->
+	<string name="agent_new_in_workspace">New</string>
+	<!-- Collapsed workspace heading; host nickname and session count. -->
+	<string name="agent_workspace_collapsed">▸ %1$s · %2$d</string>
+	<!-- Expanded workspace heading; host nickname and session count. -->
+	<string name="agent_workspace_expanded">▾ %1$s · %2$d</string>
+	<!-- Drawer settings entry. -->
+	<string name="agent_settings">Settings</string>
+	<!-- Drawer key management entry. -->
+	<string name="agent_keys">Keys</string>
+	<!-- Drawer host management entry. -->
+	<string name="agent_hosts">Hosts</string>
+	<!-- Drawer entry that explicitly starts an SSH debug shell. -->
+	<string name="agent_debug_terminal">Debug terminal</string>
+	<!-- Explicit debug terminal confirmation, separate from native chat. -->
+	<string name="agent_debug_terminal_hint">Open an SSH shell on the selected host. Your native chat is kept open.</string>
+	<!-- Confirmation title when a selection would close a conversation or interrupt work. -->
+	<string name="agent_switch_title">Keep the current conversation?</string>
+	<!-- Switching requires explicit consent to close the current session and stop work. -->
+	<string name="agent_switch_warning">A conversation is open or a task is in progress. Keep it, or close it and stop the task before switching. Saved history is not deleted.</string>
+	<!-- Switch confirmation action. -->
+	<string name="agent_close_and_switch">Close and switch</string>
+	<!-- Switch dismissal action preserving current work and selection. -->
+	<string name="agent_keep_conversation">Keep current</string>
+	<!-- Opens a paginated full text view of a long message or raw event. -->
+	<string name="agent_full_text">Read full text</string>
+	<!-- Closes the full text dialog. -->
+	<string name="agent_close_text">Close</string>
+	<!-- Full text dialog previous page action. -->
+	<string name="agent_text_previous">Previous</string>
+	<!-- Full text dialog next page action. -->
+	<string name="agent_text_next">Next</string>
+	<!-- Page number and total pages in the full text dialog. -->
+	<string name="agent_text_page">%1$d / %2$d</string>
+	<!-- Native conversation is connecting and loading remote history. -->
+	<string name="agent_state_loading">Loading conversation…</string>
+	<!-- Native conversation has a ready handle and may accept prompts. -->
+	<string name="agent_state_ready">Ready</string>
+	<!-- Conversation failed; retained history remains readable. -->
+	<string name="agent_state_failed">Conversation failed</string>
+	<!-- Native conversation handle is closed. -->
+	<string name="agent_state_closed">Conversation closed</string>
+	<!-- Explicit retry action for a failed conversation. -->
+	<string name="agent_retry_conversation">Retry</string>
+	<!-- Load a page of older events from retained conversation history. -->
+	<string name="agent_load_earlier">Load earlier messages</string>
+	<!-- Return from an older history page to the newest retained messages. -->
+	<string name="agent_latest_messages">Latest messages</string>
+	<!-- Older page stays visible while live messages are stored; pending interactions remain available. -->
+	<string name="agent_viewing_earlier">Viewing earlier messages. New messages are saved; return to latest to read them. Sending a message returns to latest.</string>
+	<!-- Recent history matching the host and Agent selectors in the empty chat shell. -->
+	<string name="agent_recent_conversations">Recent conversations</string>
+	<!-- Compact selector combines its localized label and chosen value. -->
+	<string name="agent_choice_value">%1$s: %2$s</string>
+	<!-- Drawer shortcut to search all hosts and all Agent kinds. -->
+	<string name="agent_all_workspaces">All hosts and Agents</string>
+	<!-- Drawer shortcut back to the host and Agent selected in the chat shell. -->
+	<string name="agent_current_scope">Current host and Agent</string>
+	<!-- Selected host probe succeeded and verified this Agent installation. -->
+	<string name="agent_available">Installed · protocol ready</string>
+	<!-- Expand the exact executable path and protocol capabilities from the host probe. -->
+	<string name="agent_connection_details">Connection details</string>
+	<!-- Selected host probe could not verify a usable Agent. -->
+	<string name="agent_unavailable">Agent unavailable on this host</string>
+	<!-- No probe result exists for this specific host and Agent pair. -->
+	<string name="agent_availability_unknown">Not yet probed</string>
+	<!-- Unknown is not a claimed installation; refresh or opening invokes the real backend probe. -->
+	<string name="agent_availability_unknown_hint">Refresh to check this host, or open a conversation to probe before connecting.</string>
+	<!-- Version reported by the selected host probe. -->
+	<string name="agent_available_version">Version: %1$s</string>
+	<!-- Exact executable path reported by the selected host probe. -->
+	<string name="agent_available_executable">Executable: %1$s</string>
+	<!-- Capabilities are displayed exactly as reported, without guessing features. -->
+	<string name="agent_available_capabilities">Capabilities: %1$s</string>
+	<!-- Explicit unavailable result without an error description. -->
+	<string name="agent_unavailable_no_reason">The host probe did not report a reason. Refresh to check again.</string>
 </resources>

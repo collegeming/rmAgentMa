@@ -42,7 +42,11 @@ internal fun normalizeUpdate(update: JsonObject): AgentEvent {
     }
     return AgentEvent(
         type = type,
-        text = content?.string("text").orEmpty(),
+        text = when {
+            content == null -> ""
+            content.string("type") == "text" -> content.string("text")
+            else -> "[${content.string("type").ifEmpty { "non-text content" }}]"
+        },
         id = update.string("toolCallId").ifEmpty { update.string("messageId") },
         title = update.string("title").ifEmpty { if (type == "unknown") kind else "" },
         status = update.string("status"),

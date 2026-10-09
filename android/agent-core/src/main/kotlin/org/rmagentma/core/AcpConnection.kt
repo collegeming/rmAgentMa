@@ -109,21 +109,26 @@ internal class AcpConnection(
                 }
             } catch (_: FrameTooLargeException) {
                 failure = IOException("ACP frame exceeds 32 MiB")
-            } catch (_: Exception) {
-                failure = IOException("ACP transport read failed")
+            } catch (e: Exception) {
+                failure = if (e is IOException) e else IOException("ACP transport read failed", e)
             } finally {
                 finish(failure)
             }
         }
     }
 
-    fun emit(event: AgentEvent) {
-        if (!stopped.get() && !eventBuffer.offer(event)) finish(AcpBufferOverflowException(), discardEvents = true)
+    suspend fun emit(event: AgentEvent) {
+        if (!stopped.get() && !eventBuffer.offer(event)) throw IOException("ACP event consumer closed")
     }
 
-    private fun diagnostic(message: String) = emit(AgentEvent("error", text = message))
+    suspend fun awaitConsumer() = eventBuffer.awaitConsumer()
+
+    suspend fun consumeBarrier() = eventBuffer.barrier()
+
+    private suspend fun diagnostic(message: String) = emit(AgentEvent("error", text = message))
 
     suspend fun request(method: String, params: JsonObject): JsonObject {
+        if (method in SESSION_ACTIVATION_METHODS) eventBuffer.awaitConsumer()
         val id = JsonPrimitive(ids.incrementAndGet())
         val deferred = CompletableDeferred<JsonObject>()
         val entry = Pending(method, deferred)
@@ -265,6 +270,7 @@ internal class AcpConnection(
             return
         }
         if (entry.method == "session/prompt") emit(AgentEvent("complete", status = result.string("stopReason"), raw = result))
+        if (entry.method in SESSION_ACTIVATION_METHODS) eventBuffer.barrier()
         entry.result.complete(result)
     }
 
@@ -303,7 +309,7 @@ internal class AcpConnection(
             return
         }
         if (accepted == 0) {
-            finish(IOException("ACP server request buffer exceeded its limit; use terminal fallback"), discardEvents = true)
+            finish(IOException("ACP server request buffer exceeded its limit"))
             return
         }
         val tool = params["toolCall"] as? JsonObject
@@ -335,9 +341,9 @@ internal class AcpConnection(
 
     suspend fun close() = withContext(NonCancellable + ioDispatcher) { finish() }
 
-    private fun finish(cause: IOException? = null, discardEvents: Boolean = false) {
+    private fun finish(cause: IOException? = null) {
         if (!stopped.compareAndSet(false, true)) return
-        eventBuffer.close(cause?.message, discardEvents)
+        eventBuffer.close(cause?.message)
         runCatching { channel.close() }
         pending.values.forEach { it.result.completeExceptionally(cause ?: EOFException("ACP channel closed")) }
         pending.clear()
@@ -346,5 +352,9 @@ internal class AcpConnection(
             incomingBytes = 0
         }
         scope.cancel()
+    }
+
+    private companion object {
+        val SESSION_ACTIVATION_METHODS = setOf("session/new", "session/load", "session/resume")
     }
 }
