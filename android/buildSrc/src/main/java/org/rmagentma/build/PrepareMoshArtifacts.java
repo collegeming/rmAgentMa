@@ -27,26 +27,27 @@ import org.gradle.api.tasks.OutputDirectory;
 import org.gradle.api.tasks.TaskAction;
 import org.gradle.work.DisableCachingByDefault;
 
-@DisableCachingByDefault(because = "Downloads and validates external release archives in a local cache")
+@DisableCachingByDefault(
+    because = "Downloads and validates external release archives in a local cache")
 public abstract class PrepareMoshArtifacts extends DefaultTask {
-    @Input
-    public abstract Property<String> getReleaseTag();
+  @Input
+  public abstract Property<String> getReleaseTag();
 
-    @LocalState
-    public abstract DirectoryProperty getDownloadDirectory();
+  @LocalState
+  public abstract DirectoryProperty getDownloadDirectory();
 
-    @OutputDirectory
-    public abstract DirectoryProperty getJniLibsDirectory();
+  @OutputDirectory
+  public abstract DirectoryProperty getJniLibsDirectory();
 
-    @OutputDirectory
-    public abstract DirectoryProperty getAssetsDirectory();
+  @OutputDirectory
+  public abstract DirectoryProperty getAssetsDirectory();
 
-    @TaskAction
-    public void prepare() throws IOException {
-        MoshArtifacts.prepare(
-                getReleaseTag().get(),
-                getDownloadDirectory().get().getAsFile().toPath(),
-                getJniLibsDirectory().get().getAsFile().toPath(),
-                getAssetsDirectory().get().getAsFile().toPath());
-    }
+  @TaskAction
+  public void prepare() throws IOException {
+    MoshArtifacts.prepare(
+        getReleaseTag().get(),
+        getDownloadDirectory().get().getAsFile().toPath(),
+        getJniLibsDirectory().get().getAsFile().toPath(),
+        getAssetsDirectory().get().getAsFile().toPath());
+  }
 }
