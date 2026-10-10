@@ -125,6 +125,8 @@ fun AgentScreen(
     var showDisconnect by remember { mutableStateOf(false) }
     var showDebugTerminal by remember { mutableStateOf(false) }
     var denied by remember { mutableStateOf(false) }
+    var showDetails by remember { mutableStateOf(false) }
+    var sessionView by rememberSaveable { mutableStateOf(AgentSessionView.CHAT) }
     var prompt by rememberSaveable { mutableStateOf("") }
     var pendingNetworkAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -153,9 +155,11 @@ fun AgentScreen(
         showNew = true
         closeDrawer()
     }
-    BackHandler(enabled = drawerState.isOpen || selectedSession != null || busy || working) {
+    val session = selectedSession
+    BackHandler(enabled = drawerState.isOpen || session != null || busy || working) {
         when {
             drawerState.isOpen -> closeDrawer()
+            sessionView == AgentSessionView.TUI && session != null -> sessionView = AgentSessionView.CHAT
             conversationState == AgentConversationState.Closed && !working -> onNavigateBack()
             else -> viewModel.closeConversation()
         }
@@ -165,12 +169,16 @@ fun AgentScreen(
             withNetworkPermission { viewModel.refresh(viewModel.selectedHost.value) }
         }
     }
+    val terminalCommand: (Host, AgentKind, String, String?) -> String? = { _, kind, cwd, id ->
+        if (validAgentCwd(cwd)) ShellCommands.start(kind, cwd, id?.takeIf { it.isNotBlank() }) else null
+    }
     val terminal: (Host, AgentKind, String, String?) -> Unit = { host, kind, cwd, id ->
-        if (validAgentCwd(cwd)) {
-            withNetworkPermission {
-                onOpenTerminal(host, ShellCommands.start(kind, cwd, id?.takeIf { it.isNotBlank() }))
-            }
+        terminalCommand(host, kind, cwd, id)?.let { command ->
+            withNetworkPermission { onOpenTerminal(host, command) }
         }
+    }
+    LaunchedEffect(session == null) {
+        if (session == null) sessionView = AgentSessionView.CHAT
     }
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -273,7 +281,6 @@ fun AgentScreen(
                         )
                     }
                 }
-                val session = selectedSession
                 if (session == null) {
                     val recent = remember(sessions, hostId, agent) { filterAgentSessions(sessions, hostId, agent, "").take(5) }
                     LazyColumn(
@@ -323,49 +330,73 @@ fun AgentScreen(
                                 Text(stringResource(R.string.agent_retry_conversation))
                             }
                         }
-                        TextButton(
-                            onClick = { hosts.firstOrNull { it.id == session.hostId }?.let { terminal(it, session.agent, session.cwd, session.sessionId) } },
-                            enabled = hosts.any { it.id == session.hostId } && validAgentCwd(session.cwd),
-                        ) {
-                            Text(stringResource(R.string.agent_terminal))
-                        }
+                        TextButton(onClick = { showDetails = true }) { Text(stringResource(R.string.agent_details)) }
                         TextButton(onClick = viewModel::closeConversation) { Text(stringResource(R.string.agent_close_text)) }
                     }
-                    androidx.compose.runtime.key(session.hostId, session.agent, session.sessionId, session.cwd) {
-                        AgentConversation(
-                            session = active ?: session,
-                            events = events,
-                            responding = responding,
-                            interactionsEnabled = conversationState == AgentConversationState.Loading || conversationState == AgentConversationState.Ready,
-                            hasEarlier = hasEarlier,
-                            hasLatest = hasLatest,
-                            reading = reading,
-                            onEarlier = viewModel::loadEarlier,
-                            onLatest = viewModel::loadLatest,
-                            onFullText = viewModel::readFullText,
-                            onPermission = viewModel::respondPermission,
-                            onQuestion = viewModel::respondQuestion,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                }
-                AgentComposer(
-                    prompt = prompt,
-                    onPrompt = { prompt = it },
-                    busy = busy || working || (session == null && !canOpenAgent(availability, hostId, agent)),
-                    hasSession = session != null,
-                    ready = conversationState == AgentConversationState.Ready,
-                    onSend = {
-                        if (session == null) {
-                            newConversation(null)
-                        } else {
-                            withNetworkPermission {
-                                if (viewModel.send(prompt)) prompt = ""
+                    Row(Modifier.padding(horizontal = 12.dp)) {
+                        AgentSessionView.entries.forEach { view ->
+                            TextButton(
+                                onClick = { sessionView = view },
+                                contentPadding = PaddingValues(0.dp),
+                            ) {
+                                Text(
+                                    stringResource(if (view == AgentSessionView.CHAT) R.string.agent_view_chat else R.string.agent_view_tui),
+                                    style = if (view == sessionView) MaterialTheme.typography.titleSmall else MaterialTheme.typography.bodyMedium,
+                                )
                             }
                         }
-                    },
-                    onCancel = viewModel::cancel,
-                )
+                    }
+                    if (sessionView == AgentSessionView.TUI) {
+                        AgentTuiPane(
+                            command = hosts.firstOrNull { it.id == session.hostId }
+                                ?.let { host -> terminalCommand(host, session.agent, session.cwd, session.sessionId) },
+                            conversationActive = conversationState == AgentConversationState.Loading || conversationState == AgentConversationState.Ready,
+                            hostAvailable = hosts.any { it.id == session.hostId },
+                            cwdValid = validAgentCwd(session.cwd),
+                            onOpenTerminal = {
+                                hosts.firstOrNull { it.id == session.hostId }?.let { terminal(it, session.agent, session.cwd, session.sessionId) }
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                    } else {
+                        androidx.compose.runtime.key(session.hostId, session.agent, session.sessionId, session.cwd) {
+                            AgentConversation(
+                                session = active ?: session,
+                                events = events,
+                                responding = responding,
+                                interactionsEnabled = conversationState == AgentConversationState.Loading || conversationState == AgentConversationState.Ready,
+                                hasEarlier = hasEarlier,
+                                hasLatest = hasLatest,
+                                reading = reading,
+                                onEarlier = viewModel::loadEarlier,
+                                onLatest = viewModel::loadLatest,
+                                onFullText = viewModel::readFullText,
+                                onPermission = viewModel::respondPermission,
+                                onQuestion = viewModel::respondQuestion,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                }
+                if (sessionView == AgentSessionView.CHAT) {
+                    AgentComposer(
+                        prompt = prompt,
+                        onPrompt = { prompt = it },
+                        busy = busy || working || (session == null && !canOpenAgent(availability, hostId, agent)),
+                        hasSession = session != null,
+                        ready = conversationState == AgentConversationState.Ready,
+                        onSend = {
+                            if (session == null) {
+                                newConversation(null)
+                            } else {
+                                withNetworkPermission {
+                                    if (viewModel.send(prompt)) prompt = ""
+                                }
+                            }
+                        },
+                        onCancel = viewModel::cancel,
+                    )
+                }
             }
         }
     }
@@ -443,6 +474,20 @@ fun AgentScreen(
     }
     fullText?.let { AgentFullTextDialog(it, viewModel::closeFullText) }
     challenge?.let { AgentChallengeDialog(it, viewModel::respondChallenge) }
+    val detailsSession = session
+    if (showDetails && detailsSession != null) {
+        val details = remember(events, hasEarlier, conversationState) {
+            applyPendingApprovals(
+                projectSessionDetails(events, hasEarlier),
+                conversationState == AgentConversationState.Loading || conversationState == AgentConversationState.Ready,
+            )
+        }
+        AgentSessionDetailsSheet(
+            session = detailsSession,
+            details = details,
+            onDismiss = { showDetails = false },
+        )
+    }
 }
 
 @Composable

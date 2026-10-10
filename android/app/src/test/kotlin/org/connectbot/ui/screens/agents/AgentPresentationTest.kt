@@ -154,6 +154,27 @@ class AgentPresentationTest {
     }
 
     @Test
+    fun workspaceTreeNestsAgentsBelowEachDirectory() {
+        val kimi = AgentSession(1, AgentKind.KIMI, "k", "/work", updatedAt = 20)
+        val omp = kimi.copy(agent = AgentKind.OMP, sessionId = "o", updatedAt = 30)
+        val otherDirectory = kimi.copy(cwd = "/elsewhere", updatedAt = 10)
+        val tree = agentWorkspaceTree(listOf(kimi, omp, otherDirectory), "")
+        assertEquals(listOf(AgentWorkspaceKey(1, "/work"), AgentWorkspaceKey(1, "/elsewhere")), tree.map { it.key })
+        assertEquals(listOf(AgentKind.OMP, AgentKind.KIMI), tree.first().groups.map { it.agent })
+        assertEquals(listOf(omp), tree.first().groups.first().sessions)
+        assertEquals(listOf(kimi, omp), tree.first().sessions.sortedBy { it.updatedAt })
+    }
+
+    @Test
+    fun workspaceTreeKeepsHostAndAgentScopesSeparate() {
+        val kimi = AgentSession(1, AgentKind.KIMI, "k", "/work", updatedAt = 20)
+        val otherHost = kimi.copy(hostId = 2, updatedAt = 40)
+        val tree = agentWorkspaceTree(listOf(kimi, otherHost), "", 1, AgentKind.KIMI)
+        assertEquals(listOf(AgentWorkspaceKey(1, "/work")), tree.map { it.key })
+        assertEquals(listOf(AgentKind.KIMI), tree.single().groups.map { it.agent })
+    }
+
+    @Test
     fun interactionKeysRejectSameIdsFromReopenedSessionOrReplacementEvent() {
         val session = AgentSession(1, AgentKind.KIMI, "session", "/work")
         val event = AgentEvent("permission", id = "1")

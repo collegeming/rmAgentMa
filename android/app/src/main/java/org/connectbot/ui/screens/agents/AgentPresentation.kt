@@ -52,6 +52,10 @@ internal data class AgentWorkspaceKey(val hostId: Long, val cwd: String)
 
 internal data class AgentWorkspace(val key: AgentWorkspaceKey, val sessions: List<AgentSession>)
 
+internal data class AgentGroup(val agent: AgentKind, val sessions: List<AgentSession>)
+
+internal data class AgentWorkspaceTree(val key: AgentWorkspaceKey, val sessions: List<AgentSession>, val groups: List<AgentGroup>)
+
 internal fun groupAgentWorkspaces(
     sessions: List<AgentSession>,
     query: String,
@@ -60,6 +64,24 @@ internal fun groupAgentWorkspaces(
 ): List<AgentWorkspace> = filterAgentSessions(sessions, hostId, agent, query)
     .groupBy { AgentWorkspaceKey(it.hostId, it.cwd) }
     .map { (key, items) -> AgentWorkspace(key, items) }
+
+/** Nests each workspace by agent so the drawer can render workspace → agent → session without mixing hosts or directories. */
+internal fun agentWorkspaceTree(
+    sessions: List<AgentSession>,
+    query: String,
+    hostId: Long? = null,
+    agent: AgentKind? = null,
+): List<AgentWorkspaceTree> = filterAgentSessions(sessions, hostId, agent, query)
+    .groupBy { AgentWorkspaceKey(it.hostId, it.cwd) }
+    .map { (key, items) ->
+        AgentWorkspaceTree(
+            key,
+            items,
+            items.groupBy { it.agent }
+                .map { (kind, grouped) -> AgentGroup(kind, grouped.sortedByDescending { it.updatedAt }) }
+                .sortedWith(compareByDescending<AgentGroup> { it.sessions.firstOrNull()?.updatedAt ?: 0L }.thenBy { it.agent.wireName }),
+        )
+    }
 
 internal fun sameAgentSession(first: AgentSession?, second: AgentSession?): Boolean = first != null && second != null &&
     first.hostId == second.hostId && first.agent == second.agent && first.sessionId == second.sessionId && first.cwd == second.cwd
