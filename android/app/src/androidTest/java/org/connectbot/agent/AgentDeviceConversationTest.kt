@@ -64,6 +64,11 @@ import java.security.MessageDigest
 import java.security.Security
 import java.security.Signature
 import java.util.UUID
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import javax.crypto.Cipher
@@ -98,8 +103,53 @@ class AgentDeviceConversationTest {
         }
     }
 
+    private val phase = AtomicReference("configuration")
+    private val currentAgent = AtomicReference("none")
+    private val sessionDeadline = java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE)
+
     @Test
-    fun conversationAndNativeResume() = runBlocking {
+    fun conversationAndNativeResume() {
+        val args = InstrumentationRegistry.getArguments()
+        val count = (args.getString("agentKinds") ?: "kimi,dsh,zcode").split(',').distinct().size.coerceIn(1, 5)
+        val overallDeadline = android.os.SystemClock.elapsedRealtime() + 30_000 + count * 120_000L
+        val watchdog = Executors.newSingleThreadScheduledExecutor { command ->
+            Thread(command, "agent-e2e-state-watchdog").apply { isDaemon = true }
+        }
+        val task = FutureTask { runConversation() }
+        val worker = Thread(task, "agent-e2e-runner").apply { isDaemon = true }
+        worker.start()
+        watchdog.scheduleAtFixedRate({ runCatching { stateEvidence("heartbeat") } }, 10, 10, TimeUnit.SECONDS)
+        try {
+            while (true) {
+                val deadline = minOf(overallDeadline, sessionDeadline.get())
+                val remaining = deadline - android.os.SystemClock.elapsedRealtime()
+                if (remaining <= 0) {
+                    stateEvidence("hard_deadline")
+                    val cleanup = Thread({
+                        runCatching { if (this::pool.isInitialized) pool.interruptConnections() }
+                        runCatching { if (this::repository.isInitialized) runBlocking { repository.disconnectAll() } }
+                    }, "agent-e2e-deadline-cleanup").apply { isDaemon = true }
+                    cleanup.start()
+                    task.cancel(true)
+                    cleanup.join(3_000)
+                    evidence("deadlineReturned=true cleanupStillRunning=${cleanup.isAlive} workerStillRunning=${worker.isAlive}")
+                    throw AssertionError("Agent E2E exceeded its independent deadline; phase=${phase.get()}")
+                }
+                try {
+                    task.get(minOf(remaining, 250), TimeUnit.MILLISECONDS)
+                    return
+                } catch (_: TimeoutException) {
+                    continue
+                } catch (failure: ExecutionException) {
+                    throw failure.cause ?: failure
+                }
+            }
+        } finally {
+            watchdog.shutdownNow()
+        }
+    }
+
+    private fun runConversation() = runBlocking {
         val args = InstrumentationRegistry.getArguments()
         val kinds = (args.getString("agentKinds") ?: "kimi,dsh,zcode").split(',').map { name ->
             requireNotNull(AgentKind.fromWire(name)) { "agentKinds contains an unsupported agent" }
@@ -112,7 +162,7 @@ class AgentDeviceConversationTest {
         val hosts = HostRepository(context, database, database.hostDao(), database.portForwardDao(), database.knownHostDao(), passwords)
         val keys = PubkeyRepository(database.pubkeyDao(), database, AndroidKeyStorePrivateKeyProtector(), dispatchers)
         val challenges = AgentChallenges()
-        val realPool = AgentSshPool(hosts, keys, passwords, challenges, context, dispatchers.io)
+        val realPool = AgentSshPool(hosts, keys, passwords, challenges, context, dispatchers.io, AgentCryptoInitializer(context, dispatchers))
         val rejected = AtomicReference<String?>(null)
         val permissions = AtomicInteger()
         val questions = AtomicInteger()
@@ -135,8 +185,6 @@ class AgentDeviceConversationTest {
         }
         var interactionCollector: kotlinx.coroutines.Job? = null
         var realRepository: AgentRepository? = null
-        var phase = "configuration"
-        var currentAgent = "none"
         try {
             cryptoEvidence("before_connect")
             if (args.getString("agentDeviceLoadProvider") == "true") {
@@ -198,28 +246,30 @@ class AgentDeviceConversationTest {
                 }
             }
             for (kind in kinds) {
-                currentAgent = kind.wireName
+                currentAgent.set(kind.wireName)
+                sessionDeadline.set(android.os.SystemClock.elapsedRealtime() + 120_000)
                 val cwd = "/tmp/rmagentma-device-e2e-${UUID.randomUUID()}"
                 val remote = realPool.hostSession(host.id)
                 withTimeout(120_000) {
-                    phase = "ssh_mkdir"
+                    phase.set("ssh_mkdir")
                     evidence("agent=$currentAgent phase=$phase started=true")
                     shell(remote, "umask 077; mkdir -- ${ShellCommands.quote(cwd)} && printf '%s' RMAGENTMA_DIR_OK", "RMAGENTMA_DIR_OK")
                     cryptoEvidence("after_connect")
-                    phase = "new_session"
+                    phase.set("new_session")
+                    stateEvidence("phase_started")
                     real.newSession(host.id, kind, cwd)
                     healthy(real, rejected)
                     val session = real.activeSession.value ?: error("Agent did not become active")
                     check(session.sessionId.isNotBlank() && session.cwd == cwd && session.agent == kind)
                     evidence("agent=${kind.wireName} agentReady=true newSidLength=${session.sessionId.length} newSidHash=${hash(session.sessionId)}")
-                    phase = "first_prompt"
+                    phase.set("first_prompt")
                     sendAndVerify(real, FIRST_PROMPT, FIRST_TOKEN, rejected)
                     val first = fullHistory(real)
                     val firstReply = first.filter { it.type == "content" }.joinToString("") { it.text }
                     check(first.any { it.type == "user" && it.text == FIRST_PROMPT } && firstReply.contains(FIRST_TOKEN)) {
                         "First turn lacks complete user and assistant content"
                     }
-                    phase = "close_and_resume"
+                    phase.set("close_and_resume")
                     real.closeConversation()
                     check(real.conversationState.value == AgentConversationState.Closed && real.activeSession.value == null)
                     real.open(session)
@@ -233,12 +283,13 @@ class AgentDeviceConversationTest {
                         "Native replay lacks the complete first user and assistant message"
                     }
                     evidence("agent=${kind.wireName} resumed=true historyUsers=${replay.count { it.type == "user" }} historyAssistant=${replay.count { it.type == "content" }} historyReplyLength=${replayReply.length} historyReplyHash=${hash(replayReply)}")
-                    phase = "second_prompt"
+                    phase.set("second_prompt")
                     sendAndVerify(real, SECOND_PROMPT, SECOND_TOKEN, rejected)
                     healthy(real, rejected)
                     evidence("agent=${kind.wireName} complete=true permissionCount=${permissions.get()} questionCount=${questions.get()} approvalPhase=not_run")
                     real.closeConversation()
                 }
+                sessionDeadline.set(Long.MAX_VALUE)
             }
         } catch (failure: Throwable) {
             val causeChain = safeCauseChain(failure)
@@ -246,14 +297,21 @@ class AgentDeviceConversationTest {
             cryptoEvidence("failure")
             throw AssertionError("Agent device E2E failed: phase=$phase causeChain=$causeChain")
         } finally {
+            phase.set("cleanup")
+            sessionDeadline.set(android.os.SystemClock.elapsedRealtime() + 12_000)
+            evidence("cleanup started=true")
             withContext(NonCancellable) {
+                interactionCollector?.cancel()
+                challenges.cancelAll()
+                challengeCollector.cancel()
                 withTimeoutOrNull(10_000) {
-                    interactionCollector?.cancelAndJoin()
-                    realRepository?.disconnectAll()
                     realPool.disconnectAll()
-                }
-                challengeCollector.cancelAndJoin()
-                database.close()
+                    realRepository?.disconnectAll()
+                    interactionCollector?.join()
+                    challengeCollector.join()
+                    database.close()
+                    evidence("cleanup complete=true")
+                } ?: evidence("cleanup complete=false cooperativeTimeout=true")
             }
         }
     }
@@ -323,6 +381,27 @@ class AgentDeviceConversationTest {
             } finally {
                 watchdog.cancelAndJoin()
             }
+        }
+    }
+
+    private fun stateEvidence(reason: String) {
+        val real = if (this::repository.isInitialized) repository else null
+        val connections = if (this::pool.isInitialized) pool.connectionCount.value else -1
+        evidence(
+            "diagnostic=$reason agent=${currentAgent.get()} phase=${phase.get()} state=${real?.conversationState?.value} " +
+                "operations=${real?.operationCount?.value} busy=${real?.busy?.value} connections=$connections " +
+                "availabilityCount=${real?.availability?.value?.size} eventCount=${real?.events?.value?.size} errorCount=${real?.errors?.value?.size}",
+        )
+        Thread.getAllStackTraces().entries.filter { (thread, stack) ->
+            thread.name == "main" || thread.name == "agent-e2e-runner" || stack.any { frame ->
+                frame.className.startsWith("net.schmizz.") || frame.className.startsWith("org.connectbot.agent.") ||
+                    frame.className.startsWith("org.rmagentma.core.")
+            }
+        }.take(20).forEach { (thread, stack) ->
+            val frames = stack.take(16).joinToString("<-") { frame ->
+                "${frame.className}.${frame.methodName}:${frame.lineNumber}".replace(Regex("[^A-Za-z0-9_.$:<-]"), "_")
+            }
+            evidence("diagnostic=$reason threadId=${thread.id} threadState=${thread.state} frames=$frames")
         }
     }
 
