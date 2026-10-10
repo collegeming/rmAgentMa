@@ -105,7 +105,7 @@ internal class AgentEventHistory(
                     candidate--
                 }
             }
-        } else if (last != null && event.type in STREAM_TYPES && last.type == event.type && messageId(last) == messageId(event)) {
+        } else if (last != null && continuesMessage(last, event)) {
             key = lastKey
         }
         val previous = if (key >= 0) offset(key) else -1L
@@ -341,6 +341,19 @@ internal class AgentEventHistory(
 
     private fun messageId(event: AgentEvent): String = (event.raw?.get("messageId") as? JsonPrimitive)?.contentOrNull
         ?.takeIf { it.isNotEmpty() } ?: event.id
+
+    /**
+     * Assistant and thinking text arrives as unspecified delta chunks of one message, so consecutive
+     * chunks of those types continue the previous row. User updates are separate messages: an agent
+     * that replays them without an identity still sends one update per stored message, and merging
+     * those would append injected system reminders to the user's own text.
+     */
+    private fun continuesMessage(last: AgentEvent, event: AgentEvent): Boolean {
+        if (event.type !in STREAM_TYPES || last.type != event.type) return false
+        val identity = messageId(event)
+        if (identity != messageId(last)) return false
+        return identity.isNotEmpty() || event.type != "user"
+    }
 
     private fun merge(old: JsonObject?, patch: JsonObject?): JsonObject? {
         if (old == null) return patch

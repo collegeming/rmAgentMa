@@ -90,10 +90,12 @@ class AgentDeviceConversationTest {
 
     @Before
     fun setUp() {
+        val e2eMode = InstrumentationRegistry.getArguments().getString(AgentDeviceFailureDiagnostics.ARGUMENT)
         assumeTrue(
             "Real agent conversations require agentDeviceE2e=true",
-            InstrumentationRegistry.getArguments().getString("agentDeviceE2e") == "true",
+            e2eMode == "true" || e2eMode == AgentDeviceFailureDiagnostics.DEBUG_MODE,
         )
+        if (e2eMode == AgentDeviceFailureDiagnostics.DEBUG_MODE) evidence("rawFailureEnabled=true")
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         check(context.packageName == CI_PACKAGE && context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
             "Agent E2E is restricted to the debuggable CI package"
@@ -270,9 +272,16 @@ class AgentDeviceConversationTest {
                         "First turn lacks complete user and assistant content"
                     }
                     phase.set("close_and_resume")
+                    evidence("agent=${kind.wireName} phase=close_and_resume closeStarted=true state=${real.conversationState.value} operations=${real.operationCount.value} busy=${real.busy.value} connections=${realPool.connectionCount.value}")
+                    val closeStartedAt = android.os.SystemClock.elapsedRealtime()
                     real.closeConversation()
+                    val closeMs = android.os.SystemClock.elapsedRealtime() - closeStartedAt
+                    evidence("agent=${kind.wireName} phase=close_and_resume closeDone=true closeMs=$closeMs state=${real.conversationState.value} operations=${real.operationCount.value} busy=${real.busy.value} connections=${realPool.connectionCount.value}")
                     check(real.conversationState.value == AgentConversationState.Closed && real.activeSession.value == null)
+                    val openStartedAt = android.os.SystemClock.elapsedRealtime()
                     real.open(session)
+                    val openMs = android.os.SystemClock.elapsedRealtime() - openStartedAt
+                    evidence("agent=${kind.wireName} phase=close_and_resume openDone=true openMs=$openMs state=${real.conversationState.value} operations=${real.operationCount.value} busy=${real.busy.value} connections=${realPool.connectionCount.value}")
                     healthy(real, rejected)
                     check(real.activeSession.value?.sessionId == session.sessionId && real.activeSession.value?.cwd == cwd) {
                         "Native session identity was not restored"
@@ -292,8 +301,15 @@ class AgentDeviceConversationTest {
                 sessionDeadline.set(Long.MAX_VALUE)
             }
         } catch (failure: Throwable) {
+            val real = realRepository
+            val connections = realPool.connectionCount.value
             val causeChain = safeCauseChain(failure)
-            evidence("agent=$currentAgent phase=$phase complete=false causeChain=$causeChain permissionCount=${permissions.get()} questionCount=${questions.get()} approvalPhase=not_run")
+            evidence(
+                "agent=$currentAgent phase=$phase complete=false causeChain=$causeChain permissionCount=${permissions.get()} " +
+                    "questionCount=${questions.get()} approvalPhase=not_run state=${real?.conversationState?.value} " +
+                    "operations=${real?.operationCount?.value} busy=${real?.busy?.value} connections=$connections",
+            )
+            stateEvidence("failure")
             cryptoEvidence("failure")
             throw AssertionError("Agent device E2E failed: phase=$phase causeChain=$causeChain")
         } finally {
@@ -415,6 +431,7 @@ class AgentDeviceConversationTest {
     }
 
     private fun safeCauseChain(failure: Throwable): String {
+        val rawFailure = AgentDeviceFailureDiagnostics.rawFailureEnabled()
         val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
         return generateSequence(failure) { it.cause }.takeWhile { seen.add(it) }.take(8).joinToString("<-") { cause ->
             val type = cause.javaClass.name.replace(Regex("[^A-Za-z0-9_.$]"), "_").take(180)
@@ -429,7 +446,8 @@ class AgentDeviceConversationTest {
             val algorithms = CRYPTO_NAMES.filter { name ->
                 Regex("(?<![A-Za-z0-9])${Regex.escape(name)}(?![A-Za-z0-9])", RegexOption.IGNORE_CASE).containsMatchIn(message)
             }.joinToString(",").ifEmpty { "none" }
-            "$type[sshCode=$reason;category=$categories;crypto=$algorithms;messageLength=${message.length}]"
+            val raw = if (rawFailure) ";${AgentDeviceFailureDiagnostics.rawCauseDetail(cause)}" else ""
+            "$type[sshCode=$reason;category=$categories;crypto=$algorithms;messageLength=${message.length}$raw]"
         }
     }
 

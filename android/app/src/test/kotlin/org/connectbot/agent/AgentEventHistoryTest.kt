@@ -35,6 +35,35 @@ class AgentEventHistoryTest {
     }
 
     @Test
+    fun keepsIdentitylessUserUpdatesAsSeparateMessages() {
+        val prompt = "Reply only RMAGENTMA_E2E_OK. Do not run tools or modify files."
+        val reminder = "<system-reminder>\nToday's date is 2026-10-10.\n</system-reminder>"
+        val history = AgentEventHistory()
+        try {
+            history.append(AgentEvent("user", prompt))
+            val replay = history.append(AgentEvent("user", reminder))
+            assertThat(replay.map { it.text }).containsExactly(prompt, reminder)
+            assertThat(history.fullText(replay.first()).text).isEqualTo(prompt)
+            assertThat(history.append(AgentEvent("content", "RMAGENTMA_E2E_OK")).last().text).isEqualTo("RMAGENTMA_E2E_OK")
+        } finally {
+            history.clear()
+        }
+    }
+
+    @Test
+    fun reassemblesChunksThatCarryTheSameMessageIdentity() {
+        val history = AgentEventHistory()
+        try {
+            history.append(AgentEvent("user", "part one ", id = "m"))
+            assertThat(history.append(AgentEvent("user", "part two", id = "m")).single().text).isEqualTo("part one part two")
+            history.append(AgentEvent("content", "response one "))
+            assertThat(history.append(AgentEvent("content", "response two")).last().text).isEqualTo("response one response two")
+        } finally {
+            history.clear()
+        }
+    }
+
+    @Test
     fun trimsHistoryButPreservesPendingApprovals() {
         val history = AgentEventHistory(limit = 2)
         history.append(AgentEvent("permission", id = "p"))
