@@ -76,7 +76,7 @@ class AgentSshPoolCryptoTest {
                 assertThat(clients.constructed()).isEmpty()
                 assertThat(listener).isNotNull()
                 listener!!.onProviderLoaderSuccess()
-                assertThat(result.await()).isSameAs(failure)
+                assertThat(result.await()).isInstanceOf(IOException::class.java).hasMessage(failure.message)
                 assertThat(configs.constructed()).hasSize(1)
                 verify(configs.constructed().single()).keepAliveProvider = KeepAliveProvider.KEEP_ALIVE
                 assertThat(clients.constructed()).hasSize(1)

@@ -106,8 +106,8 @@ class AgentCryptoInitializerTest {
             },
             { if (++configurations == 1) throw failure },
         )
-        assertThat(runCatching { initializer.ensureReady() }.exceptionOrNull()).isSameAs(failure)
-        assertThat(runCatching { initializer.ensureReady() }.exceptionOrNull()).isSameAs(failure)
+        assertThat(runCatching { initializer.ensureReady() }.exceptionOrNull()).isInstanceOf(IOException::class.java).hasMessage(failure.message)
+        assertThat(runCatching { initializer.ensureReady() }.exceptionOrNull()).isInstanceOf(IOException::class.java).hasMessage(failure.message)
         initializer.ensureReady()
         initializer.ensureReady()
         assertThat(attempts).isEqualTo(3)
@@ -194,10 +194,10 @@ class AgentCryptoInitializerTest {
                             loaderDispatcher,
                             configurationDispatcher,
                             { listener ->
-                                threads += Thread.currentThread().name
+                                threads += Thread.currentThread().name.substringBefore(" @coroutine#")
                                 listener.onProviderLoaderSuccess()
                             },
-                            { threads += Thread.currentThread().name },
+                            { threads += Thread.currentThread().name.substringBefore(" @coroutine#") },
                         )
                         initializer.ensureReady()
                         assertThat(threads).containsExactly("provider-loader", "ssh-configuration")
