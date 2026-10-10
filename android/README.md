@@ -68,9 +68,7 @@ you can invoke the Gradle wrapper to build:
 
 ### Continuous Integration
 
-ConnectBot uses [GitHub Actions](https://github.com/connectbot/connectbot/actions)
-for continuous integration. The workflow is defined in
-`.github/workflows/ci.yml`.
+rmAgentMa 使用 GitHub Actions，workflow 位于仓库根目录 `.github/workflows/android.yml`，包含构建 OSS debug APK 与设备测试 APK、格式与静态检查（`spotlessCheck lint check test`）、不依赖 Android SDK 的 `:agent-core` 测试三组任务。提交前的标准校验命令见[项目首页](../README.md)。
 
 #### Running Workflows Locally with act
 
@@ -79,8 +77,12 @@ checks run in the GitHub Actions continuous integration workflow, but you can
 run GitHub Actions workflows locally using [`nektos/act`](https://github.com/nektos/act).
 This requires Docker to be installed and running.
 
-To run the main CI workflow (`ci.yml`):
+To run the main CI workflow (`android.yml`, from the repository root):
 
 ```sh
-act -W .github/workflows/ci.yml
+act -W .github/workflows/android.yml
 ```
+
+### 真机验收
+
+真机安装与验收流程见[项目首页](../README.md)：覆盖安装用 `adb install -r` 同一签名的 APK，不卸载、不清应用数据；远端对话测试经 `agentDeviceE2e=true` 与已人工核验的主机指纹显式启用，且不得通过会清除应用数据的 Orchestrator 执行。签名密钥与真机测试通道只保留在开发机上，不进入仓库、CI artifact 或日志。
