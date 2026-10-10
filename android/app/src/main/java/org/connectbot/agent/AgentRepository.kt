@@ -227,8 +227,20 @@ class AgentRepository @Inject constructor(
     )
 
     private suspend fun openConversation(session: AgentSession, sessionId: String?) = operation {
+        val started = System.nanoTime()
+        fun trace(stage: String) = Timber.tag("AgentRepository").d(
+            "hostId=%d agent=%s resume=%s stage=%s elapsedMs=%d",
+            session.hostId,
+            session.agent.wireName,
+            sessionId != null,
+            stage,
+            (System.nanoTime() - started) / 1_000_000,
+        )
+        trace("switch_wait")
         switchMutex.withLock {
+            trace("close_start")
             closeCurrent()
+            trace("close_done")
             val actualOpening = currentCoroutineContext()[Job]!!
             val token = synchronized(stateLock) {
                 openingJob = actualOpening
@@ -246,9 +258,12 @@ class AgentRepository @Inject constructor(
                 synchronized(stateLock) { history.clear() }
                 pool.allowUserRetry(session.hostId)
                 currentCoroutineContext().ensureActive()
+                trace("probe_start")
                 val runtime = probeHost(session.hostId, interactive = true, force = false).single { it.kind == session.agent }
+                trace("probe_end")
                 if (!runtime.available) throw java.io.IOException("${session.agent.wireName} unavailable: ${runtime.error.ifBlank { "agent startup probe failed" }}")
                 val remote = pool.hostSession(session.hostId)
+                trace("prepare_start")
                 val opened: AgentSessionHandle = when (session.agent) {
                     AgentKind.ZCODE -> ZcodeDriver(
                         child,
@@ -258,6 +273,7 @@ class AgentRepository @Inject constructor(
 
                     else -> AcpDriver(session.agent, child, dispatchers.io, runtime.executable.takeIf { it.isNotBlank() }).prepare(remote, sessionId, session.cwd)
                 }
+                trace("prepare_done")
                 val accepted = synchronized(stateLock) {
                     if (generation == token) {
                         handle = opened
@@ -291,6 +307,8 @@ class AgentRepository @Inject constructor(
                         opened.close()
                     }
                 }
+                trace("consumer_started")
+                trace("load_start")
                 when (opened) {
                     is AcpSessionHandle -> opened.load()
                     is ZcodeSessionHandle -> opened.load()
@@ -302,6 +320,7 @@ class AgentRepository @Inject constructor(
                         mutableSelected.value = loaded
                         mutableActive.value = loaded
                         mutableConversationState.value = AgentConversationState.Ready
+                        trace("open_ready")
                     }
                 }
             } catch (e: CancellationException) {

@@ -57,6 +57,7 @@ internal class AcpConnection(
     parentScope: CoroutineScope,
     private val ioDispatcher: CoroutineDispatcher,
     private val cleanupTimeoutMillis: Long = 1000,
+    internal val trace: (String) -> Unit = {},
 ) {
     private data class Pending(val method: String, val result: CompletableDeferred<JsonObject>)
     internal data class Incoming(val id: JsonPrimitive, val method: String, val params: JsonObject, val bytes: Long)
@@ -135,7 +136,19 @@ internal class AcpConnection(
     private suspend fun diagnostic(message: String) = emit(AgentEvent("error", text = message))
 
     suspend fun request(method: String, params: JsonObject): JsonObject {
-        if (method in SESSION_ACTIVATION_METHODS) eventBuffer.awaitConsumer()
+        if (method in SESSION_ACTIVATION_METHODS) {
+            trace("consumer_wait")
+            eventBuffer.awaitConsumer()
+            trace("consumer_ready")
+        }
+        val phase = if (method == "initialize") {
+            "initialize"
+        } else if (method in SESSION_ACTIVATION_METHODS) {
+            "load"
+        } else {
+            null
+        }
+        phase?.let { trace("${it}_write_start") }
         val id = JsonPrimitive(ids.incrementAndGet())
         val deferred = CompletableDeferred<JsonObject>()
         val entry = Pending(method, deferred)
@@ -149,7 +162,8 @@ internal class AcpConnection(
                     put("params", params)
                 },
             )
-            return deferred.await()
+            phase?.let { trace("${it}_sent") }
+            return deferred.await().also { phase?.let { trace("${it}_ok") } }
         } finally {
             pending.remove(id, entry)
         }
@@ -277,7 +291,11 @@ internal class AcpConnection(
             return
         }
         if (entry.method == "session/prompt") emit(AgentEvent("complete", status = result.string("stopReason"), raw = result))
-        if (entry.method in SESSION_ACTIVATION_METHODS) eventBuffer.barrier()
+        if (entry.method in SESSION_ACTIVATION_METHODS) {
+            trace("load_response")
+            eventBuffer.barrier()
+            trace("barrier_done")
+        }
         entry.result.complete(result)
     }
 

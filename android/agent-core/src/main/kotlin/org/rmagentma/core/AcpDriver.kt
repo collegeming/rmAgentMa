@@ -131,7 +131,11 @@ class AcpDriver(
     private suspend fun connect(host: HostSession, cwd: String): AcpConnection = withContext(ioDispatcher) {
         val channel = host.exec(ShellCommands.acp(agent, cwd, executable))
         try {
-            AcpConnection(channel, scope, ioDispatcher)
+            val started = System.nanoTime()
+            val logger = java.util.logging.Logger.getLogger("org.rmagentma.core.AcpDriver")
+            AcpConnection(channel, scope, ioDispatcher, trace = { stage ->
+                logger.info("hostId=${host.hostId} agent=${agent.wireName} stage=$stage elapsedMs=${(System.nanoTime() - started) / 1_000_000}")
+            }).also { it.trace("exec_channel_open") }
         } catch (e: Exception) {
             channel.close()
             throw e
