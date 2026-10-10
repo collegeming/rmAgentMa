@@ -340,12 +340,21 @@ class AgentDeviceConversationTest {
             sawBusy.await()
             sending.await()
             check(!real.busy.value && real.activeSession.value === originalSession) { "Prompt did not complete on its original session" }
-            while (!sawStream.isCompleted || !real.events.value.any { it.type == "content" && it.text.contains(token) && originalRows[it.historyKey] != it.text }) {
-                healthy(real, rejected)
-                delay(25)
-            }
+            var reply = ""
+            val verified = withTimeoutOrNull(10_000) {
+                while (true) {
+                    healthy(real, rejected)
+                    reply = fullHistory(real).filter { it.type == "content" && originalRows[it.historyKey] != it.text }
+                        .joinToString("") { it.text }
+                    if (reply.isNotBlank() && reply.contains(token)) break
+                    delay(25)
+                }
+                true
+            } == true
+            // StateFlow can conflate a short reply with busy=false before a collector resumes.
+            evidence("replyToken=$token observedBusy=true observedStream=${sawStream.isCompleted} streamObservations=${observations.get()} replyLength=${reply.length} tokenPresent=${reply.contains(token)} completed=$verified")
+            check(verified) { "Completed prompt lacks its expected assistant reply token" }
             healthy(real, rejected)
-            evidence("replyToken=$token observedBusy=true streamObservations=${observations.get()} completed=true")
         } finally {
             busyCollector.cancelAndJoin()
             streamCollector.cancelAndJoin()
