@@ -694,4 +694,88 @@
   <string name="connection_alert_permission_message" tools:machine_translated="true">允許接收通知，以便查看已連線的主機，並接收終端警報和連線中斷提醒。即使未授予此權限，連線仍可在背景執行。</string>
   <string name="connection_alert_permission_denied_title" tools:machine_translated="true">啟用通知功能</string>
   <string name="connection_alert_permission_denied_message" tools:machine_translated="true">在 Android 設定中啟用 ConnectBot 的通知功能，以便查看已連線的主機，並接收終端警報和連線中斷提醒。背景連線功能將繼續啟用。</string>
+  <!-- 抽屜標題，也是開啟全部主機與 Agent 的無障礙標籤。 -->
+  <string name="agent_workspaces" tools:machine_translated="true">工作區</string>
+  <!-- 尚未建立原生會話時空白對話的標題。 -->
+  <string name="agent_chat_empty_title" tools:machine_translated="true">開始對話</string>
+  <!-- 空白對話的設定說明；已儲存的 SSH 主機不會直接以終端機開啟。 -->
+  <string name="agent_chat_empty_hint" tools:machine_translated="true">選擇主機、Agent 與工作目錄即可建立對話，也可以從工作區開啟現有對話。草稿會保留在這裡，直到你傳送。</string>
+  <!-- 尚未明確選擇主機時的主機選擇器預留文字。 -->
+  <string name="agent_select_host" tools:machine_translated="true">選擇主機</string>
+  <!-- 在工作區分組目錄中新增會話的抽屜操作。 -->
+  <string name="agent_new_in_workspace" tools:machine_translated="true">新增</string>
+  <!-- 摺疊狀態的工作區標題；主機暱稱與會話數目。 -->
+  <string name="agent_workspace_collapsed" tools:machine_translated="true">▸ %1$s · %2$d</string>
+  <!-- 展開狀態的工作區標題；主機暱稱與會話數目。 -->
+  <string name="agent_workspace_expanded" tools:machine_translated="true">▾ %1$s · %2$d</string>
+  <!-- 抽屜中的設定入口。 -->
+  <string name="agent_settings" tools:machine_translated="true">設定</string>
+  <!-- 抽屜中的金鑰管理入口。 -->
+  <string name="agent_keys" tools:machine_translated="true">金鑰</string>
+  <!-- 抽屜中的主機管理入口。 -->
+  <string name="agent_hosts" tools:machine_translated="true">主機</string>
+  <!-- 抽屜中明確啟動 SSH 除錯 shell 的入口。 -->
+  <string name="agent_debug_terminal" tools:machine_translated="true">除錯終端機</string>
+  <!-- 除錯終端機的明確確認說明，與原生對話互相獨立。 -->
+  <string name="agent_debug_terminal_hint" tools:machine_translated="true">在選取的主機上開啟 SSH shell。原生對話會保持開啟。</string>
+  <!-- 選擇操作將關閉對話或中斷工作時的確認標題。 -->
+  <string name="agent_switch_title" tools:machine_translated="true">保留目前的對話？</string>
+  <!-- 切換需要明確同意關閉目前的會話並停止工作。 -->
+  <string name="agent_switch_warning" tools:machine_translated="true">已有對話開啟或工作正在進行。請保留目前的對話，或關閉它並停止工作後再切換。已儲存的歷史記錄不會被刪除。</string>
+  <!-- 切換確認操作。 -->
+  <string name="agent_close_and_switch" tools:machine_translated="true">關閉並切換</string>
+  <!-- 保留目前工作與選擇的切換取消操作。 -->
+  <string name="agent_keep_conversation" tools:machine_translated="true">保留目前</string>
+  <!-- 以分頁方式開啟長訊息或原始事件的全文檢視。 -->
+  <string name="agent_full_text" tools:machine_translated="true">閱讀全文</string>
+  <!-- 關閉全文對話方塊。 -->
+  <string name="agent_close_text" tools:machine_translated="true">關閉</string>
+  <!-- 全文對話方塊的上一頁操作。 -->
+  <string name="agent_text_previous" tools:machine_translated="true">上一頁</string>
+  <!-- 全文對話方塊的下一頁操作。 -->
+  <string name="agent_text_next" tools:machine_translated="true">下一頁</string>
+  <!-- 全文對話方塊中的頁碼與總頁數。 -->
+  <string name="agent_text_page" tools:machine_translated="true">%1$d / %2$d</string>
+  <!-- 原生對話正在連線並載入遠端記錄。 -->
+  <string name="agent_state_loading" tools:machine_translated="true">正在載入對話…</string>
+  <!-- 原生對話已就緒，可以接收訊息。 -->
+  <string name="agent_state_ready" tools:machine_translated="true">就緒</string>
+  <!-- 對話失敗；保留的記錄仍可閱讀。 -->
+  <string name="agent_state_failed" tools:machine_translated="true">對話失敗</string>
+  <!-- 原生對話控制代碼已關閉。 -->
+  <string name="agent_state_closed" tools:machine_translated="true">對話已關閉</string>
+  <!-- 對話失敗後的明確重試操作。 -->
+  <string name="agent_retry_conversation" tools:machine_translated="true">重試</string>
+  <!-- 從保留的對話記錄中載入更早的一頁事件。 -->
+  <string name="agent_load_earlier" tools:machine_translated="true">載入更早的訊息</string>
+  <!-- 從較早的記錄頁返回最新的保留訊息。 -->
+  <string name="agent_latest_messages" tools:machine_translated="true">最新訊息</string>
+  <!-- 較早的一頁保持可見，即時訊息仍會儲存；待處理的互動仍然可用。 -->
+  <string name="agent_viewing_earlier" tools:machine_translated="true">正在查看更早的訊息。新訊息已儲存，返回最新訊息即可閱讀。傳送訊息後會回到最新訊息。</string>
+  <!-- 空白對話外殼中與主機和 Agent 選擇器相符的最近記錄。 -->
+  <string name="agent_recent_conversations" tools:machine_translated="true">最近的對話</string>
+  <!-- 精簡選擇器組合本地化標籤與所選值。 -->
+  <string name="agent_choice_value" tools:machine_translated="true">%1$s：%2$s</string>
+  <!-- 抽屜中搜尋全部主機與全部 Agent 類型的捷徑。 -->
+  <string name="agent_all_workspaces" tools:machine_translated="true">所有主機與 Agent</string>
+  <!-- 抽屜中返回對話外殼所選主機與 Agent 的捷徑。 -->
+  <string name="agent_current_scope" tools:machine_translated="true">目前的主機與 Agent</string>
+  <!-- 所選主機探測成功並驗證了該 Agent 的安裝。 -->
+  <string name="agent_available" tools:machine_translated="true">已安裝 · 協定就緒</string>
+  <!-- 展開主機探測返回的確切執行檔路徑與協定能力。 -->
+  <string name="agent_connection_details" tools:machine_translated="true">連線詳細資料</string>
+  <!-- 所選主機探測無法驗證可用的 Agent。 -->
+  <string name="agent_unavailable" tools:machine_translated="true">此主機上的 Agent 無法使用</string>
+  <!-- 該主機與 Agent 組合尚無探測結果。 -->
+  <string name="agent_availability_unknown" tools:machine_translated="true">尚未探測</string>
+  <!-- 未知不等於已安裝；重新整理或開啟對話會觸發真實的後端探測。 -->
+  <string name="agent_availability_unknown_hint" tools:machine_translated="true">重新整理以檢查此主機，或開啟對話以在連線前進行探測。</string>
+  <!-- 所選主機探測返回的版本。 -->
+  <string name="agent_available_version" tools:machine_translated="true">版本：%1$s</string>
+  <!-- 所選主機探測返回的確切執行檔路徑。 -->
+  <string name="agent_available_executable" tools:machine_translated="true">執行檔：%1$s</string>
+  <!-- 能力按上報內容原樣顯示，不猜測功能。 -->
+  <string name="agent_available_capabilities" tools:machine_translated="true">能力：%1$s</string>
+  <!-- 無法使用但沒有錯誤描述的明確結果。 -->
+  <string name="agent_unavailable_no_reason" tools:machine_translated="true">主機探測未回報原因。請重新整理以再次檢查。</string>
 </resources>

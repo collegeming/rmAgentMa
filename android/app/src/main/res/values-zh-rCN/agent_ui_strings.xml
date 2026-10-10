@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- 未选择会话时原生对话外壳的标题。 -->
+    <string name="agent_title" tools:machine_translated="true">rmAgentMa</string>
+    <!-- 从对话外壳返回上一页。 -->
+    <string name="agent_back" tools:machine_translated="true">返回</string>
+    <!-- 刷新远端会话列表。 -->
+    <string name="agent_refresh" tools:machine_translated="true">刷新</string>
+    <!-- 新建远端 Agent 对话。 -->
+    <string name="agent_new" tools:machine_translated="true">新建会话</string>
+    <!-- 断开所有 Agent SSH 连接。 -->
+    <string name="agent_disconnect" tools:machine_translated="true">断开所有 Agent</string>
+    <!-- 断开 Agent 连接前的确认警告。 -->
+    <string name="agent_disconnect_warning" tools:machine_translated="true">断开所有 Agent 连接？正在进行的对话可能会中断。</string>
+    <!-- 通用确认操作。 -->
+    <string name="agent_confirm" tools:machine_translated="true">确认</string>
+    <!-- 关闭对话框或取消操作。 -->
+    <string name="agent_cancel" tools:machine_translated="true">取消</string>
+    <!-- 主机筛选标签。 -->
+    <string name="agent_device" tools:machine_translated="true">主机</string>
+    <!-- Agent 筛选与新建会话标签。 -->
+    <string name="agent_kind" tools:machine_translated="true">Agent</string>
+    <!-- 筛选中的全部主机或全部 Agent 类型。 -->
+    <string name="agent_all" tools:machine_translated="true">全部</string>
+    <!-- 工作区抽屉中跨会话标题、消息预览和工作目录的搜索。 -->
+    <string name="agent_search" tools:machine_translated="true">搜索标题、消息或目录</string>
+    <!-- 说明没有已保存的 SSH 主机。 -->
+    <string name="agent_no_devices" tools:machine_translated="true">请先在主机列表中添加 SSH 主机。</string>
+    <!-- 会话列表为空或筛选无结果。 -->
+    <string name="agent_no_sessions" tools:machine_translated="true">没有匹配的会话。刷新以读取远端历史，或新建会话。</string>
+    <!-- 断开连接后历史会话仍然可见。 -->
+    <string name="agent_cache_hint" tools:machine_translated="true">历史记录可能来自缓存。刷新需要连接；出现错误并不表示缓存中的会话在线可用。</string>
+    <!-- 原生驱动支持与某台主机上的可用性相互独立。 -->
+    <string name="agent_support_hint" tools:machine_translated="true">原生对话集成支持 Kimi、OpenCode、oh-my-pi、deepseek-harness 和 zcode。每台主机的安装情况与能力需单独验证。</string>
+    <!-- 继续已支持的原生会话。 -->
+    <string name="agent_continue" tools:machine_translated="true">继续</string>
+    <!-- 在现有 SSH 终端中打开会话。 -->
+    <string name="agent_terminal" tools:machine_translated="true">终端</string>
+    <!-- 仅支持终端的 Agent 标签。 -->
+    <string name="agent_terminal_only" tools:machine_translated="true">仅终端</string>
+    <!-- 缓存会话引用的主机已不存在。 -->
+    <string name="agent_missing_host" tools:machine_translated="true">主机不可用</string>
+    <!-- 原生标题为空时改用会话标识。 -->
+    <string name="agent_untitled" tools:machine_translated="true">未命名会话</string>
+    <!-- 会话元数据：Agent、主机和工作目录分别显示。 -->
+    <string name="agent_updated" tools:machine_translated="true">更新于：%1$s</string>
+    <!-- 新建会话的绝对远端工作目录字段。 -->
+    <string name="agent_cwd" tools:machine_translated="true">绝对工作目录</string>
+    <!-- 工作目录校验错误。 -->
+    <string name="agent_cwd_error" tools:machine_translated="true">请使用以 / 开头的绝对 Linux/WSL 路径，且不含控制字符。</string>
+    <!-- 创建结构化会话或终端会话的按钮。 -->
+    <string name="agent_start" tools:machine_translated="true">开始</string>
+    <!-- 缺少本地网络权限；不会尝试刷新远端。 -->
+    <string name="agent_network_denied" tools:machine_translated="true">在 Android 16 及更高版本上，本地网络连接需要“附近的设备”权限。未发起任何网络请求。请在系统设置中授予权限，或重试。</string>
+    <!-- 明确重试运行时权限请求的操作。 -->
+    <string name="agent_network_retry" tools:machine_translated="true">允许本地网络访问</string>
+    <!-- 对话中的消息输入标签。 -->
+    <string name="agent_prompt" tools:machine_translated="true">消息</string>
+    <!-- 提交消息或自由文本回答。 -->
+    <string name="agent_send" tools:machine_translated="true">发送</string>
+    <!-- 取消当前正在运行的 Agent 轮次。 -->
+    <string name="agent_stop" tools:machine_translated="true">停止</string>
+    <!-- 空对话的引导说明。 -->
+    <string name="agent_conversation_empty" tools:machine_translated="true">发送消息即可开始。回复、工具和批准请求会显示在这里。</string>
+    <!-- 用户消息标题。 -->
+    <string name="agent_event_user" tools:machine_translated="true">你</string>
+    <!-- 助手内容标题。 -->
+    <string name="agent_event_content" tools:machine_translated="true">助手</string>
+    <!-- 可折叠的推理过程标题。 -->
+    <string name="agent_event_thinking" tools:machine_translated="true">思考</string>
+    <!-- 工具事件标题。 -->
+    <string name="agent_event_tool" tools:machine_translated="true">工具</string>
+    <!-- 计划事件标题。 -->
+    <string name="agent_event_plan" tools:machine_translated="true">计划</string>
+    <!-- 权限事件标题。 -->
+    <string name="agent_event_permission" tools:machine_translated="true">需要权限</string>
+    <!-- 提问事件标题。 -->
+    <string name="agent_event_question" tools:machine_translated="true">提问</string>
+    <!-- token/上下文事件标题。 -->
+    <string name="agent_event_usage" tools:machine_translated="true">用量</string>
+    <!-- 原生会话信息标题。 -->
+    <string name="agent_event_session" tools:machine_translated="true">会话信息</string>
+    <!-- 本轮完成的事件标题。 -->
+    <string name="agent_event_complete" tools:machine_translated="true">本轮完成</string>
+    <!-- 远端错误标题。 -->
+    <string name="agent_event_error" tools:machine_translated="true">Agent 错误</string>
+    <!-- 未知协议事件标题。 -->
+    <string name="agent_event_unknown" tools:machine_translated="true">无法识别的事件</string>
+    <!-- 原始事件展开项。 -->
+    <string name="agent_raw" tools:machine_translated="true">原始事件 / 输入 / 输出</string>
+    <!-- 文件差异区块标题。 -->
+    <string name="agent_diff" tools:machine_translated="true">文件改动</string>
+    <!-- 对 Agent 提问的自由文本回答。 -->
+    <string name="agent_answer" tools:machine_translated="true">你的回答</string>
+    <!-- 事件缺少可用的响应标识或选项。 -->
+    <string name="agent_no_response" tools:machine_translated="true">此事件没有响应标识或可选项。如需交互，请使用终端。</string>
+    <!-- 交互正在发送中；只有仓储层移除该交互才表示已解决。 -->
+    <string name="agent_response_pending" tools:machine_translated="true">正在发送响应…</string>
+    <!-- 主机密钥验证对话框标题；主机在正文中显示。 -->
+    <string name="agent_host_key" tools:machine_translated="true">验证主机指纹</string>
+    <!-- 密码身份验证对话框标题。 -->
+    <string name="agent_password" tools:machine_translated="true">SSH 密码</string>
+    <!-- 私钥密码短语身份验证对话框标题。 -->
+    <string name="agent_passphrase" tools:machine_translated="true">私钥密码短语</string>
+    <!-- 身份验证挑战的兜底标题。 -->
+    <string name="agent_auth" tools:machine_translated="true">SSH 身份验证</string>
+    <!-- 明确批准所呈现的 SSH 主机指纹。 -->
+    <string name="agent_accept" tools:machine_translated="true">接受指纹</string>
+    <!-- 明确拒绝所呈现的 SSH 主机指纹。 -->
+    <string name="agent_reject" tools:machine_translated="true">拒绝</string>
+    <!-- SSH 身份验证的密钥输入标签。 -->
+    <string name="agent_secret" tools:machine_translated="true">密码或密码短语</string>
+    <!-- 未知身份验证挑战不得隐式接受。 -->
+    <string name="agent_unknown_challenge" tools:machine_translated="true">不支持的身份验证请求。请取消并使用终端。</string>
+    <!-- Kimi Code 的显示名称。 -->
+    <string name="agent_name_kimi" tools:machine_translated="true">Kimi Code</string>
+    <!-- OpenCode 的显示名称。 -->
+    <string name="agent_name_opencode" tools:machine_translated="true">OpenCode</string>
+    <!-- oh-my-pi 的显示名称。 -->
+    <string name="agent_name_omp" tools:machine_translated="true">oh-my-pi</string>
+    <!-- deepseek-harness 的显示名称。 -->
+    <string name="agent_name_dsh" tools:machine_translated="true">deepseek-harness</string>
+    <!-- zcode 的显示名称。 -->
+    <string name="agent_name_zcode" tools:machine_translated="true">zcode</string>
+    <!-- 计划条目的优先级与执行状态，取值由 Agent 提供。 -->
+    <string name="agent_plan_priority" tools:machine_translated="true">优先级：%1$s</string>
+    <!-- 计划条目的执行状态。 -->
+    <string name="agent_plan_status" tools:machine_translated="true">状态：%1$s</string>
+    <!-- ACP 计划更新是通知，不是批准请求。 -->
+    <string name="agent_plan_notice" tools:machine_translated="true">此计划是更新通知，不是批准请求。仅在出现权限请求时才需要批准。</string>
+    <!-- Agent 上报的上下文占用，不推断 token 数。 -->
+    <string name="agent_usage_used" tools:machine_translated="true">已用上下文：%1$s</string>
+    <!-- Agent 上报的上下文容量。 -->
+    <string name="agent_usage_size" tools:machine_translated="true">上下文容量：%1$s</string>
+    <!-- Agent 上报的金额费用。 -->
+    <string name="agent_usage_cost" tools:machine_translated="true">费用：%1$s</string>
+    <!-- 会话信息事件提供的原生会话标题。 -->
+    <string name="agent_info_title" tools:machine_translated="true">标题：%1$s</string>
+    <!-- 原生创建时间戳；按其实际表示显示。 -->
+    <string name="agent_info_created" tools:machine_translated="true">创建于：%1$s</string>
+    <!-- 原生最后更新时间戳；按其实际表示显示。 -->
+    <string name="agent_info_updated" tools:machine_translated="true">更新于：%1$s</string>
+    <!-- 可折叠的工具输入区块。 -->
+    <string name="agent_tool_input" tools:machine_translated="true">工具输入</string>
+    <!-- 可折叠的工具输出区块。 -->
+    <string name="agent_tool_output" tools:machine_translated="true">工具输出</string>
+    <!-- 可折叠的工具内容与结果区块。 -->
+    <string name="agent_tool_content" tools:machine_translated="true">工具结果内容</string>
+    <!-- 传输或历史截断事件时的可见警告。 -->
+    <string name="agent_truncated" tools:machine_translated="true">此事件已被截断，部分细节缺失；请在终端中查看远端会话以获取完整结果。</string>
+    <!-- 描述结构字段及其基本类型。 -->
+    <string name="agent_question_field" tools:machine_translated="true">%1$s（%2$s）</string>
+    <!-- 必填结构字段的标记。 -->
+    <string name="agent_question_required" tools:machine_translated="true">必填</string>
+    <!-- 字段多于一个或含非字符串字段的表单使用自由 JSON 输入。 -->
+    <string name="agent_question_json" tools:machine_translated="true">以 JSON 对象作答</string>
+    <!-- 说明多字段回答的确切格式；不插入猜测值。 -->
+    <string name="agent_question_json_hint" tools:machine_translated="true">请将上方的字段名用作 JSON 键。类型需要匹配，并包含必填字段。布尔值和数字不要加引号。</string>
+    <!-- 结构回答无效或不完整；提交按钮保持禁用。 -->
+    <string name="agent_question_invalid" tools:machine_translated="true">回答与请求的字段、类型或允许值不匹配。</string>
+    <!-- 结构缺失或过于复杂，无法在手机上安全填写。 -->
+    <string name="agent_question_unsupported" tools:machine_translated="true">没有可用的问题结构。请查看原始详情或使用终端。</string>
+    <!-- 打开按会话汇总计划、改动、命令、测试、工具与用量的详情面板。 -->
+    <string name="agent_details" tools:machine_translated="true">详情</string>
+    <!-- 会话详情面板的标题；参数为工作区标签与工作目录。 -->
+    <string name="agent_details_title" tools:machine_translated="true">会话详情 · %1$s</string>
+    <!-- 详情面板中列出 Agent 上报计划的标签页。 -->
+    <string name="agent_details_tab_plan" tools:machine_translated="true">计划</string>
+    <!-- 详情面板中列出工具调用上报的文件改动的标签页。 -->
+    <string name="agent_details_tab_changes" tools:machine_translated="true">改动</string>
+    <!-- 详情面板中列出已执行命令及其最新上报输出的标签页。 -->
+    <string name="agent_details_tab_commands" tools:machine_translated="true">命令</string>
+    <!-- 详情面板中列出测试运行、工具调用与用量的标签页。 -->
+    <string name="agent_details_tab_tools" tools:machine_translated="true">工具</string>
+    <!-- 详情分区没有任何已上报条目时的占位文本。 -->
+    <string name="agent_details_empty" tools:machine_translated="true">已加载的事件中还没有此类记录。</string>
+    <!-- 提醒详情面板只汇总已加载的历史窗口。 -->
+    <string name="agent_details_window" tools:machine_translated="true">“详情”只汇总当前已加载的事件窗口；更早的记录需要先加载更早的消息。</string>
+    <!-- 提醒已加载的历史窗口不包含全部更早记录。 -->
+    <string name="agent_details_earlier_notice" tools:machine_translated="true">还有更早的记录未加载，下方汇总可能并不完整。</string>
+    <!-- 单个文件改动摘要；参数为文件路径、新增行数与删除行数。 -->
+    <string name="agent_details_file_stats" tools:machine_translated="true">%1$s · +%2$d / -%3$d</string>
+    <!-- 计划进度摘要；参数为已完成条目数与总条目数。 -->
+    <string name="agent_details_plan_progress" tools:machine_translated="true">已完成 %1$d / %2$d</string>
+    <!-- 计划状态取值由 Agent 提供。 -->
+    <string name="agent_details_plan_status" tools:machine_translated="true">%1$s</string>
+    <!-- 文件已改动但没有可计数的差异。 -->
+    <string name="agent_details_file_reported" tools:machine_translated="true">已报告改动，未附带可计数的差异。</string>
+    <!-- 工具调用没有上报结构化细节。 -->
+    <string name="agent_details_no_detail" tools:machine_translated="true">没有结构化细节。</string>
+    <!-- 展开单个文件改动已捕获的差异。 -->
+    <string name="agent_details_show_diff" tools:machine_translated="true">查看差异</string>
+    <!-- 收起单个文件改动已捕获的差异。 -->
+    <string name="agent_details_hide_diff" tools:machine_translated="true">收起差异</string>
+    <!-- 工具调用中观察到的命令分区。 -->
+    <string name="agent_details_commands" tools:machine_translated="true">命令记录</string>
+    <!-- 按命令或上报输出识别出的测试运行分区。 -->
+    <string name="agent_details_tests" tools:machine_translated="true">测试结果</string>
+    <!-- 测试运行标题；取值为 Agent 上报的状态字符串。 -->
+    <string name="agent_details_test_status" tools:machine_translated="true">测试状态：%1$s</string>
+    <!-- 用量与上下文记录分区。 -->
+    <string name="agent_details_usage" tools:machine_translated="true">用量</string>
+    <!-- 批准请求的只读摘要；计数为已加载窗口内的请求数。 -->
+    <string name="agent_details_approvals" tools:machine_translated="true">审批记录（只读）· %1$d</string>
+    <!-- 说明此处显示的审批历史无法操作。 -->
+    <string name="agent_details_approvals_readonly" tools:machine_translated="true">历史记录仅供查看，不能在这里批准；只有聊天中当前会话的请求可以批准。</string>
+    <!-- 说明批准请求仍在聊天流中等待响应。 -->
+    <string name="agent_details_approval_pending" tools:machine_translated="true">等待在聊天中批准。</string>
+    <!-- 说明审批记录不再接受响应。 -->
+    <string name="agent_details_approval_history" tools:machine_translated="true">历史审批记录，不再接受响应。</string>
+    <!-- 会话视图切换：结构化对话。 -->
+    <string name="agent_view_chat" tools:machine_translated="true">聊天</string>
+    <!-- 会话视图切换：Agent 自带的交互式终端界面。 -->
+    <string name="agent_view_tui" tools:machine_translated="true">TUI</string>
+    <!-- 说明 TUI 会在终端中以独立的 SSH 会话运行。 -->
+    <string name="agent_tui_notice" tools:machine_translated="true">TUI 会以独立的 SSH 会话在终端中打开，使用本会话的 Agent 与工作目录。</string>
+    <!-- 提醒本对话的 ACP 进程可能保持同一会话打开。 -->
+    <string name="agent_tui_share_warning" tools:machine_translated="true">本对话当前由 ACP 进程占用同一会话 ID。同一会话上 ACP 与交互式 TUI 能否并发尚未验证；如 TUI 无法打开，请先关闭对话再试。</string>
+    <!-- 打开交互式 TUI 的确切 shell 命令标签。 -->
+    <string name="agent_tui_command" tools:machine_translated="true">命令</string>
+    <!-- 打开终端并发送 TUI 命令的操作。 -->
+    <string name="agent_tui_open" tools:machine_translated="true">打开终端</string>
+    <!-- 说明打开 TUI 前需要可用的 SSH 主机。 -->
+    <string name="agent_tui_no_host" tools:machine_translated="true">此会话所属主机不可用，无法打开终端。</string>
+    <!-- 说明该工作目录无法用作终端参数。 -->
+    <string name="agent_tui_bad_cwd" tools:machine_translated="true">此会话的工作目录不可用，拒绝拼接终端命令。</string>
+</resources>

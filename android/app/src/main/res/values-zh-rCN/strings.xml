@@ -694,4 +694,88 @@
   <string name="connection_alert_permission_message" tools:machine_translated="true">允许接收通知，以便查看已连接的主机，并接收终端提示音和连接中断提醒。即使没有此权限，连接仍然可以在后台运行。</string>
   <string name="connection_alert_permission_denied_title" tools:machine_translated="true">启用通知</string>
   <string name="connection_alert_permission_denied_message" tools:machine_translated="true">在 Android 设置中启用 ConnectBot 的通知，以便查看已连接的主机，并接收终端提示音和连接中断提醒。后台连接支持将继续启用。</string>
+  <!-- 抽屉标题，也是打开全部主机与 Agent 的无障碍标签。 -->
+  <string name="agent_workspaces" tools:machine_translated="true">工作区</string>
+  <!-- 尚未创建原生会话时空对话的标题。 -->
+  <string name="agent_chat_empty_title" tools:machine_translated="true">开始对话</string>
+  <!-- 空对话的设置说明；已保存的 SSH 主机不会直接以终端打开。 -->
+  <string name="agent_chat_empty_hint" tools:machine_translated="true">选择主机、Agent 和工作目录即可创建对话，也可以从工作区中打开已有对话。草稿会保留在这里，直到你发送。</string>
+  <!-- 尚未明确选择主机时的主机选择器占位文本。 -->
+  <string name="agent_select_host" tools:machine_translated="true">选择主机</string>
+  <!-- 在工作区分组目录中创建会话的抽屉操作。 -->
+  <string name="agent_new_in_workspace" tools:machine_translated="true">新建</string>
+  <!-- 折叠状态的工作区标题；主机昵称与会话数。 -->
+  <string name="agent_workspace_collapsed" tools:machine_translated="true">▸ %1$s · %2$d</string>
+  <!-- 展开状态的工作区标题；主机昵称与会话数。 -->
+  <string name="agent_workspace_expanded" tools:machine_translated="true">▾ %1$s · %2$d</string>
+  <!-- 抽屉中的设置入口。 -->
+  <string name="agent_settings" tools:machine_translated="true">设置</string>
+  <!-- 抽屉中的密钥管理入口。 -->
+  <string name="agent_keys" tools:machine_translated="true">密钥</string>
+  <!-- 抽屉中的主机管理入口。 -->
+  <string name="agent_hosts" tools:machine_translated="true">主机</string>
+  <!-- 抽屉中显式启动 SSH 调试 shell 的入口。 -->
+  <string name="agent_debug_terminal" tools:machine_translated="true">调试终端</string>
+  <!-- 调试终端的显式确认说明，与原生对话相互独立。 -->
+  <string name="agent_debug_terminal_hint" tools:machine_translated="true">在所选主机上打开 SSH shell。原生对话保持打开。</string>
+  <!-- 选择操作将关闭对话或中断任务时的确认标题。 -->
+  <string name="agent_switch_title" tools:machine_translated="true">保留当前对话？</string>
+  <!-- 切换需要明确同意关闭当前会话并停止任务。 -->
+  <string name="agent_switch_warning" tools:machine_translated="true">已有对话打开或任务正在进行。请保留当前对话，或者关闭它并停止任务后再切换。已保存的历史记录不会被删除。</string>
+  <!-- 切换确认操作。 -->
+  <string name="agent_close_and_switch" tools:machine_translated="true">关闭并切换</string>
+  <!-- 保留当前工作与选择的切换取消操作。 -->
+  <string name="agent_keep_conversation" tools:machine_translated="true">保留当前</string>
+  <!-- 以分页方式打开长消息或原始事件的全文视图。 -->
+  <string name="agent_full_text" tools:machine_translated="true">阅读全文</string>
+  <!-- 关闭全文对话框。 -->
+  <string name="agent_close_text" tools:machine_translated="true">关闭</string>
+  <!-- 全文对话框的上一页操作。 -->
+  <string name="agent_text_previous" tools:machine_translated="true">上一页</string>
+  <!-- 全文对话框的下一页操作。 -->
+  <string name="agent_text_next" tools:machine_translated="true">下一页</string>
+  <!-- 全文对话框中的页码与总页数。 -->
+  <string name="agent_text_page" tools:machine_translated="true">%1$d / %2$d</string>
+  <!-- 原生对话正在连接并加载远端历史。 -->
+  <string name="agent_state_loading" tools:machine_translated="true">正在加载对话…</string>
+  <!-- 原生对话已就绪，可以接收消息。 -->
+  <string name="agent_state_ready" tools:machine_translated="true">就绪</string>
+  <!-- 对话失败；保留的历史记录仍可阅读。 -->
+  <string name="agent_state_failed" tools:machine_translated="true">对话失败</string>
+  <!-- 原生对话句柄已关闭。 -->
+  <string name="agent_state_closed" tools:machine_translated="true">对话已关闭</string>
+  <!-- 对话失败后的显式重试操作。 -->
+  <string name="agent_retry_conversation" tools:machine_translated="true">重试</string>
+  <!-- 从保留的对话历史中加载更早的一页事件。 -->
+  <string name="agent_load_earlier" tools:machine_translated="true">加载更早的消息</string>
+  <!-- 从较早的历史页返回最新的保留消息。 -->
+  <string name="agent_latest_messages" tools:machine_translated="true">最新消息</string>
+  <!-- 较早的一页保持可见，实时消息仍会存储；待处理的交互仍然可用。 -->
+  <string name="agent_viewing_earlier" tools:machine_translated="true">正在查看更早的消息。新消息已保存，返回最新消息即可阅读。发送消息后将回到最新消息。</string>
+  <!-- 空对话外壳中与主机和 Agent 选择器匹配的最近历史。 -->
+  <string name="agent_recent_conversations" tools:machine_translated="true">最近对话</string>
+  <!-- 紧凑选择器组合本地化标签与所选值。 -->
+  <string name="agent_choice_value" tools:machine_translated="true">%1$s：%2$s</string>
+  <!-- 抽屉中搜索全部主机与全部 Agent 类型的快捷入口。 -->
+  <string name="agent_all_workspaces" tools:machine_translated="true">所有主机和 Agent</string>
+  <!-- 抽屉中返回对话外壳所选主机与 Agent 的快捷入口。 -->
+  <string name="agent_current_scope" tools:machine_translated="true">当前主机和 Agent</string>
+  <!-- 所选主机探测成功并验证了该 Agent 的安装。 -->
+  <string name="agent_available" tools:machine_translated="true">已安装 · 协议就绪</string>
+  <!-- 展开主机探测返回的确切可执行文件路径与协议能力。 -->
+  <string name="agent_connection_details" tools:machine_translated="true">连接详情</string>
+  <!-- 所选主机探测无法验证可用的 Agent。 -->
+  <string name="agent_unavailable" tools:machine_translated="true">此主机上的 Agent 不可用</string>
+  <!-- 该主机与 Agent 组合尚无探测结果。 -->
+  <string name="agent_availability_unknown" tools:machine_translated="true">尚未探测</string>
+  <!-- 未知不等于已安装；刷新或打开会话会触发真实的后端探测。 -->
+  <string name="agent_availability_unknown_hint" tools:machine_translated="true">刷新以检查此主机，或打开对话以在连接前进行探测。</string>
+  <!-- 所选主机探测返回的版本。 -->
+  <string name="agent_available_version" tools:machine_translated="true">版本：%1$s</string>
+  <!-- 所选主机探测返回的确切可执行文件路径。 -->
+  <string name="agent_available_executable" tools:machine_translated="true">可执行文件：%1$s</string>
+  <!-- 能力按上报内容原样显示，不猜测功能。 -->
+  <string name="agent_available_capabilities" tools:machine_translated="true">能力：%1$s</string>
+  <!-- 不可用但没有错误描述的显式结果。 -->
+  <string name="agent_unavailable_no_reason" tools:machine_translated="true">主机探测未报告原因。刷新以重新检查。</string>
 </resources>

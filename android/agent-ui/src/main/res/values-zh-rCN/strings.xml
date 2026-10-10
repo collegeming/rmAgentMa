@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- 展开事件详情卡片的操作。 -->
+    <string name="agent_ui_expand" tools:machine_translated="true">展开详情</string>
+    <!-- 收起事件详情卡片的操作。 -->
+    <string name="agent_ui_collapse" tools:machine_translated="true">收起详情</string>
+</resources>

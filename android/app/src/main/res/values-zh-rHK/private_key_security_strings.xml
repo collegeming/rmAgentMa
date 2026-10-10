@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- SSH 金鑰列表上方的常駐警告，包括空白列表與載入中狀態。 -->
+    <string name="private_key_security_notice" tools:machine_translated="true">系統備份不包含私鑰。在解除安裝應用程式、清除應用程式資料或更換裝置之前，請從金鑰選單匯出可匯出的私鑰。請妥善保管匯出的檔案，尤其是未設定密碼短語的檔案。受生物識別保護的金鑰無法匯出；在移除本應用程式前，請另行安排登入方式。</string>
+    <!-- 設定中用於備份僅含公鑰記錄的開關，絕不會備份私鑰。 -->
+    <string name="private_key_security_backup_public_only_title" tools:machine_translated="true">備份僅含公鑰的金鑰記錄</string>
+    <!-- 說明僅含公鑰金鑰備份開關的範圍；私鑰匯出仍需另行進行。 -->
+    <string name="private_key_security_backup_public_only_summary" tools:machine_translated="true">僅包含不含私鑰的金鑰記錄。即使開啟此選項亦不會包含私鑰；請在解除安裝應用程式、清除應用程式資料或更換裝置前另行匯出。</string>
+</resources>

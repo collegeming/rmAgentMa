@@ -1,28 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Notification channel for agent-only SSH connections. -->
-    <string name="agent_notification_channel">Agent connections</string>
+    <string name="agent_notification_channel">Agent 连接</string>
     <!-- Title of the foreground notification while agent connections are maintained. -->
-    <string name="agent_notification_title">Remote agents</string>
+    <string name="agent_notification_title">远端 Agent</string>
     <!-- Disconnect action on the agent foreground notification. -->
-    <string name="agent_disconnect_all">Disconnect all agents</string>
+    <string name="agent_disconnect_all">断开所有 Agent</string>
     <!-- Number of connected SSH hosts, including jump hosts. -->
     <plurals name="agent_connection_count">
-        <item quantity="one">%d SSH host connected</item>
-        <item quantity="other">%d SSH hosts connected</item>
+        <item quantity="one">已连接 %d 台 SSH 主机</item>
+        <item quantity="other">已连接 %d 台 SSH 主机</item>
     </plurals>
     <!-- Security error when the server does not match any trusted key for the host. -->
-    <string name="agent_host_key_changed">The host key for %1$s has changed. Connection refused. Verify the server using the terminal before updating trusted keys.</string>
+    <string name="agent_host_key_changed">%1$s 的主机密钥已变更，连接被拒绝。请先使用终端验证服务器，再更新受信任的密钥。</string>
     <!-- First connection confirmation; arguments are hostname, port, and SHA256 fingerprint. -->
-    <string name="agent_verify_host">Verify %1$s:%2$d\n%3$s\nAccept only if this fingerprint matches the server.</string>
+    <string name="agent_verify_host">验证 %1$s:%2$d\n%3$s\n仅当此指纹与服务器匹配时才接受。</string>
     <!-- Password challenge; arguments are username and hostname. -->
-    <string name="agent_backend_password">Password for %1$s@%2$s. This entry will not be saved.</string>
+    <string name="agent_backend_password">%1$s@%2$s 的密码。此处输入不会被保存。</string>
     <!-- Private-key passphrase challenge; argument is the key nickname. -->
-    <string name="agent_key_passphrase">Passphrase for SSH key %1$s. This entry will not be saved.</string>
+    <string name="agent_key_passphrase">SSH 密钥 %1$s 的密码短语。此处输入不会被保存。</string>
     <!-- Confirmation challenge for keys requiring approval before use. -->
-    <string name="agent_confirm_key">Allow SSH authentication with key %1$s? Enter accept to allow.</string>
+    <string name="agent_confirm_key">允许使用密钥 %1$s 进行 SSH 身份验证？输入 accept 表示允许。</string>
     <!-- Actionable error for biometric-protected keys unsupported by agent SSH. -->
-    <string name="agent_biometric_terminal">Agent connections cannot unlock biometric-protected SSH keys. Use the terminal for this host.</string>
+    <string name="agent_biometric_terminal">Agent 连接无法解锁受生物识别保护的 SSH 密钥。此主机请使用终端。</string>
     <!-- Error when a non-ACP agent is opened through the structured conversation interface. -->
-    <string name="agent_use_terminal">Continue or create this agent session in the terminal.</string>
+    <string name="agent_use_terminal">请在终端中继续或创建此 Agent 会话。</string>
 </resources>

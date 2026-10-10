@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Main menu entry for all remote agent sessions. -->
-    <string name="agent_navigation_title">Agent sessions</string>
+    <string name="agent_navigation_title">Agent 会话</string>
     <!-- Confirmation before pasting a remote agent launch command into the terminal. -->
-    <string name="agent_terminal_launch_title">Continue in terminal</string>
+    <string name="agent_terminal_launch_title">在终端中继续</string>
     <!-- Reminds users to wait until the terminal is a shell before running a command. -->
-    <string name="agent_terminal_launch_warning">Confirm the terminal is at a shell prompt before sending this command. If another program is running, exit it first.</string>
+    <string name="agent_terminal_launch_warning">发送此命令前，请确认终端处于 shell 提示符。如果正在运行其他程序，请先退出。</string>
     <!-- Sends the displayed command to the connected SSH terminal. -->
-    <string name="agent_terminal_launch_send">Send command</string>
+    <string name="agent_terminal_launch_send">发送命令</string>
     <!-- Keeps the terminal open without sending a launch command. -->
-    <string name="agent_terminal_launch_cancel">Do not send</string>
+    <string name="agent_terminal_launch_cancel">不发送</string>
+    <!-- Drawer hint when one agent group holds more sessions than the tree renders. -->
+    <string name="agent_group_truncated">仅显示最近 %1$d 个会话，请用搜索查找更早的会话。</string>
 </resources>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- 主選單中所有遠端 Agent 會話的入口。 -->
+    <string name="agent_navigation_title" tools:machine_translated="true">Agent 會話</string>
+    <!-- 把遠端 Agent 啟動指令貼到終端機前的確認。 -->
+    <string name="agent_terminal_launch_title" tools:machine_translated="true">在終端機中繼續</string>
+    <!-- 提醒使用者等待終端機處於 shell 提示字元後才執行指令。 -->
+    <string name="agent_terminal_launch_warning" tools:machine_translated="true">傳送此指令前，請確認終端機處於 shell 提示字元。如有其他程式正在執行，請先結束。</string>
+    <!-- 把顯示的指令傳送到已連線的 SSH 終端機。 -->
+    <string name="agent_terminal_launch_send" tools:machine_translated="true">傳送指令</string>
+    <!-- 保持終端機開啟而不傳送啟動指令。 -->
+    <string name="agent_terminal_launch_cancel" tools:machine_translated="true">不傳送</string>
+    <!-- 單一 Agent 分組的會話數目超過抽屜繪製上限時的提示。 -->
+    <string name="agent_group_truncated" tools:machine_translated="true">僅顯示最近 %1$d 個會話，請用搜尋尋找更早的會話。</string>
+</resources>

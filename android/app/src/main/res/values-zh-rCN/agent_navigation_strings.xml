@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- 主菜单中所有远端 Agent 会话的入口。 -->
+    <string name="agent_navigation_title" tools:machine_translated="true">Agent 会话</string>
+    <!-- 把远端 Agent 启动命令粘贴到终端前的确认。 -->
+    <string name="agent_terminal_launch_title" tools:machine_translated="true">在终端中继续</string>
+    <!-- 提醒用户等到终端处于 shell 状态后再运行命令。 -->
+    <string name="agent_terminal_launch_warning" tools:machine_translated="true">发送此命令前，请确认终端处于 shell 提示符。如果正在运行其他程序，请先退出。</string>
+    <!-- 把显示的命令发送到已连接的 SSH 终端。 -->
+    <string name="agent_terminal_launch_send" tools:machine_translated="true">发送命令</string>
+    <!-- 保持终端打开而不发送启动命令。 -->
+    <string name="agent_terminal_launch_cancel" tools:machine_translated="true">不发送</string>
+    <!-- 单个 Agent 分组的会话数超过抽屉渲染上限时的提示。 -->
+    <string name="agent_group_truncated" tools:machine_translated="true">仅显示最近 %1$d 个会话，请用搜索查找更早的会话。</string>
+</resources>

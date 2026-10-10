@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- 僅 Agent SSH 連線使用的通知頻道。 -->
+    <string name="agent_notification_channel" tools:machine_translated="true">Agent 連線</string>
+    <!-- 維護 Agent 連線時的前景通知標題。 -->
+    <string name="agent_notification_title" tools:machine_translated="true">遠端 Agent</string>
+    <!-- Agent 前景通知上的中斷操作。 -->
+    <string name="agent_disconnect_all" tools:machine_translated="true">中斷所有 Agent</string>
+    <!-- 已連線的 SSH 主機數目，包括跳板主機。 -->
+    <plurals name="agent_connection_count" tools:machine_translated="true">
+        <item quantity="one">已連線 %d 個 SSH 主機</item>
+        <item quantity="other">已連線 %d 個 SSH 主機</item>
+    </plurals>
+    <!-- 伺服器與主機任何受信任金鑰都不相符時的安全錯誤。 -->
+    <string name="agent_host_key_changed" tools:machine_translated="true">%1$s 的主機金鑰已變更，連線被拒絕。請先使用終端機驗證伺服器，再更新受信任的金鑰。</string>
+    <!-- 首次連線確認；參數為主機名稱、連接埠和 SHA256 指紋。 -->
+    <string name="agent_verify_host" tools:machine_translated="true">驗證 %1$s:%2$d\n%3$s\n僅當此指紋與伺服器相符時才接受。</string>
+    <!-- 密碼挑戰；參數為使用者名稱和主機名稱。 -->
+    <string name="agent_backend_password" tools:machine_translated="true">%1$s@%2$s 的密碼。在此輸入的內容不會被儲存。</string>
+    <!-- 私鑰密碼短語挑戰；參數為金鑰名稱。 -->
+    <string name="agent_key_passphrase" tools:machine_translated="true">SSH 金鑰 %1$s 的密碼短語。在此輸入的內容不會被儲存。</string>
+    <!-- 使用前需要批准的金鑰確認挑戰。 -->
+    <string name="agent_confirm_key" tools:machine_translated="true">允許使用金鑰 %1$s 進行 SSH 身份驗證？輸入 accept 表示允許。</string>
+    <!-- Agent SSH 不支援受生物識別保護的金鑰時的可操作錯誤。 -->
+    <string name="agent_biometric_terminal" tools:machine_translated="true">Agent 連線無法解鎖受生物識別保護的 SSH 金鑰。此主機請使用終端機。</string>
+    <!-- 透過結構化對話介面開啟非 ACP Agent 時的錯誤。 -->
+    <string name="agent_use_terminal" tools:machine_translated="true">請在終端機中繼續或建立此 Agent 會話。</string>
+</resources>

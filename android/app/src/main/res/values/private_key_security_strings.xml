@@ -17,9 +17,9 @@
  -->
 <resources>
     <!-- Persistent warning above the SSH key list, including empty and loading states. -->
-    <string name="private_key_security_notice">System backups do not include private keys. Before uninstalling, clearing app data, or moving to another device, export your exportable private keys from the key menu. Keep exported files secure, especially files without a passphrase. Biometric keys cannot be exported; arrange another way to sign in before removing this app.</string>
+    <string name="private_key_security_notice">系统备份不包含私钥。在卸载应用、清除应用数据或更换设备之前，请从密钥菜单中导出可导出的私钥。请妥善保管导出的文件，尤其是未设置密码短语的文件。受生物识别保护的密钥无法导出；在移除本应用前，请另行安排登录方式。</string>
     <!-- Settings toggle for backing up records that already contain only a public key, never private keys. -->
-    <string name="private_key_security_backup_public_only_title">Back up public-only key records</string>
+    <string name="private_key_security_backup_public_only_title">备份仅含公钥的密钥记录</string>
     <!-- Explains the limited scope of the public-only key backup toggle; private key exports remain separate. -->
-    <string name="private_key_security_backup_public_only_summary">Includes only key records with no private key. Private keys are excluded even when this is on; export them separately before uninstalling, clearing app data, or changing devices.</string>
+    <string name="private_key_security_backup_public_only_summary">仅包含不含私钥的密钥记录。即使开启此选项也不会包含私钥；请在卸载应用、清除应用数据或更换设备前单独导出。</string>
 </resources>

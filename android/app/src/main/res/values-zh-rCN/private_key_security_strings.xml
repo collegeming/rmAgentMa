@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- SSH 密钥列表上方的常驻警告，含空列表与加载中状态。 -->
+    <string name="private_key_security_notice" tools:machine_translated="true">系统备份不包含私钥。在卸载应用、清除应用数据或更换设备之前，请从密钥菜单中导出可导出的私钥。请妥善保管导出的文件，尤其是未设置密码短语的文件。受生物识别保护的密钥无法导出；在移除本应用前，请另行安排登录方式。</string>
+    <!-- 设置中用于备份仅含公钥记录的开关，绝不会备份私钥。 -->
+    <string name="private_key_security_backup_public_only_title" tools:machine_translated="true">备份仅含公钥的密钥记录</string>
+    <!-- 说明仅含公钥密钥备份开关的范围；私钥导出仍需单独进行。 -->
+    <string name="private_key_security_backup_public_only_summary" tools:machine_translated="true">仅包含不含私钥的密钥记录。即使开启此选项也不会包含私钥；请在卸载应用、清除应用数据或更换设备前单独导出。</string>
+</resources>
