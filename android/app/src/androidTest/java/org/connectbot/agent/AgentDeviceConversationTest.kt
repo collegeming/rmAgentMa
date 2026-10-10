@@ -107,17 +107,20 @@ class AgentDeviceConversationTest {
 
     private val phase = AtomicReference("configuration")
     private val currentAgent = AtomicReference("none")
+    private val pendingPermission = AtomicReference<AgentEvent?>(null)
     private val sessionDeadline = java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE)
 
     @Test
     fun conversationAndNativeResume() {
         val args = InstrumentationRegistry.getArguments()
+        val approvalProbe = args.getString("agentDeviceApprovalProbe") == "true"
         val count = (args.getString("agentKinds") ?: "kimi,dsh,zcode").split(',').distinct().size.coerceIn(1, 5)
-        val overallDeadline = android.os.SystemClock.elapsedRealtime() + 30_000 + count * 120_000L
+        val sessionBudget = if (approvalProbe) 240_000L else 120_000L
+        val overallDeadline = android.os.SystemClock.elapsedRealtime() + 30_000 + count * sessionBudget * 2
         val watchdog = Executors.newSingleThreadScheduledExecutor { command ->
             Thread(command, "agent-e2e-state-watchdog").apply { isDaemon = true }
         }
-        val task = FutureTask { runConversation() }
+        val task = FutureTask { runConversation(approvalProbe) }
         val worker = Thread(task, "agent-e2e-runner").apply { isDaemon = true }
         worker.start()
         watchdog.scheduleAtFixedRate({ runCatching { stateEvidence("heartbeat") } }, 10, 10, TimeUnit.SECONDS)
@@ -151,7 +154,7 @@ class AgentDeviceConversationTest {
         }
     }
 
-    private fun runConversation() = runBlocking {
+    private fun runConversation(approvalProbe: Boolean) = runBlocking {
         val args = InstrumentationRegistry.getArguments()
         val kinds = (args.getString("agentKinds") ?: "kimi,dsh,zcode").split(',').map { name ->
             requireNotNull(AgentKind.fromWire(name)) { "agentKinds contains an unsupported agent" }
@@ -236,6 +239,20 @@ class AgentDeviceConversationTest {
                     for (event in events.filter { it.type in setOf("permission", "question") && it.status != "resolved" }) {
                         if (!answered.add(event.id)) continue
                         if (event.type == "permission") permissions.incrementAndGet() else questions.incrementAndGet()
+                        if (approvalProbe) {
+                            // The approval phase decides each interaction itself; unrelated ones are denied here.
+                            evidence("interaction queued=true type=${event.type} permissionCount=${permissions.get()} questionCount=${questions.get()}")
+                            if (event.type == "permission") {
+                                pendingPermission.compareAndSet(null, event)
+                            } else {
+                                val session = real.selectedSession.value
+                                val cancel = event.options.firstOrNull { it.id in setOf("cancel", "deny", "reject") }
+                                if (session != null && cancel != null) {
+                                    runCatching { real.respondQuestion(session, event, event.id, "{\"action\":\"cancel\"}") }
+                                }
+                            }
+                            continue
+                        }
                         rejected.compareAndSet(null, "Unexpected interaction in no-tool conversation")
                         evidence("interaction rejected=true permissionCount=${permissions.get()} questionCount=${questions.get()}")
                         val session = real.selectedSession.value
@@ -249,10 +266,11 @@ class AgentDeviceConversationTest {
             }
             for (kind in kinds) {
                 currentAgent.set(kind.wireName)
-                sessionDeadline.set(android.os.SystemClock.elapsedRealtime() + 120_000)
+                val sessionBudget = if (approvalProbe) 240_000L else 120_000L
+                sessionDeadline.set(android.os.SystemClock.elapsedRealtime() + sessionBudget)
                 val cwd = "/tmp/rmagentma-device-e2e-${UUID.randomUUID()}"
                 val remote = realPool.hostSession(host.id)
-                withTimeout(120_000) {
+                withTimeout(sessionBudget) {
                     phase.set("ssh_mkdir")
                     evidence("agent=$currentAgent phase=$phase started=true")
                     shell(remote, "umask 077; mkdir -- ${ShellCommands.quote(cwd)} && printf '%s' RMAGENTMA_DIR_OK", "RMAGENTMA_DIR_OK")
@@ -295,7 +313,11 @@ class AgentDeviceConversationTest {
                     phase.set("second_prompt")
                     sendAndVerify(real, SECOND_PROMPT, SECOND_TOKEN, rejected)
                     healthy(real, rejected)
-                    evidence("agent=${kind.wireName} complete=true permissionCount=${permissions.get()} questionCount=${questions.get()} approvalPhase=not_run")
+                    if (approvalProbe) {
+                        phase.set("approval")
+                        verifyApproval(real, realPool, host.id, cwd)
+                    }
+                    evidence("agent=${kind.wireName} complete=true permissionCount=${permissions.get()} questionCount=${questions.get()} approvalPhase=${if (approvalProbe) "passed" else "not_run"}")
                     real.closeConversation()
                 }
                 sessionDeadline.set(Long.MAX_VALUE)
@@ -330,6 +352,40 @@ class AgentDeviceConversationTest {
                 } ?: evidence("cleanup complete=false cooperativeTimeout=true")
             }
         }
+    }
+
+    /** Uses one interactive approval for a single path inside the isolated conversation directory. */
+    private suspend fun verifyApproval(real: AgentRepository, pool: AgentSshPool, hostId: Long, cwd: String) = coroutineScope {
+        val remote = pool.hostSession(hostId)
+        val probePath = "$cwd/$APPROVAL_FILE"
+        val prompt = "Use the write tool to create the file $probePath with exactly the content ${APPROVAL_TOKEN} and nothing else."
+        val sending = async { real.send(prompt) }
+        val request = withTimeoutOrNull(120_000) {
+            while (true) {
+                pendingPermission.get()?.let { return@withTimeoutOrNull it }
+                delay(50)
+            }
+            @Suppress("UNREACHABLE_CODE")
+            null
+        }
+        checkNotNull(request) { "Approval probe received no permission request" }
+        val session = real.selectedSession.value ?: error("Approval probe lost its active session")
+        val target = request.text + " " + request.title + " " + (request.raw?.toString() ?: "")
+        val approve = request.options.firstOrNull { it.id == "allow_once" }?.id
+            ?: request.options.firstOrNull { it.id.startsWith("allow") }?.id
+        val deny = request.options.firstOrNull { it.id in setOf("reject_once", "deny", "reject") }?.id
+        val matched = target.contains(APPROVAL_FILE) && target.contains(APPROVAL_TOKEN) && target.contains(cwd)
+        evidence("approvalPermission requested=true matched=$matched optionCount=${request.options.size} idLength=${request.id.length}")
+        check(matched && approve != null) {
+            if (deny != null) real.respondPermission(session, request, request.id, deny)
+            "Approval probe refused an unmatched permission request"
+        }
+        real.respondPermission(session, request, request.id, approve)
+        sending.await()
+        shell(remote, "cat -- ${ShellCommands.quote(probePath)}", APPROVAL_TOKEN)
+        evidence("approvalProbe written=true")
+        shell(remote, "rm -rf -- ${ShellCommands.quote(cwd)}", "")
+        evidence("approvalProbe cleanup=true")
     }
 
     private suspend fun sendAndVerify(real: AgentRepository, prompt: String, token: String, rejected: AtomicReference<String?>) = coroutineScope {
@@ -402,7 +458,7 @@ class AgentDeviceConversationTest {
                 channel.stdin.close()
                 val errors = async { runInterruptible { channel.stderr.readNBytes(1024) } }
                 val output = runInterruptible { channel.stdout.readNBytes(1024) }
-                check(output.toString(Charsets.UTF_8) == expected && errors.await().isEmpty()) { "Isolated directory creation failed" }
+                check(output.toString(Charsets.UTF_8) == expected && errors.await().isEmpty()) { "Isolated shell command mismatch" }
             } finally {
                 watchdog.cancelAndJoin()
             }
@@ -513,5 +569,7 @@ class AgentDeviceConversationTest {
         const val FIRST_PROMPT = "Reply only RMAGENTMA_E2E_OK. Do not run tools or modify files."
         const val SECOND_TOKEN = "RMAGENTMA_E2E_RESUMED_OK"
         const val SECOND_PROMPT = "Reply only RMAGENTMA_E2E_RESUMED_OK. Do not run tools or modify files."
+        const val APPROVAL_FILE = "approval-probe.txt"
+        const val APPROVAL_TOKEN = "RMAGENTMA_APPROVAL_OK"
     }
 }
