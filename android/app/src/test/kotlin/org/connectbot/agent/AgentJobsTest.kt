@@ -76,4 +76,34 @@ class AgentJobsTest {
         assertThat(operation.isCancelled).isTrue()
         assertThat(released).isTrue()
     }
+
+    @Test
+    fun cancellingAnOperationWaiterCancelsItsJobAndReleasesTheSwitchLock() = runTest {
+        val jobs = AgentJobs(backgroundScope)
+        val switchLock = kotlinx.coroutines.sync.Mutex()
+        var released = false
+        val operation = jobs.submit {
+            switchLock.lock()
+            try {
+                kotlinx.coroutines.awaitCancellation()
+            } finally {
+                released = true
+                switchLock.unlock()
+            }
+        }
+        val waiter = async { jobs.awaitCancellable(operation) }
+        runCurrent()
+        assertThat(switchLock.isLocked).isTrue()
+        waiter.cancel()
+        runCurrent()
+        assertThat(operation.isCancelled).isTrue()
+        assertThat(released).isTrue()
+        assertThat(switchLock.isLocked).isFalse()
+        assertThat(jobs.count.value).isZero()
+        val next = jobs.submit {
+            switchLock.lock()
+            switchLock.unlock()
+        }
+        next.await()
+    }
 }

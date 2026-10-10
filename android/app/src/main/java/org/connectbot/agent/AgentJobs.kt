@@ -45,6 +45,13 @@ internal class AgentJobs(private val scope: CoroutineScope) {
         job
     }
 
+    suspend fun <T> awaitCancellable(job: Deferred<T>): T = try {
+        job.await()
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        job.cancel(e)
+        throw e
+    }
+
     fun cancelAll() = synchronized(lock) {
         jobs.toList().forEach { it.cancel() }
     }

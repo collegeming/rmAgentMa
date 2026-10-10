@@ -614,7 +614,7 @@ class AgentRepository @Inject constructor(
                 throw e
             }
         }
-        return pending.await()
+        return jobs.awaitCancellable(pending)
     }
 
     private fun report(error: Exception, prefix: String = "") {
