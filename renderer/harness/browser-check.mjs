@@ -26,7 +26,7 @@ export function isAllowedURL(input, origin, websocket = false) {
 export async function runBrowserChecks({ aionuiRoot, chromeBin, output, url, backend, build }) {
   const require = createRequire(path.join(aionuiRoot, 'package.json'));
   const { chromium, expect } = require('@playwright/test');
-  const report = { ok: false, url, buildId: build.buildId, checks: [], screenshots: [], requests: [], frames: [], blocked: [], pageErrors: [], console: [] };
+  const report = { ok: false, url, buildId: build.buildId, checks: [], screenshots: [], requests: [], frames: [], sideEffects: [], blocked: [], pageErrors: [], console: [] };
   let browser;
   let context;
   let page;
@@ -43,6 +43,17 @@ export async function runBrowserChecks({ aionuiRoot, chromeBin, output, url, bac
     return unwrap(result.body);
   };
   const runtime = async () => (await conversation()).runtime;
+  const probeStatus = async () => {
+    const result = await json('/api/probe/status');
+    assert.equal(result.status, 200);
+    return unwrap(result.body);
+  };
+  const modelStream = async (turnId) => {
+    const status = await probeStatus();
+    const streams = status.fake_streams.filter((item) => item.turn_id === turnId);
+    assert.ok(streams.length <= 1, 'Text-only probe must have exactly one model request');
+    return { status, stream: streams[0] };
+  };
   const pending = async () => {
     const result = await json(`${apiBase}/confirmations`);
     assert.equal(result.status, 200);
@@ -121,8 +132,12 @@ export async function runBrowserChecks({ aionuiRoot, chromeBin, output, url, bac
     return submitted;
   };
   const effect = async (turnId) => {
-    const filename = path.join(output, 'backend/effects', turnId, 'result.txt');
-    try { return await fs.readFile(filename, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    const status = await json('/api/probe/status');
+    assert.equal(status.status, 200);
+    const target = unwrap(status.body).side_effects.find((item) => item.turn_id === turnId);
+    assert.ok(target, 'Probe status must identify the unique target for this turn');
+    report.sideEffects.push({ observedAt: new Date().toISOString(), ...target });
+    return target.exists ? target.content : null;
   };
   const eventsFor = (turnId, name) => {
     const unique = new Map();
@@ -142,6 +157,15 @@ export async function runBrowserChecks({ aionuiRoot, chromeBin, output, url, bac
     } catch (error) {
       report.checks.push({ id, ok: false, error: error.message });
       await screenshot(`failure-${id}`).catch(() => {});
+      if ((await runtime()).state !== 'idle') {
+        try {
+          await page.getByTestId('sendbox-input').fill('');
+          await page.locator('.sendbox-stop-button').click();
+          await waitIdle();
+          await page.reload({ waitUntil: 'domcontentloaded' });
+          await expect(page.getByTestId('sendbox-input')).toBeVisible();
+        } catch (cleanup) { report.checks.at(-1).recoveryError = cleanup.message; }
+      }
       return undefined;
     }
   };
@@ -233,14 +257,34 @@ export async function runBrowserChecks({ aionuiRoot, chromeBin, output, url, bac
     });
     let textTurn;
     await check('chinese-stream-and-terminal', async () => {
-      textTurn = await sendUI('你好，验证中文分块输出。');
+      textTurn = await sendUI('stream 中文提交级输出与终态验收。');
+      let activeObservation;
+      await poll(async () => {
+        const observed = await modelStream(textTurn.turn_id);
+        if (observed.stream?.state === 'streaming' && observed.stream.chunks_sent >= 3 && !observed.stream.done_sent) { activeObservation = observed; return true; }
+        return false;
+      }, 'Model must actually stream at least three chunks before completion');
+      assert.equal(activeObservation.status.runtime.turn_id, textTurn.turn_id);
+      assert.equal(activeObservation.status.runtime.state, 'running');
+      assert.equal(activeObservation.stream.stream, true);
+      assert.equal(activeObservation.status.text_delivery.acp, 'committed_assistant_message');
+      assert.equal(activeObservation.status.text_delivery.token_level, false);
       await waitIdle();
-      const chunks = eventsFor(textTurn.turn_id, 'message.stream').filter((frame) => frame.data.type === 'text');
-      assert.ok(chunks.length >= 2, 'Expected multiple real dsh text chunks');
       await poll(async () => eventsFor(textTurn.turn_id, 'turn.completed').some((frame) => frame.data.outcome === 'completed' && frame.data.stop_reason === 'end_turn'), 'Expected real end_turn rather than merely an idle error runtime');
-      await expect(page.getByText(/离线真实 dsh text 完成。/).filter({ visible: true }).last()).toBeVisible();
-      await screenshot('chinese-terminal');
-      return { turn: textTurn, chunks: chunks.length };
+      const completed = await modelStream(textTurn.turn_id);
+      assert.equal(completed.stream.state, 'completed');
+      assert.equal(completed.stream.chunks_sent, 120);
+      assert.equal(completed.stream.chunks_planned, 120);
+      assert.equal(completed.stream.done_sent, true);
+      const chunks = eventsFor(textTurn.turn_id, 'message.stream').filter((frame) => frame.data.type === 'text');
+      assert.equal(chunks.length, 1, 'This dsh ACP delivers exactly one committed assistant text message, not token deltas');
+      const expected = Array.from({ length: 120 }, (_, index) => `真实模型流片段${index} `).join('');
+      assert.equal(chunks[0].data.data.content, expected);
+      const textRow = page.locator('[data-message-type="text"][data-message-position="left"]').filter({ hasText: '真实模型流片段119' });
+      await expect(textRow).toHaveCount(1);
+      await expect(textRow).toContainText(expected.trim());
+      await screenshot('chinese-committed-terminal');
+      return { label: '中文提交级输出与终态', tokenLevelTextSupported: false, textDelivery: completed.status.text_delivery, activeObservation, modelStream: completed.stream, turn: textTurn, realAcpTextNotifications: chunks.length };
     });
     let allowed;
     let allowedApproval;
@@ -254,9 +298,17 @@ export async function runBrowserChecks({ aionuiRoot, chromeBin, output, url, bac
         const header = summaries.nth(index);
         if (await header.locator('.tool-group-summary__arrow--open').count() === 0) await header.click();
       }
-      await expect(page.getByText(`Tool Call ID: ${allowedApproval.tool_call_id}`, { exact: true })).toBeVisible();
-      await expect(page.getByText('danger-full-access', { exact: false }).filter({ visible: true }).last()).toBeVisible();
+      const toolDescriptions = page.locator('.tool-group-summary__body span.cursor-pointer').filter({ hasText: allowedApproval.tool_call.raw_input.command }).filter({ visible: true });
+      for (let index = 0; index < await toolDescriptions.count(); index++) await toolDescriptions.nth(index).click();
+      await expect(page.locator('.tool-detail-content').filter({ hasText: 'danger-full-access' }).filter({ visible: true })).toHaveCount(1);
+      await expect(page.locator('.tool-detail-content').filter({ hasText: 'danger-full-access' })).toContainText(allowedApproval.tool_call.raw_input.justification);
+      const duplicateLive = (await permissionControls()).filter((item) => item.id === 'message-acp-permission-option-allow-once' && item.visible && !item.disabled).length > 1;
       await screenshot('allow-pending');
+      if (duplicateLive) {
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await expect(page.getByTestId('sendbox-input')).toBeVisible();
+        assert.equal((await waitApproval()).request_id, allowedApproval.request_id);
+      }
       allowedAnswer = await answerUI(allowedApproval, 'allow-once');
       await waitIdle();
       assert.equal(await effect(allowed.turn_id), `effect:${allowed.turn_id}\n`);
@@ -264,6 +316,7 @@ export async function runBrowserChecks({ aionuiRoot, chromeBin, output, url, bac
       assert.ok(tools.some((frame) => frame.data.data?.update?.status === 'in_progress'), 'Missing true running tool frame');
       assert.ok(tools.some((frame) => frame.data.data?.update?.status === 'completed'), 'Missing true completed tool frame');
       await screenshot('allow-terminal');
+      assert.equal(duplicateLive, false, 'Live approval was duplicated; diagnostic reload allowed actual side-effect verification but does not pass the live UI gate');
       return { turn: allowed, request_id: allowedApproval.request_id, toolFrames: tools.length };
     });
     await check('duplicate-approval-rejected', async () => {
@@ -294,12 +347,20 @@ export async function runBrowserChecks({ aionuiRoot, chromeBin, output, url, bac
     await check('ui-reject-without-effect', async () => {
       const turn = await sendUI('请拒绝 reject 独立目标写入。');
       const approval = await waitApproval();
+      const duplicateLive = (await permissionControls()).filter((item) => item.id === 'message-acp-permission-option-reject-once' && item.visible && !item.disabled).length > 1;
+      if (duplicateLive) {
+        await screenshot('reject-live-duplicate');
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await expect(page.getByTestId('sendbox-input')).toBeVisible();
+        assert.equal((await waitApproval()).request_id, approval.request_id);
+      }
       await answerUI(approval, 'reject-once');
       await waitIdle();
       assert.equal(await effect(turn.turn_id), null);
       const failed = eventsFor(turn.turn_id, 'message.stream').some((frame) => frame.data.type === 'acp_tool_call' && frame.data.data?.update?.status === 'failed');
       assert.ok(failed, 'Rejected real dsh tool must remain failed');
       await screenshot('reject-terminal');
+      assert.equal(duplicateLive, false, 'Live reject approval was duplicated; reload verified real rejection but does not pass the live UI gate');
       return { turn, request_id: approval.request_id };
     });
     await check('pending-refresh-and-ui-reject', async () => {
@@ -338,13 +399,55 @@ export async function runBrowserChecks({ aionuiRoot, chromeBin, output, url, bac
     });
     let cancelledTurn;
     await check('stream-ui-cancel', async () => {
-      cancelledTurn = await sendUI('cancel 取消流式，验证中文模型分块的真正中断。');
-      await poll(async () => eventsFor(cancelledTurn.turn_id, 'message.stream').filter((frame) => frame.data.type === 'text').length >= 2 && (await runtime()).turn_id === cancelledTurn.turn_id, 'Wait for at least two real model chunks before stopping');
-      await page.locator('.sendbox-stop-button').click();
+      cancelledTurn = await sendUI('cancel stream 中文生成中取消，允许部分文本在取消结果前提交。');
+      let beforeCancel;
+      await poll(async () => {
+        const observed = await modelStream(cancelledTurn.turn_id);
+        if (observed.stream?.state === 'streaming' && observed.stream.chunks_sent >= 3 && !observed.stream.done_sent) { beforeCancel = observed; return true; }
+        return false;
+      }, 'Use real model stream diagnostics to stop during generation, not after ACP text commit');
+      assert.equal(beforeCancel.status.runtime.turn_id, cancelledTurn.turn_id);
+      assert.equal(beforeCancel.status.runtime.state, 'running');
+      const [cancelResponse] = await Promise.all([
+        page.waitForResponse((response) => new URL(response.url()).pathname === `${apiBase}/cancel` && response.request().method() === 'POST'),
+        page.locator('.sendbox-stop-button').click(),
+      ]);
+      assert.equal(cancelResponse.status(), 200);
+      assert.equal(cancelResponse.request().postDataJSON().turn_id, cancelledTurn.turn_id);
       await waitIdle();
-      assert.ok(eventsFor(cancelledTurn.turn_id, 'turn.completed').length > 0);
+      await poll(async () => eventsFor(cancelledTurn.turn_id, 'turn.completed').some((frame) => frame.data.outcome === 'cancelled' && frame.data.stop_reason === 'cancelled'), 'Real ACP result must confirm cancelled');
+      await poll(async () => { const { stream } = await modelStream(cancelledTurn.turn_id); return stream.state === 'aborted' && stream.abort_observed && !stream.done_sent; }, 'Model generation must observe abort without DONE');
+      const stopped = await modelStream(cancelledTurn.turn_id);
+      assert.ok(stopped.stream.chunks_sent >= 3 && stopped.stream.chunks_sent < stopped.stream.chunks_planned);
+      const terminal = eventsFor(cancelledTurn.turn_id, 'turn.completed').at(-1);
+      const texts = eventsFor(cancelledTurn.turn_id, 'message.stream').filter((frame) => frame.data.type === 'text');
+      assert.ok(texts.every((frame) => frame.seq < terminal.seq), 'Partial commit must precede cancelled terminal');
+      const cursor = terminal.seq;
+      const chunkCount = stopped.stream.chunks_sent;
+      const rechecks = [];
+      const stableSince = Date.now();
+      await poll(async () => {
+        const observed = await modelStream(cancelledTurn.turn_id);
+        assert.equal(observed.stream.chunks_sent, chunkCount, 'Aborted model chunk count must stop increasing');
+        assert.equal(observed.stream.state, 'aborted');
+        const events = unwrap((await json(`/api/probe/events?since=${cursor}`)).body);
+        assert.ok(!events.some((event) => event.data?.turn_id === cancelledTurn.turn_id && event.name === 'message.stream' && ['text', 'acp_tool_call'].includes(event.data.type)), 'No text/tool events may follow cancelled terminal');
+        rechecks.push({ observedAt: Date.now(), ...observed.stream });
+        return Date.now() - stableSince >= 750;
+      }, 'Aborted model and terminal event stream remain stable across five model emission intervals');
+      if (texts.length) {
+        const partial = texts.map((frame) => frame.data.data.content).join('');
+        const paragraph = page.getByText(partial.trim(), { exact: true }).filter({ visible: true });
+        await expect(paragraph).toHaveCount(1);
+        await expect(paragraph).toBeVisible();
+      }
+      await page.getByTestId('sendbox-input').fill('取消后可再次发送的草稿');
+      await expect(page.getByTestId('sendbox-send-btn')).toBeEnabled();
+      await expect(page.locator('.sendbox-stop-button')).toHaveCount(0);
+      await page.getByTestId('sendbox-input').fill('');
       await screenshot('stream-cancelled');
-      return cancelledTurn;
+      return { turn: cancelledTurn, beforeCancel, modelStream: stopped.stream, realPartialTextNotifications: texts.length, terminal: terminal.data, stoppedChunkCount: chunkCount, rechecks, tokenLevelTextSupported: false };
+
     });
     await check('old-turn-cancel-cannot-stop-new-turn', async () => {
       const turn = await sendUI('慢速 slow 新回合不能被旧取消中断。');
@@ -360,7 +463,8 @@ export async function runBrowserChecks({ aionuiRoot, chromeBin, output, url, bac
       const turn = await sendUI('慢速 slow 断流后刷新恢复中文。');
       await poll(async () => eventsFor(turn.turn_id, 'message.stream').some((frame) => frame.data.type === 'text') && eventsFor(turn.turn_id, 'message.stream').some((frame) => frame.data.type === 'acp_tool_call'), 'Real stream and running tool before disconnect');
       const count = report.frames.length;
-      for (const socket of sockets) socket.close({ code: 1012, reason: 'probe reconnect' });
+      const disconnected = await json('/api/probe/disconnect-stream', { method: 'POST', body: '{}' });
+      assert.equal(disconnected.status, 200, 'Backend must disconnect real business sockets');
       await poll(async () => report.frames.slice(count).some((frame) => frame.name === 'runtime.snapshot' && frame.data?.runtime?.turn_id === turn.turn_id), 'Business WS must reconnect and receive an authoritative runtime snapshot');
       await page.reload({ waitUntil: 'domcontentloaded' });
       await expect(page.getByTestId('sendbox-input')).toBeVisible();

@@ -333,7 +333,10 @@ export async function startBackend({ runDir, dshBin = '/usr/sbin/dsh', port = 0 
           if (state.readOnly) throw problem(409, 'RECOVERY_READ_ONLY', state.error);
         }
         if (method === 'GET' && path === '/api/probe/status') return json(ok({ ...state.snapshot(), ready: state.ready, native_session_id: state.nativeSessionId,
-          last_turn: state.lastTurn, models: LOCAL_VALUES, fake_requests: fake.requests, isolation: { cwd: work, home: env.HOME, dsh_home: env.DSH_HOME, environment_names: Object.keys(env) },
+          last_turn: state.lastTurn, models: LOCAL_VALUES, fake_requests: fake.requests, fake_streams: [...fake.streams.values()],
+          text_delivery: { acp: 'committed_assistant_message', token_level: false, cancellation: 'partial_commit_before_cancelled_result',
+            note: '本探针下 dsh 的文本为提交级，非 token 级；取消时可能提交已接收的部分文本；backend 不拆分最终全文。' },
+          isolation: { cwd: work, home: env.HOME, dsh_home: env.DSH_HOME, environment_names: Object.keys(env) },
           side_effects: [...fake.turns.values()].map((turn) => ({ ...turn, exists: existsSync(turn.target), content: existsSync(turn.target) ? readFileSync(turn.target, 'utf8') : null })) }));
         if (method === 'GET' && path === '/api/probe/events') return json(ok(state.events.filter((event) => event.seq > Number(url.searchParams.get('since') ?? 0))));
         if (method === 'POST' && ['/api/probe/disconnect', '/api/probe/disconnect-stream'].includes(path)) {

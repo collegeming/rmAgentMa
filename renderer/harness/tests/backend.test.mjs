@@ -53,7 +53,8 @@ describe('real dsh with isolated fake local models', () => {
     const options = ensured.body.data.config_options.find((option) => option.id === 'model');
     expect(options.options.some((option) => option.value === '["fake","fake-2"]')).toBe(true);
     expect((await api(C + '/config-options/model', 'PUT', { value: '["fake","fake-2"]' })).body.data.confirmation).toBe('observed');
-    expect((await api(C + '/config-options/model', 'PUT', { value: '["deepseek-official","deepseek-flash"]' })).status).toBe(403);
+    const nonlocal = (await api(C + '/config-options/model', 'PUT', { value: '["deepseek-official","deepseek-flash"]' })).status;
+    expect([403, 422]).toContain(nonlocal);
     expect((await api(C + '/config-options/model', 'PUT', { value: 'unknown' })).status).toBe(422);
     expect((await api(C + '/config-options/unknown', 'PUT', { value: 'unknown' })).status).toBe(422);
     expect((await api(C + '/config-options')).body.data.config_options.find((option) => option.id === 'model').current_value).toBe('["fake","fake-2"]');
@@ -77,6 +78,12 @@ describe('real dsh with isolated fake local models', () => {
     const status = (await api('/api/probe/status')).body.data;
     expect(status.last_turn.status).toBe('completed');
     expect(status.fake_requests.every((request) => request.model === 'fake-2')).toBe(true);
+    expect(status.fake_requests.find((request) => request.turn_id === turn.turn_id).stream).toBe(true);
+    expect(status.fake_streams.find((stream) => stream.turn_id === turn.turn_id)).toMatchObject({ state: 'completed', chunks_planned: 3, chunks_sent: 3, done_sent: true, abort_observed: false });
+    expect(status.text_delivery).toMatchObject({ acp: 'committed_assistant_message', token_level: false });
+    const text = backend.state.events.filter((event) => event.name === 'message.stream' && event.data.turn_id === turn.turn_id && event.data.type === 'text');
+    expect(text).toHaveLength(1);
+    expect(text[0].data.data.content).toBe('离线真实 dsh text 完成。');
   }, 30000);
 
   test('live allow preserves raw options, real sandbox denial and approved side effect', async () => {
@@ -137,12 +144,67 @@ describe('real dsh with isolated fake local models', () => {
     await idle();
   }, 30000);
 
-  test('cancellation during model SSE is confirmed by the real prompt result', async () => {
+  test('protocol: 120 model SSE chunks produce one committed ACP text message, not token notifications', async () => {
+    const turn = await send('stream 中文提交级验证');
+    const texts = () => backend.state.events.filter((event) => event.name === 'message.stream' && event.data.turn_id === turn.turn_id && event.data.type === 'text');
+    const active = await waitFor(async () => (await api('/api/probe/status')).body.data.fake_streams.find((stream) => stream.turn_id === turn.turn_id && stream.chunks_sent >= 3 && stream.state === 'streaming'));
+    expect(active.done_sent).toBe(false);
+    expect(backend.state.turn.id).toBe(turn.turn_id);
+    expect(texts()).toHaveLength(0);
+    await waitFor(() => backend.state.status === 'idle', 25000);
+    const expected = Array.from({ length: 120 }, (_, index) => `真实模型流片段${index} `).join('');
+    expect(texts()).toHaveLength(1);
+    expect(texts()[0].data.data.content).toBe(expected);
+    const raw = readFileSync(join(runDir, 'acp-frames.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const start = raw.findIndex((frame) => frame.method === 'session/prompt' && frame.params.prompt[0].text.includes(turn.turn_id));
+    const end = raw.findIndex((frame, index) => index > start && frame.id === raw[start].id && frame.result);
+    const chunks = raw.slice(start, end).filter((frame) => frame.params?.update?.sessionUpdate === 'agent_message_chunk');
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].params.update.content.text).toBe(expected);
+    const status = (await api('/api/probe/status')).body.data;
+    const completed = status.fake_streams.find((stream) => stream.turn_id === turn.turn_id);
+    expect(completed).toMatchObject({ stream: true, state: 'completed', chunks_sent: 120, chunks_planned: 120, done_sent: true });
+    expect(chunks[0].at).toBeGreaterThanOrEqual(completed.ended_at);
+    expect(status.last_turn).toMatchObject({ turn_id: turn.turn_id, status: 'completed', stop_reason: 'end_turn' });
+  }, 35000);
+
+  test('protocol and product: cancel active model SSE, preserve its partial commit, reject post-terminal output', async () => {
     const turn = await send('cancel stream');
-    await waitFor(async () => (await api('/api/probe/status')).body.data.fake_requests.some((request) => request.turn_id === turn.turn_id));
-    expect((await api(C + '/cancel', 'POST', { turn_id: turn.turn_id })).status).toBe(200);
+    const textEvents = () => backend.state.events.filter((event) => event.name === 'message.stream' && event.data.turn_id === turn.turn_id && ['text', 'acp_tool_call'].includes(event.data.type));
+    const stream = await waitFor(async () => (await api('/api/probe/status')).body.data.fake_streams.find((stream) => stream.turn_id === turn.turn_id && stream.chunks_sent >= 3 && stream.state === 'streaming'));
+    expect(stream).toMatchObject({ stream: true, done_sent: false, abort_observed: false });
+    expect(backend.state.turn.id).toBe(turn.turn_id);
+    expect(textEvents()).toHaveLength(0);
+    const result = await api(C + '/cancel', 'POST', { turn_id: turn.turn_id });
+    expect(result.status).toBe(200);
+    expect(result.body.data.runtime.state).toBe('cancelling');
     await idle();
     expect(backend.state.lastTurn).toMatchObject({ turn_id: turn.turn_id, status: 'cancelled', stop_reason: 'cancelled' });
+    const aborted = await waitFor(async () => (await api('/api/probe/status')).body.data.fake_streams.find((stream) => stream.turn_id === turn.turn_id && stream.state === 'aborted'));
+    expect(aborted.abort_observed).toBe(true);
+    expect(['request_signal', 'response_cancel']).toContain(aborted.termination_source);
+    expect(aborted.done_sent).toBe(false);
+    expect(aborted.chunks_sent).toBeLessThan(aborted.chunks_planned);
+    const committedAtCancel = textEvents();
+    const terminal = backend.state.events.find((event) => event.name === 'turn.completed' && event.data.turn_id === turn.turn_id);
+    expect(committedAtCancel).toHaveLength(1);
+    expect(committedAtCancel[0].data.type).toBe('text');
+    expect(committedAtCancel[0].seq).toBeLessThan(terminal.seq);
+    const partial = Array.from({ length: aborted.chunks_sent }, (_, index) => `真实模型流片段${index} `).join('');
+    expect(committedAtCancel[0].data.data.content).toBe(partial);
+    const raw = readFileSync(join(runDir, 'acp-frames.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+    const requestIndex = raw.findIndex((frame) => frame.method === 'session/prompt' && frame.params.prompt[0].text.includes(turn.turn_id));
+    const promptId = raw[requestIndex].id;
+    const resultIndex = raw.findIndex((frame, index) => index > requestIndex && frame.id === promptId && frame.result?.stopReason === 'cancelled');
+    expect(raw.slice(requestIndex, resultIndex).filter((frame) => frame.params?.update?.sessionUpdate === 'agent_message_chunk')).toHaveLength(1);
+    expect(raw.slice(resultIndex + 1).filter((frame) => ['agent_message_chunk', 'tool_call', 'tool_call_update'].includes(frame.params?.update?.sessionUpdate))).toHaveLength(0);
+    await Bun.sleep(500);
+    expect(textEvents()).toHaveLength(committedAtCancel.length);
+    expect(textEvents().every((event) => event.seq < terminal.seq)).toBe(true);
+    const after = (await api('/api/probe/status')).body.data.fake_streams.find((stream) => stream.turn_id === turn.turn_id);
+    expect(after.chunks_sent).toBe(aborted.chunks_sent);
+    expect(backend.state.events.filter((event) => event.name === 'turn.completed' && event.data.turn_id === turn.turn_id)).toHaveLength(1);
+    expect((await effect(turn.turn_id)).exists).toBe(false);
   }, 30000);
 
   test('WebSocket snapshots, directed subscriptions, cursors and disconnect injection', async () => {

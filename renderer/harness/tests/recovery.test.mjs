@@ -49,7 +49,7 @@ describe('journal recovery without an agent', () => {
     expect(readJournal(path)).toEqual({ records: [{ one: 1 }, { two: 2 }], issues: [] });
   });
 
-  for (const file of ['events.jsonl', 'fake-requests.jsonl']) {
+  for (const file of ['events.jsonl', 'fake-requests.jsonl', 'fake-streams.jsonl']) {
     test(`${file}: a full snapshot and truncated tail recover as read-only without changing evidence`, async () => {
       const dir = fresh();
       const backend = await startBackend({ runDir: dir });
