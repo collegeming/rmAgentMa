@@ -117,6 +117,12 @@ export async function prepare(options) {
   );
   const ignoreFile = path.join(workdir, '.prettierignore');
   await writeFile(ignoreFile, `${await readFile(ignoreFile, 'utf8')}\n.rmagent/\n`);
+  const lintConfig = path.join(workdir, '.oxlintrc.json');
+  const lintText = await readFile(lintConfig, 'utf8');
+  const lintAnchor = '"ignorePatterns": [';
+  if (!lintText.includes(lintAnchor) || lintText.includes('".rmagent/"'))
+    throw new Error('Cannot extend the oxlint ignore list for build scaffolding');
+  await writeFile(lintConfig, lintText.replace(lintAnchor, `${lintAnchor}\n    ".rmagent/",`));
   if (cache) {
     run(
       path.join(cache, '.bin/oxfmt'),
