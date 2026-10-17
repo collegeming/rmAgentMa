@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/iOfficeAI/AionUi",
+  "commit": "6744099b279b991c17e31c243f0920477bd31cb6",
+  "packageSha256": "f437f7350dcf27a375c96658dc10a4ef405cc7750f509d7490cbe5f34d290039",
+  "lockSha256": "e3f79c54c0d5b786e1a2689557aabac67696e602cd17e8d35cf236f999e98039",
+  "tools": { "node": "v22.23.3", "bun": "1.3.14" },
+  "nodeDistribution": {
+    "url": "https://nodejs.org/dist/v22.23.3/node-v22.23.3-linux-x64.tar.xz",
+    "sha256": "df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de",
+    "checksums": "https://nodejs.org/dist/v22.23.3/SHASUMS256.txt"
+  },
+  "upstreamNodeEngines": ">=22 <25",
+  "nodeEngineCompatible": true,
+  "packageCommand": ["bun", "run", "package"],
+  "rendererOutput": "out/renderer",
+  "assetPolicy": "assets/policy.json"
+}

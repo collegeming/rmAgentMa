@@ -219,3 +219,85 @@ jobs:
             android/ci-reports/
           if-no-files-found: warn
           retention-days: 14
+
+  renderer-probe:
+    name: Fixed renderer and isolated host-probe APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout history and tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Install checksum-pinned Node and Bun
+        working-directory: .
+        run: bash .github/scripts/install-renderer-tools.sh
+
+      - name: Prepare fixed upstream, frozen install, test tools and build audited renderer
+        working-directory: .
+        run: bash .github/scripts/build-renderer-probe.sh
+
+      - name: Set up Java 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle and validate wrapper
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          cache-provider: basic
+          cache-read-only: ${{ github.event_name == 'pull_request' || github.ref != 'refs/heads/main' }}
+          dependency-graph: disabled
+
+      - name: Set up Android SDK tools
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: platform-tools
+
+      - name: Install official Android SDK and native toolchain
+        run: bash ../.github/scripts/install-android-sdk.sh
+
+      - name: Check host-probe and build APKs from the freshly verified renderer
+        run: |
+          mkdir -p ci-reports
+          ./gradlew --no-daemon --no-configuration-cache --stacktrace --profile --continue \
+            "-PRendererAssetsDir=$RUNNER_TEMP/probe-renderer" \
+            :host-probe:lint :host-probe:check :host-probe:test \
+            :host-probe:assembleDebug :host-probe:assembleDebugAndroidTest \
+            2>&1 | tee ci-reports/renderer-probe-gradle.txt
+
+      - name: Verify APK assets and package source, hashes, licenses and certificate fingerprints
+        working-directory: .
+        run: python3 .github/scripts/package-probe-artifacts.py
+
+      - name: Upload installable host-probe and reproducibility evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rmAgentMa-host-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-artifacts/host-probe/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload renderer and probe diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: renderer-probe-reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/renderer-reports/
+            ${{ runner.temp }}/aionui-renderer-work/.rmagent/logs/
+            ${{ runner.temp }}/aionui-renderer-work/.rmagent/check-results.json
+            ${{ runner.temp }}/renderer-tools/tools.json
+            ${{ runner.temp }}/renderer-tools/SHA256SUMS
+            android/host-probe/build/reports/
+            android/host-probe/build/test-results/
+            android/build/reports/
+            android/ci-reports/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14

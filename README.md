@@ -35,27 +35,57 @@ CI debug 使用 `-PciDebug=true`，包名为 `org.rmagentma.android.debug.ci`，
 
 artifact 中的 `rmAgentMa-device-tests.apk` 用于显式启用的真机验收。`AgentDeviceSeedTest` 在设备内生成测试密钥，经正常 Repository 和 Keystore 保存，仅输出公钥；不开启 `seedAgentHost=true` 时跳过。`AgentDeviceConversationTest` 的远端对话需要 `agentDeviceE2e=true` 和已人工核验的主机指纹，在隔离目录运行。两者都不得通过会清除应用数据的 Orchestrator 执行，也不进入生产 APK。
 
-### 本地构建
+### 本地检查
 
-在项目根目录执行：
+APK 统一由 GitHub Actions 编译，本地只执行检查、JVM 和扫描脚本测试：
 
 ```bash
 cd android
-./gradlew :app:assembleOssDebug
 ./gradlew :agent-core:test :agent-ui:testDebugUnitTest
 ./gradlew spotlessCheck lint check test
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s agent-core/src/test/python -v
 ```
 
-构建失败时先查看首个失败任务，不要安装未完成构建的产物。调试 APK 位于 `android/app/build/outputs/apk/oss/debug/app-oss-debug.apk`，包名为 `org.rmagentma.android.debug`，可与 ConnectBot 并存。调试包用于本地验证，不是签名发布版。
+检查失败时先查看首个失败任务。安装只使用对应提交的 CI artifact，先校验 `SHA256SUMS` 与构建元数据；设备必须已授权且状态为 `device`。覆盖安装还需核对签名，签名不匹配时停止，不卸载或清数据解决冲突。纯 JVM 或扫描脚本测试不代表真机验收通过。
 
-安装前必须连接并授权安卓设备，`adb devices` 应显示目标设备且状态为 `device`。在项目根目录执行：
+### 共享前端与独立宿主探针
+
+`renderer/` 保存固定 AionUi 源码身份、补丁、传输契约、构建审计和离线验收程序；`:host-probe` 是独立 debug 应用 `org.rmagentma.hostprobe`，承载真实 renderer 和原生合成数据源，不替换 `:app`，不连接真实 SSH 或 Agent。长期后台服务尚未实现，实际输入法、文件选择器、锁屏、读屏和 WebView 恢复须另做设备验收。
+
+工具版本由 `renderer/upstream.json` 固定。在满足该版本的 Node/Bun 环境，使用固定提交的完整上游 checkout：
 
 ```bash
-adb install -r android/app/build/outputs/apk/oss/debug/app-oss-debug.apk
+node renderer/scripts/prepare.mjs --source /path/to/aionui-source --workdir /path/to/new-workspace
+node renderer/scripts/install.mjs --workdir /path/to/new-workspace
+node renderer/scripts/build.mjs --workdir /path/to/new-workspace --output /path/to/new-renderer
+node renderer/scripts/build.mjs --verify /path/to/new-renderer
 ```
 
-安装后打开 rmAgentMa，按下方步骤添加 SSH 设备。连接安卓设备后才能在 `android/` 中执行 `./gradlew connectedOssDebugAndroidTest`；纯 JVM 或扫描脚本测试不代表真机验收通过。
+`prepare` 只复制经过 Git blob 校验的固定输入；`install` 显式冻结锁且禁用生命周期脚本；`build` 执行标准检查、测试和上游构建，审计实际模块、静态资源与离线许可后才导出。输出目录必须全新，缺资源、旧补丁、检查失败和摘要不一致均不得回退旧产物。公式与 Mermaid 在探针中显示源码，未准入品牌、字体、图标集合及远程编辑器 loader 不进入分发包。
+
+本地宿主检查不生成 APK：
+
+```bash
+cd android
+./gradlew :host-probe:check :host-probe:test :host-probe:compileDebugAndroidTestKotlin spotlessCheck
+./gradlew :host-probe:prepareRendererAssets -PRendererAssetsDir=/path/to/new-renderer
+```
+
+workflow 的 `renderer-probe` job 从固定源码重新安装依赖、构建 renderer，再编译宿主 APK 和测试 APK，上传 `rmAgentMa-host-probe-<run-id>-<attempt>`。artifact 含 renderer、完整许可、源码身份、签名信息和 SHA-256；构建成功不表示设备测试已执行。
+
+浏览器离线协议验收使用用户自行安装的 dsh 与 Chromium，在新建私有目录中创建会话、运行真实沙箱工具，并通过本地脚本化模型验证审批。它会写入该测试目录，不使用真实 provider，不是纯只读检查：
+
+```bash
+DSH_BIN=/path/to/dsh CHROME_BIN=/path/to/chromium \
+  bun renderer/harness/run.mjs --aionui-root /path/to/new-workspace \
+  --renderer-dir /path/to/new-renderer --output /path/to/new-evidence
+
+CHROME_BIN=/path/to/chromium \
+  node renderer/harness/native-browser-check.mjs --aionui-root /path/to/new-workspace \
+  --renderer-dir /path/to/new-renderer --output /path/to/new-native-evidence
+```
+
+后者使用模拟 WebMessage 对端验证真实输入框与 native DTO，不执行 Kotlin，也不替代 Android 真机结果。探针仅支持固定合成会话；不具备多用户网关、可靠多端协作或同会话 TUI 的产品交付能力。
 
 ## 远端准备与使用
 
@@ -80,7 +110,7 @@ adb install -r android/app/build/outputs/apk/oss/debug/app-oss-debug.apk
 - 私钥原编码（含用户原有口令加密）在数据库边界由 Android Keystore AES-GCM 再加密，口令使用上游 Keystore 存储。私钥不进入系统备份，卸载、清数据或换设备前必须显式导出并安全保管；生物识别私钥不能导出，必须另行安排登录方式。历史迁移数据库、旧 WAL/free pages 或既有云端旧备份不由此实现安全擦除。
 - 扫描器需要 Python；缺少 Python 时明确报错，不是文档中完整的 CLI-only 降级实现。
 - 安卓真机长驻通道、网络切换、后台保活、WSL 跨设备连接、真实 agent 上下文恢复与文件审批仍需按 [AC-1～AC-7](01-需求说明.md#6-验收口径) 验收。本地合成会话测试不能替代这些验收。
-- 手机 droidspace 自管、WebView 嵌入和自动设备发现不属于当前主路径。
+- 生产 `:app` 仍走 Compose 路径；WebView 仅在独立 `:host-probe` 中验证，未完成生产迁移。手机 droidspace 自管和自动设备发现不属于当前主路径。
 
 ## 文档索引
 

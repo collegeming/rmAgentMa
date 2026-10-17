@@ -13,5 +13,6 @@ if (TRANSLATIONS_ONLY.isNullOrBlank()) {
     include(":mosh")
     include(":agent-core")
     include(":agent-ui")
+    include(":host-probe")
 }
 include(":translations")

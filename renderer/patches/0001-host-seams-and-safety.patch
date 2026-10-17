@@ -1,0 +1,4365 @@
+Modified by rmAgentMa contributors for the renderer probe.
+JSON modifications: packages/desktop/src/renderer/services/i18n/locales/en-US/messages.json;
+packages/desktop/src/renderer/services/i18n/locales/zh-CN/messages.json.
+
+diff --git a/packages/desktop/src/common/adapter/browser.ts b/packages/desktop/src/common/adapter/browser.ts
+index bd872a3..cac061b 100644
+--- a/packages/desktop/src/common/adapter/browser.ts
++++ b/packages/desktop/src/common/adapter/browser.ts
+@@ -2,9 +2,11 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { bridge } from '@/common/platform/bridge';
++import { hostPlatformRequest, isNativeHost, onHostEvent } from '@/common/host/hostTransport';
+ import { WEBUI_DEFAULT_PORT } from '@/common/config/constants';
+ import { refreshSession } from './sessionRefresh';
+ import type { ElectronBridgeAPI } from '@/common/types/platform/electron';
+@@ -52,7 +54,23 @@ const win = window as CustomWindow;
+ /**
+  * 适配electron的API到浏览器中,建立renderer和main的通信桥梁, 与preload.ts中的注入对应
+  * */
+-if (win.electronAPI) {
++if (isNativeHost()) {
++  let emitterRef: { emit: (name: string, data: unknown) => unknown } | undefined;
++  bridge.adapter({
++    emit(name, data) {
++      if (!name.startsWith('subscribe-') || !isRecord(data) || typeof data.id !== 'string') return;
++      const service = name.slice('subscribe-'.length);
++      void hostPlatformRequest(service, data.data).then(
++        (result) => emitterRef?.emit(`subscribe.callback-${service}${data.id}`, result),
++        (error: unknown) => console.warn('[host] platform service rejected', service, error)
++      );
++    },
++    on(emitter) {
++      emitterRef = emitter;
++      return onHostEvent((name, data) => emitter.emit(name, data));
++    },
++  });
++} else if (win.electronAPI) {
+   // Electron 环境 - 使用 IPC 通信
+   bridge.adapter({
+     emit(name, data) {
+diff --git a/packages/desktop/src/common/adapter/httpBridge.ts b/packages/desktop/src/common/adapter/httpBridge.ts
+index 11df91d..57d8e90 100644
+--- a/packages/desktop/src/common/adapter/httpBridge.ts
++++ b/packages/desktop/src/common/adapter/httpBridge.ts
+@@ -1,4 +1,5 @@
+ /**
++ * Modified by rmAgentMa contributors for the renderer probe.
+  * HTTP/WS bridge factory — drop-in replacement for bridge.buildProvider / bridge.buildEmitter
+  * that routes calls to aioncore via REST API and WebSocket.
+  *
+@@ -7,6 +8,7 @@
+  */
+ 
+ import { refreshSession, WS_CLOSE_POLICY_VIOLATION } from './sessionRefresh';
++import { hostFetch, isNativeHost, onHostEvent } from '@/common/host/hostTransport';
+ 
+ // ---------------------------------------------------------------------------
+ // Base URL
+@@ -210,7 +212,7 @@ function sendHttpRequest(
+   body?: unknown
+ ): Promise<Response> {
+   const url = `${getBaseUrl()}${path}`;
+-  return fetch(url, {
++  return hostFetch(url, {
+     method,
+     headers,
+     body: body !== undefined ? JSON.stringify(body) : undefined,
+@@ -244,7 +246,7 @@ export async function httpRequest<T>(
+   // the original request — the WebUI half of the #4124 fix. refreshSession() is a
+   // no-op outside browser mode and single-flights concurrent 401s into one POST.
+   // The auth endpoints themselves are skipped to avoid recursion.
+-  if (response.status === 401 && !isAuthEndpoint(path)) {
++  if (response.status === 401 && !isNativeHost() && !isAuthEndpoint(path)) {
+     console.debug(`[httpBridge] ${method} ${path} → 401, attempting session refresh`);
+     const refreshed = await refreshSession();
+     if (refreshed) {
+@@ -401,6 +403,9 @@ let ws: WebSocket | null = null;
+ let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+ let wsReconnectAttempt = 0;
+ let wsHasOpened = false;
++let wsEpoch: string | number | undefined;
++let wsSeq = -1;
++const retiredWsEpochs = new Set<string | number>();
+ 
+ function dispatchWsEvent(eventName: string, payload: unknown): void {
+   const handlers = wsListeners.get(eventName);
+@@ -414,7 +419,15 @@ function dispatchWsEvent(eventName: string, payload: unknown): void {
+   }
+ }
+ 
++let hostEventsConnected = false;
+ function ensureWs(): void {
++  if (isNativeHost()) {
++    if (!hostEventsConnected) {
++      onHostEvent(dispatchWsEvent);
++      hostEventsConnected = true;
++    }
++    return;
++  }
+   if (typeof window === 'undefined') {
+     console.debug('[ensureWs] skipped: no window');
+     return;
+@@ -472,9 +485,21 @@ function ensureWs(): void {
+         event?: string;
+         data?: unknown;
+         payload?: unknown;
++        epoch?: string | number;
++        seq?: number;
+       };
+       const eventName = msg.name ?? msg.event;
+       const payload = msg.data ?? msg.payload;
++      if (msg.epoch !== undefined && Number.isSafeInteger(msg.seq)) {
++        if (
++          retiredWsEpochs.has(msg.epoch) ||
++          (msg.epoch === wsEpoch && msg.seq! <= wsSeq && eventName !== 'runtime.snapshot')
++        )
++          return;
++        if (wsEpoch !== undefined && wsEpoch !== msg.epoch) retiredWsEpochs.add(wsEpoch);
++        wsEpoch = msg.epoch;
++        wsSeq = msg.seq!;
++      }
+       console.debug('[WS:msg]', eventName, JSON.stringify(payload).slice(0, 200));
+       if (eventName) {
+         dispatchWsEvent(eventName, payload);
+diff --git a/packages/desktop/src/common/config/configService.ts b/packages/desktop/src/common/config/configService.ts
+index cf0c2d8..120234b 100644
+--- a/packages/desktop/src/common/config/configService.ts
++++ b/packages/desktop/src/common/config/configService.ts
+@@ -1,4 +1,6 @@
++/** Modified by rmAgentMa contributors for the renderer probe. */
+ import type { ConfigKey, ConfigKeyMap } from './configKeys';
++import { hostFetch } from '@/common/host/hostTransport';
+ 
+ type Subscriber = (value: unknown) => void;
+ 
+@@ -24,7 +26,7 @@ async function fetchJson<T>(method: string, path: string, body?: unknown): Promi
+   if (body !== undefined) {
+     headers['Content-Type'] = 'application/json';
+   }
+-  const response = await fetch(url, {
++  const response = await hostFetch(url, {
+     method,
+     headers,
+     body: body !== undefined ? JSON.stringify(body) : undefined,
+diff --git a/packages/desktop/src/common/platform/bridge.ts b/packages/desktop/src/common/platform/bridge.ts
+index 3c24cef..932252f 100644
+--- a/packages/desktop/src/common/platform/bridge.ts
++++ b/packages/desktop/src/common/platform/bridge.ts
+@@ -2,9 +2,11 @@
+  * @license
+  * Copyright 2026 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import EventEmitter from 'eventemitter3';
++import { hostPlatformRequest, isNativeHost } from '@/common/host/hostTransport';
+ 
+ type MaybePromise<T> = T | Promise<T>;
+ type EventHandler = (...args: unknown[]) => unknown;
+@@ -136,6 +138,7 @@ export const subscribe = <Params = unknown, Data = unknown>(
+   });
+ 
+ export const invoke = <Data = unknown>(name: string, data?: unknown): Promise<Data> => {
++  if (isNativeHost()) return hostPlatformRequest(name, data) as Promise<Data>;
+   const id = createRequestId(name);
+   const callbackName = `subscribe.callback-${name}${id}`;
+ 
+diff --git a/packages/desktop/src/common/types/platform/acpTypes.ts b/packages/desktop/src/common/types/platform/acpTypes.ts
+index fb9f525..a9ab2b1 100644
+--- a/packages/desktop/src/common/types/platform/acpTypes.ts
++++ b/packages/desktop/src/common/types/platform/acpTypes.ts
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import type { TConversationRuntimeSummary } from '@/common/config/storage';
+@@ -146,7 +147,7 @@ export interface ToolCallUpdate extends BaseSessionUpdate {
+     tool_call_id: string;
+     status: 'pending' | 'in_progress' | 'completed' | 'failed';
+     title: string;
+-    kind: 'read' | 'edit' | 'execute';
++    kind: string;
+     rawInput?: Record<string, unknown>;
+     rawOutput?: AcpRawOutput;
+     raw_output?: AcpRawOutput;
+@@ -275,6 +276,9 @@ export interface AcpPermissionOption {
+ 
+ export interface AcpPermissionRequest {
+   session_id: string;
++  request_id?: string;
++  readonly?: boolean;
++  epoch?: number | string;
+   options: Array<AcpPermissionOption>;
+   tool_call: {
+     tool_call_id: string;
+diff --git a/packages/desktop/src/renderer/api/client.ts b/packages/desktop/src/renderer/api/client.ts
+index 824192c..9fef875 100644
+--- a/packages/desktop/src/renderer/api/client.ts
++++ b/packages/desktop/src/renderer/api/client.ts
+@@ -1,4 +1,5 @@
+ /**
++ * Modified by rmAgentMa contributors for the renderer probe.
+  * HTTP client factory for communicating with the aioncore server.
+  *
+  * Usage:
+@@ -6,6 +7,8 @@
+  *   const data = await api.get<Foo>('/api/foo')
+  */
+ 
++import { hostFetch, isNativeHost } from '@/common/host/hostTransport';
++
+ export class ApiError extends Error {
+   constructor(
+     public readonly status: number,
+@@ -32,7 +35,7 @@ async function request<T>(
+   const headers: Record<string, string> = { ...options?.headers };
+   if (body !== undefined) headers['Content-Type'] = 'application/json';
+ 
+-  const response = await fetch(url, {
++  const response = await hostFetch(isNativeHost() ? path : url, {
+     method,
+     headers,
+     body: body !== undefined ? JSON.stringify(body) : undefined,
+diff --git a/packages/desktop/src/renderer/components/Markdown/CodeBlock.tsx b/packages/desktop/src/renderer/components/Markdown/CodeBlock.tsx
+index 070cfc0..d5ac762 100644
+--- a/packages/desktop/src/renderer/components/Markdown/CodeBlock.tsx
++++ b/packages/desktop/src/renderer/components/Markdown/CodeBlock.tsx
+@@ -2,11 +2,11 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { Message } from '@arco-design/web-react';
+ import { Copy, Down, Up } from '@icon-park/react';
+-import katex from 'katex';
+ import React, { useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import SyntaxHighlighter from 'react-syntax-highlighter';
+@@ -49,7 +49,10 @@ function CodeBlock(props: CodeBlockProps) {
+       setCurrentTheme((document.documentElement.getAttribute('data-theme') as 'light' | 'dark') || 'light');
+     };
+     const observer = new MutationObserver(update);
+-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
++    observer.observe(document.documentElement, {
++      attributes: true,
++      attributeFilter: ['data-theme'],
++    });
+     return () => observer.disconnect();
+   }, []);
+ 
+@@ -75,20 +78,6 @@ function CodeBlock(props: CodeBlockProps) {
+   const match = /language-(\w+)/.exec(className || '');
+   const language = match?.[1] || 'text';
+ 
+-  // KaTeX math blocks
+-  if (language === 'latex' || language === 'math' || language === 'tex') {
+-    const latexSource = String(children).replace(/\n$/, '');
+-    const isFullDocument = /\\(documentclass|begin\{document\}|usepackage)\b/.test(latexSource);
+-    if (!isFullDocument) {
+-      try {
+-        const html = katex.renderToString(latexSource, { displayMode: true, throwOnError: false });
+-        return <div className='katex-display' dangerouslySetInnerHTML={{ __html: html }} />;
+-      } catch {
+-        // fall through
+-      }
+-    }
+-  }
+-
+   if (language === 'mermaid') {
+     return <MermaidBlock code={formatCode(children)} style={props.codeStyle} enablePanZoom={props.diagramPanZoom} />;
+   }
+diff --git a/packages/desktop/src/renderer/components/Markdown/MermaidBlock.tsx b/packages/desktop/src/renderer/components/Markdown/MermaidBlock.tsx
+index 88342bc..5dfd2fd 100644
+--- a/packages/desktop/src/renderer/components/Markdown/MermaidBlock.tsx
++++ b/packages/desktop/src/renderer/components/Markdown/MermaidBlock.tsx
+@@ -2,450 +2,43 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+-
+-import mermaid from 'mermaid';
+-import SyntaxHighlighter from 'react-syntax-highlighter';
+-import { vs, vs2015 } from 'react-syntax-highlighter/dist/esm/styles/hljs';
+-
+ import { copyText } from '@/renderer/utils/ui/clipboard';
+-import { Message } from '@arco-design/web-react';
+-import { Copy, PreviewOpen, Refresh, ZoomIn, ZoomOut } from '@icon-park/react';
+-import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
+-import React, { useEffect, useRef, useState } from 'react';
++import { Button, Message } from '@arco-design/web-react';
++import React from 'react';
+ import { useTranslation } from 'react-i18next';
+-import DiagramZoomOverlay from './DiagramZoomOverlay';
+-import { withResponsiveSvg } from './markdownUtils';
+ 
+ type MermaidBlockProps = {
+   code: string;
+   style?: React.CSSProperties;
+   showOpenInPanelButton?: boolean;
+-  // Enable drag-to-pan + zoom buttons over the rendered diagram. Chat messages and
+-  // the preview panel opt in via CodeBlock; other callers keep diagrams static by
+-  // default. Wheel is left to the page so scrolling a long document past a diagram
+-  // never zooms it (matches the prior Streamdown behaviour the preview shipped with).
+   enablePanZoom?: boolean;
+ };
+ 
+-const MIN_MERMAID_SCALE = 0.25;
+-const MAX_MERMAID_SCALE = 4;
+-const MERMAID_ZOOM_STEP = 0.25;
+-// Pointer movement below this threshold counts as a click (opens the zoom
+-// overlay) instead of a pan, when drag-to-pan is enabled.
+-const PAN_CLICK_THRESHOLD = 4;
+-
+-let initializedTheme: 'light' | 'dark' | null = null;
+-const ensureMermaidInitialized = (theme: 'light' | 'dark') => {
+-  if (initializedTheme === theme) return;
+-  mermaid.initialize({
+-    startOnLoad: false,
+-    securityLevel: 'strict',
+-    suppressErrorRendering: true,
+-    theme: theme === 'dark' ? 'dark' : 'default',
+-    fontFamily: 'inherit',
+-  });
+-  initializedTheme = theme;
+-};
+-
+-function MermaidBlock({ code, style, showOpenInPanelButton = true, enablePanZoom = false }: MermaidBlockProps) {
++export default function MermaidBlock({ code, style }: MermaidBlockProps) {
+   const { t } = useTranslation();
+-  const { openPreview } = usePreviewContext();
+-  const blockIdRef = useRef(`mermaid-${Math.random().toString(36).slice(2, 10)}`);
+-  const preferredViewModeRef = useRef<'preview' | 'source' | null>(null);
+-  const [svg, setSvg] = useState<string | null>(null);
+-  const [isRendering, setIsRendering] = useState(false);
+-  const [viewMode, setViewMode] = useState<'preview' | 'source'>('source');
+-  const [debouncedCode, setDebouncedCode] = useState(code);
+-  const [currentTheme, setCurrentTheme] = useState<'light' | 'dark'>(() => {
+-    return (document.documentElement.getAttribute('data-theme') as 'light' | 'dark') || 'light';
+-  });
+-
+-  // Pan/zoom transform for the rendered diagram (only used when enablePanZoom).
+-  const [transform, setTransform] = useState({ scale: 1, x: 0, y: 0 });
+-  const [isZoomOpen, setIsZoomOpen] = useState(false);
+-  const dragRef = useRef<{
+-    pointerId: number;
+-    startX: number;
+-    startY: number;
+-    originX: number;
+-    originY: number;
+-    moved: boolean;
+-  } | null>(null);
+-  const [isPanning, setIsPanning] = useState(false);
+-
+-  // Reset the view whenever a fresh diagram renders so a re-render never leaves the
+-  // user staring at an off-screen, zoomed-in fragment of the previous diagram.
+-  // A re-render also replaces the overlay content, so close it as well.
+-  useEffect(() => {
+-    setTransform({ scale: 1, x: 0, y: 0 });
+-    setIsZoomOpen(false);
+-  }, [svg]);
+-
+-  const zoomBy = (delta: number) =>
+-    setTransform((prev) => ({
+-      ...prev,
+-      scale: Math.min(MAX_MERMAID_SCALE, Math.max(MIN_MERMAID_SCALE, Math.round((prev.scale + delta) * 100) / 100)),
+-    }));
+-  const resetTransform = () => setTransform({ scale: 1, x: 0, y: 0 });
+-
+-  const handlePanPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+-    if (event.button !== 0) return;
+-    event.preventDefault();
+-    dragRef.current = {
+-      pointerId: event.pointerId,
+-      startX: event.clientX,
+-      startY: event.clientY,
+-      originX: transform.x,
+-      originY: transform.y,
+-      moved: false,
+-    };
+-    event.currentTarget.setPointerCapture(event.pointerId);
+-    setIsPanning(true);
+-  };
+-
+-  const handlePanPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+-    const drag = dragRef.current;
+-    if (!drag || drag.pointerId !== event.pointerId) return;
+-    // Stay in "click" territory until the pointer travels past the threshold so
+-    // a plain click opens the zoom overlay instead of nudging the diagram.
+-    if (
+-      !drag.moved &&
+-      Math.abs(event.clientX - drag.startX) + Math.abs(event.clientY - drag.startY) < PAN_CLICK_THRESHOLD
+-    ) {
+-      return;
+-    }
+-    drag.moved = true;
+-    setTransform((prev) => ({
+-      ...prev,
+-      x: drag.originX + (event.clientX - drag.startX),
+-      y: drag.originY + (event.clientY - drag.startY),
+-    }));
+-  };
+-
+-  const endPan = (event: React.PointerEvent<HTMLDivElement>) => {
+-    const drag = dragRef.current;
+-    if (!drag || drag.pointerId !== event.pointerId) return;
+-    const isClick = !drag.moved && event.type === 'pointerup';
+-    dragRef.current = null;
+-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+-      event.currentTarget.releasePointerCapture(event.pointerId);
+-    }
+-    setIsPanning(false);
+-    if (isClick) setIsZoomOpen(true);
+-  };
+-
+-  useEffect(() => {
+-    const timer = setTimeout(() => setDebouncedCode(code), 300);
+-    return () => clearTimeout(timer);
+-  }, [code]);
+-
+-  useEffect(() => {
+-    const updateTheme = () => {
+-      const theme = (document.documentElement.getAttribute('data-theme') as 'light' | 'dark') || 'light';
+-      setCurrentTheme(theme);
+-    };
+-
+-    const observer = new MutationObserver(updateTheme);
+-    observer.observe(document.documentElement, {
+-      attributes: true,
+-      attributeFilter: ['data-theme'],
+-    });
+-
+-    return () => observer.disconnect();
+-  }, []);
+-
+-  useEffect(() => {
+-    let cancelled = false;
+-    const source = debouncedCode.trim();
+-
+-    if (!source) {
+-      setSvg(null);
+-      setIsRendering(false);
+-      setViewMode('source');
+-      return () => {
+-        cancelled = true;
+-      };
+-    }
+-
+-    setSvg(null);
+-    setIsRendering(true);
+-
+-    const renderDiagram = async () => {
+-      try {
+-        ensureMermaidInitialized(currentTheme);
+-
+-        const { svg: renderedSvg } = await mermaid.render(`${blockIdRef.current}-${Date.now()}`, source);
+-
+-        if (!cancelled) {
+-          setSvg(withResponsiveSvg(renderedSvg));
+-          setIsRendering(false);
+-          setViewMode(preferredViewModeRef.current === 'source' ? 'source' : 'preview');
+-        }
+-      } catch {
+-        if (!cancelled) {
+-          setSvg(null);
+-          setIsRendering(false);
+-          setViewMode('source');
+-        }
+-      }
+-    };
+-
+-    void renderDiagram();
+-
+-    return () => {
+-      cancelled = true;
+-    };
+-  }, [debouncedCode, currentTheme]);
+-
+-  const codeTheme = currentTheme === 'dark' ? vs2015 : vs;
+-  const shouldShowLoading = isRendering && preferredViewModeRef.current !== 'source';
+-  const summary = code
+-    .split(/\r?\n/)
+-    .map((line) => line.trim())
+-    .find(Boolean);
+-  const previewTitle =
+-    summary && summary.length > 0
+-      ? `${t('preview.mermaidTitle')}: ${summary.slice(0, 48)}${summary.length > 48 ? '...' : ''}`
+-      : t('preview.mermaidTitle');
+-
+   return (
+-    <div style={{ width: '100%', minWidth: 0, maxWidth: '100%', ...style }}>
+-      <div
+-        style={{
+-          border: '1px solid var(--bg-3)',
+-          borderRadius: '0.3rem',
+-          overflow: 'hidden',
+-          overflowX: 'auto',
+-        }}
+-      >
+-        <div
+-          style={{
+-            display: 'flex',
+-            justifyContent: 'space-between',
+-            alignItems: 'center',
+-            gap: '8px',
+-            backgroundColor: 'var(--bg-2)',
+-            borderTopLeftRadius: '0.3rem',
+-            borderTopRightRadius: '0.3rem',
+-            padding: '6px 10px',
+-            borderBottom: '1px solid var(--bg-3)',
++    <div style={style} className='w-full min-w-0'>
++      <div className='flex justify-between items-center gap-8px bg-fill-2 p-8px'>
++        <span>
++          {t('preview.mermaidTitle')} · {t('preview.source')}
++        </span>
++        <Button
++          size='small'
++          onClick={() => {
++            void copyText(code).then(
++              () => Message.success(t('common.copySuccess')),
++              () => Message.error(t('common.copyFailed'))
++            );
+           }}
+         >
+-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+-            <span
+-              style={{
+-                textDecoration: 'none',
+-                color: 'var(--text-secondary)',
+-                fontSize: '12px',
+-                lineHeight: '20px',
+-              }}
+-            >
+-              {'<mermaid>'}
+-            </span>
+-            {svg && (
+-              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+-                <div
+-                  style={{
+-                    cursor: 'pointer',
+-                    color: viewMode === 'preview' ? 'var(--text-primary)' : 'var(--text-secondary)',
+-                    fontSize: '12px',
+-                    lineHeight: '20px',
+-                  }}
+-                  onMouseDown={(event: React.MouseEvent) => {
+-                    if (event.button === 0) {
+-                      event.preventDefault();
+-                      preferredViewModeRef.current = 'preview';
+-                      setViewMode('preview');
+-                    }
+-                  }}
+-                >
+-                  {t('preview.preview')}
+-                </div>
+-                <span style={{ color: 'var(--text-secondary)', fontSize: '12px', lineHeight: '20px' }}>/</span>
+-                <div
+-                  style={{
+-                    cursor: 'pointer',
+-                    color: viewMode === 'source' ? 'var(--text-primary)' : 'var(--text-secondary)',
+-                    fontSize: '12px',
+-                    lineHeight: '20px',
+-                  }}
+-                  onMouseDown={(event: React.MouseEvent) => {
+-                    if (event.button === 0) {
+-                      event.preventDefault();
+-                      preferredViewModeRef.current = 'source';
+-                      setViewMode('source');
+-                    }
+-                  }}
+-                >
+-                  {t('preview.source')}
+-                </div>
+-              </div>
+-            )}
+-          </div>
+-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+-            {enablePanZoom && svg && viewMode === 'preview' && (
+-              <>
+-                <ZoomOut
+-                  data-testid='mermaid-zoom-out'
+-                  theme='outline'
+-                  size='16'
+-                  style={{ cursor: 'pointer', flexShrink: 0 }}
+-                  fill='var(--text-secondary)'
+-                  title={t('preview.zoomOut')}
+-                  onClick={() => zoomBy(-MERMAID_ZOOM_STEP)}
+-                />
+-                <ZoomIn
+-                  data-testid='mermaid-zoom-in'
+-                  theme='outline'
+-                  size='16'
+-                  style={{ cursor: 'pointer', flexShrink: 0 }}
+-                  fill='var(--text-secondary)'
+-                  title={t('preview.zoomIn')}
+-                  onClick={() => zoomBy(MERMAID_ZOOM_STEP)}
+-                />
+-                <Refresh
+-                  data-testid='mermaid-zoom-reset'
+-                  theme='outline'
+-                  size='16'
+-                  style={{ cursor: 'pointer', flexShrink: 0 }}
+-                  fill='var(--text-secondary)'
+-                  title={t('preview.zoomReset')}
+-                  onClick={resetTransform}
+-                />
+-              </>
+-            )}
+-            {showOpenInPanelButton && (
+-              <PreviewOpen
+-                data-testid='mermaid-open-in-panel'
+-                theme='outline'
+-                size='18'
+-                style={{ cursor: 'pointer', flexShrink: 0 }}
+-                fill='var(--text-secondary)'
+-                title={t('preview.openInPanelTooltip')}
+-                onClick={() => {
+-                  openPreview(`\`\`\`mermaid\n${code}\n\`\`\``, 'markdown', {
+-                    title: previewTitle,
+-                    editable: false,
+-                  });
+-                }}
+-              />
+-            )}
+-            <Copy
+-              data-testid='mermaid-copy'
+-              theme='outline'
+-              size='18'
+-              style={{ cursor: 'pointer', flexShrink: 0 }}
+-              fill='var(--text-secondary)'
+-              onClick={() => {
+-                void copyText(code)
+-                  .then(() => {
+-                    Message.success(t('common.copySuccess'));
+-                  })
+-                  .catch(() => {
+-                    Message.error(t('common.copyFailed'));
+-                  });
+-              }}
+-            />
+-          </div>
+-        </div>
+-
+-        {svg && viewMode === 'preview' ? (
+-          enablePanZoom ? (
+-            <div
+-              data-testid='mermaid-diagram'
+-              style={{
+-                backgroundColor: 'var(--bg-1)',
+-                padding: '12px',
+-                position: 'relative',
+-                overflow: 'hidden',
+-                cursor: isPanning ? 'grabbing' : 'grab',
+-                touchAction: 'none',
+-              }}
+-              onPointerDown={handlePanPointerDown}
+-              onPointerMove={handlePanPointerMove}
+-              onPointerUp={endPan}
+-              onPointerCancel={endPan}
+-            >
+-              <div
+-                style={{
+-                  display: 'flex',
+-                  justifyContent: 'center',
+-                  transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
+-                  transformOrigin: 'center center',
+-                  transition: isPanning ? 'none' : 'transform 0.1s ease-out',
+-                }}
+-                dangerouslySetInnerHTML={{ __html: svg }}
+-              />
+-            </div>
+-          ) : (
+-            <div
+-              data-testid='mermaid-diagram'
+-              style={{
+-                backgroundColor: 'var(--bg-1)',
+-                padding: '12px',
+-                overflowX: 'auto',
+-                display: 'flex',
+-                justifyContent: 'center',
+-                cursor: 'zoom-in',
+-              }}
+-              onClick={() => setIsZoomOpen(true)}
+-              dangerouslySetInnerHTML={{ __html: svg }}
+-            />
+-          )
+-        ) : shouldShowLoading ? (
+-          <div
+-            data-testid='mermaid-loading'
+-            style={{
+-              backgroundColor: 'var(--bg-1)',
+-              padding: '16px 12px',
+-              display: 'flex',
+-              alignItems: 'center',
+-              justifyContent: 'center',
+-              gap: '8px',
+-              color: 'var(--text-secondary)',
+-              fontSize: '13px',
+-              lineHeight: '20px',
+-            }}
+-          >
+-            <div
+-              aria-hidden='true'
+-              className='loading'
+-              style={{
+-                width: '12px',
+-                height: '12px',
+-                borderRadius: '999px',
+-                border: '2px solid var(--bg-3)',
+-                borderTopColor: 'var(--text-secondary)',
+-                flexShrink: 0,
+-              }}
+-            />
+-            <span>{t('preview.loading')}</span>
+-          </div>
+-        ) : (
+-          <SyntaxHighlighter
+-            children={code}
+-            language='mermaid'
+-            style={codeTheme}
+-            PreTag='div'
+-            customStyle={{
+-              margin: 0,
+-              borderRadius: 0,
+-              border: 'none',
+-              background: 'transparent',
+-              color: 'var(--text-primary)',
+-              overflowX: 'auto',
+-              maxWidth: '100%',
+-            }}
+-            codeTagProps={{ style: { color: 'var(--text-primary)' } }}
+-          />
+-        )}
++          {t('common.copy')}
++        </Button>
+       </div>
+-      {isZoomOpen && svg && (
+-        <DiagramZoomOverlay svg={svg} onClose={() => setIsZoomOpen(false)} ariaLabel={t('preview.mermaidTitle')} />
+-      )}
++      <pre data-testid='mermaid-source' className='overflow-auto whitespace-pre-wrap break-words p-8px'>
++        {code}
++      </pre>
+     </div>
+   );
+ }
+-
+-export default React.memo(MermaidBlock);
+diff --git a/packages/desktop/src/renderer/components/Markdown/index.tsx b/packages/desktop/src/renderer/components/Markdown/index.tsx
+index a839499..f27c099 100644
+--- a/packages/desktop/src/renderer/components/Markdown/index.tsx
++++ b/packages/desktop/src/renderer/components/Markdown/index.tsx
+@@ -2,15 +2,13 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+ 
+-import rehypeKatex from 'rehype-katex';
+ import rehypeRaw from 'rehype-raw';
+-
+-// Import KaTeX CSS to make it available in the document
+-import 'katex/dist/katex.min.css';
++import rehypeSanitize from 'rehype-sanitize';
+ 
+ import { openExternalUrl } from '@/renderer/utils/platform';
+ import { parseHttpUrl } from '@/renderer/utils/url';
+@@ -125,7 +123,7 @@ const MarkdownView: React.FC<MarkdownViewProps> = React.memo(
+       [codeStyle, hiddenCodeCopyButton, handleLinkClick, onLocalFileLink]
+     );
+ 
+-    const rehypePlugins = useMemo(() => (allowHtml ? [rehypeRaw, rehypeKatex] : [rehypeKatex]), [allowHtml]);
++    const rehypePlugins = useMemo(() => (allowHtml ? [rehypeRaw, rehypeSanitize] : []), [allowHtml]);
+ 
+     return (
+       <div className={classNames('relative w-full', className)}>
+diff --git a/packages/desktop/src/renderer/components/Markdown/markdownComponents.tsx b/packages/desktop/src/renderer/components/Markdown/markdownComponents.tsx
+index 3eadd26..55479e8 100644
+--- a/packages/desktop/src/renderer/components/Markdown/markdownComponents.tsx
++++ b/packages/desktop/src/renderer/components/Markdown/markdownComponents.tsx
+@@ -2,39 +2,17 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import React from 'react';
+-import rehypeKatex from 'rehype-katex';
+ import rehypeRaw from 'rehype-raw';
+ import rehypeSanitize from 'rehype-sanitize';
+ import remarkBreaks from 'remark-breaks';
+ import remarkGfm from 'remark-gfm';
+-import remarkMath from 'remark-math';
+ 
+-/**
+- * Shared remark plugin set for every markdown surface: GFM tables/strikethrough,
+- * `$...$` / `$$...$$` math, and hard line breaks. Kept as a single module-level
+- * constant so all renderers stay in sync and React sees a stable reference.
+- */
+-export const MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkMath, remarkBreaks];
+-
+-/**
+- * Rehype pipeline for surfaces that render raw HTML embedded in semi-trusted
+- * document content (the file preview panel reads arbitrary local/agent-authored
+- * markdown). Order is load-bearing:
+- *   1. rehype-raw      — parse embedded HTML strings into real HAST nodes
+- *   2. rehype-sanitize — drop dangerous nodes/attributes (`<script>`, `<iframe>`,
+- *                        `srcdoc`, inline `on*` handlers, `javascript:` URLs)
+- *   3. rehype-katex    — runs AFTER sanitize, so KaTeX's own markup is never
+- *                        stripped. The default sanitize schema already preserves
+- *                        the `language-*` / `math-inline` / `math-display` classes
+- *                        that remark-math emits, so formulas still render.
+- *
+- * Sanitizing before KaTeX (not after) is what lets raw HTML be shown safely while
+- * math keeps working — this is the behaviour that must not regress.
+- */
+-export const SANITIZED_HTML_REHYPE_PLUGINS = [rehypeRaw, rehypeSanitize, rehypeKatex];
++export const MARKDOWN_REMARK_PLUGINS = [remarkGfm, remarkBreaks];
++export const SANITIZED_HTML_REHYPE_PLUGINS = [rehypeRaw, rehypeSanitize];
+ 
+ /** Table override shared by the chat and preview renderers: horizontal scroll + collapsed borders. */
+ export const MarkdownTable = ({ node: _node, ...rest }: Record<string, unknown>) => (
+diff --git a/packages/desktop/src/renderer/components/agent/AcpModelSelector.tsx b/packages/desktop/src/renderer/components/agent/AcpModelSelector.tsx
+index f6907a5..cd51072 100644
+--- a/packages/desktop/src/renderer/components/agent/AcpModelSelector.tsx
++++ b/packages/desktop/src/renderer/components/agent/AcpModelSelector.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { useAcpModelInfo } from '@/renderer/hooks/agent/useAcpModelInfo';
+@@ -10,6 +11,7 @@ import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
+ import { getModelDisplayLabel } from '@/renderer/utils/model/agentLogo';
+ import { iconColors } from '@/renderer/styles/colors';
+ import { Dropdown, Menu, Message, Tooltip } from '@arco-design/web-react';
++import MobileRuntimeConfig from '@/renderer/host/MobileRuntimeConfig';
+ import { Brain, Down } from '@icon-park/react';
+ import React, { useCallback, useEffect, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+@@ -91,6 +93,7 @@ const AcpModelSelector: React.FC<{
+     selectModel,
+     thoughtLevel,
+     setStatus,
++    pendingValues = {},
+     setConfigOption,
+     isConfigOptionBlocked = () => false,
+   } = useAcpModelInfo({
+@@ -137,8 +140,9 @@ const AcpModelSelector: React.FC<{
+       )
+         return;
+       try {
+-        await setConfigOption(thoughtLevel.id, value);
+-        Message.success(t('agent.thoughtLevel.switchSuccess'));
++        const next = await setConfigOption(thoughtLevel.id, value);
++        if (next?.find((option) => option.id === thoughtLevel.id)?.current_value === value)
++          Message.success(t('agent.thoughtLevel.switchSuccess'));
+       } catch (error) {
+         Message.error(t(configErrorMessageKey(error)));
+       }
+@@ -150,6 +154,7 @@ const AcpModelSelector: React.FC<{
+   const renderLogo = () => <Brain theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />;
+ 
+   const [triggering, setTriggering] = useState(false);
++  const [mobileConfigOpen, setMobileConfigOpen] = useState(false);
+ 
+   // Optimistic spinner clears as soon as warmup leaves 'dormant' (a Pending/
+   // Ready/Failed event took over the visual), handing back to event-driven state.
+@@ -217,6 +222,32 @@ const AcpModelSelector: React.FC<{
+     return renderReadonlyPill(combinedLabel, tooltipContent);
+   }
+ 
++  if (isMobileHeaderCompact) {
++    return (
++      <>
++        <RuntimeSelectorPill
++          testId='acp-model-selector'
++          className='header-model-btn agent-mode-compact-pill'
++          label={combinedLabel}
++          leading={renderLogo()}
++          trailing={<Down size={12} />}
++          loading={isRuntimeSetting}
++          onClick={() => setMobileConfigOpen(true)}
++        />
++        <MobileRuntimeConfig
++          visible={mobileConfigOpen}
++          onClose={() => setMobileConfigOpen(false)}
++          models={model_info}
++          thoughtLevel={thoughtLevel}
++          pendingValues={pendingValues}
++          busy={isRuntimeSetting}
++          selectModel={selectModel}
++          selectThought={handleThoughtLevelSelect}
++        />
++      </>
++    );
++  }
++
+   return (
+     <Dropdown
+       trigger='click'
+diff --git a/packages/desktop/src/renderer/components/chat/SendBox/index.tsx b/packages/desktop/src/renderer/components/chat/SendBox/index.tsx
+index 526f5de..85a3314 100644
+--- a/packages/desktop/src/renderer/components/chat/SendBox/index.tsx
++++ b/packages/desktop/src/renderer/components/chat/SendBox/index.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { ipcBridge } from '@/common';
+@@ -1613,16 +1614,13 @@ const SendBox: React.FC<{
+       finalMessage = input + snippetsHtml;
+     }
+ 
+-    // 立即清空输入框，避免异步 onSend 完成后覆盖用户新输入
+-    // Clear input immediately to prevent async onSend completion from overwriting new user input
+-    setInput('');
+-    clearDomSnippets();
+-    setReplyQuote(null);
+-
++    const submittedInput = input;
+     onSend(finalMessage)
+       .then((result) => {
+-        if (result === false) {
+-          setInput(finalMessage);
++        if (result !== false && latestInputRef.current === submittedInput) {
++          setInput('');
++          clearDomSnippets();
++          setReplyQuote(null);
+         }
+       })
+       .catch(() => {})
+diff --git a/packages/desktop/src/renderer/components/chat/SpeechInputButton.tsx b/packages/desktop/src/renderer/components/chat/SpeechInputButton.tsx
+index 30c4b9a..ac44ee8 100644
+--- a/packages/desktop/src/renderer/components/chat/SpeechInputButton.tsx
++++ b/packages/desktop/src/renderer/components/chat/SpeechInputButton.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { Message, Button, Tooltip } from '@arco-design/web-react';
+@@ -301,4 +302,5 @@ const SpeechInputButton: React.FC<SpeechInputButtonProps> = ({ onLiveTranscript,
+   );
+ };
+ 
+-export default SpeechInputButton;
++const DisabledSpeechInputButton: React.FC<SpeechInputButtonProps> = () => null;
++export default DisabledSpeechInputButton;
+diff --git a/packages/desktop/src/renderer/components/layout/Layout.tsx b/packages/desktop/src/renderer/components/layout/Layout.tsx
+index a9d054b..9a1c85b 100644
+--- a/packages/desktop/src/renderer/components/layout/Layout.tsx
++++ b/packages/desktop/src/renderer/components/layout/Layout.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { ipcBridge } from '@/common';
+@@ -144,7 +145,7 @@ const Layout: React.FC<{
+     return () => setGlobalNavigate(null);
+   }, [navigate]);
+   const { t } = useTranslation();
+-  // The "AionUi" wordmark acts as Home / Back-to-Chat, but only from settings routes.
++  // The "RmAgentMa" wordmark acts as Home / Back-to-Chat, but only from settings routes.
+   // In non-settings routes the user is already "home", so it is a no-op (and not actionable).
+   const isSettingsRoute = location.pathname.startsWith('/settings');
+   // Only wired to the wordmark in the isSettingsRoute branch below, so the
+@@ -399,33 +400,12 @@ const Layout: React.FC<{
+                 )}
+               >
+                 <div
+-                  className={classNames('bg-black shrink-0 size-32px relative rd-0.5rem', {
++                  className={classNames('bg-fill-2 shrink-0 size-32px relative rd-0.5rem', {
+                     '!size-24px': collapsed,
+                   })}
+                   onClick={onClick}
+                 >
+-                  <svg
+-                    className={classNames('w-5.5 h-5.5 absolute inset-0 m-auto', {
+-                      'scale-140': !collapsed,
+-                    })}
+-                    viewBox='0 0 80 80'
+-                    fill='none'
+-                  >
+-                    <path
+-                      key='logo-path-1'
+-                      d='M40 20 Q38 22 25 40 Q23 42 26 42 L30 42 Q32 40 40 30 Q48 40 50 42 L54 42 Q57 42 55 40 Q42 22 40 20'
+-                      fill='white'
+-                    ></path>
+-                    <circle key='logo-circle' cx='40' cy='46' r='3' fill='white'></circle>
+-                    <path
+-                      key='logo-path-2'
+-                      d='M18 50 Q40 70 62 50'
+-                      stroke='white'
+-                      strokeWidth='3.5'
+-                      fill='none'
+-                      strokeLinecap='round'
+-                    ></path>
+-                  </svg>
++                  <span className='absolute inset-0 flex items-center justify-center text-t-primary'>R</span>
+                 </div>
+                 {isSettingsRoute ? (
+                   <Tooltip content={t('common.back', { defaultValue: 'Back to Chat' })} position='bottom'>
+@@ -442,11 +422,11 @@ const Layout: React.FC<{
+                         }
+                       }}
+                     >
+-                      AionUi
++                      RmAgentMa
+                     </div>
+                   </Tooltip>
+                 ) : (
+-                  <div className='text-16px text-t-primary collapsed-hidden font-semibold'>AionUi</div>
++                  <div className='text-16px text-t-primary collapsed-hidden font-semibold'>RmAgentMa</div>
+                 )}
+                 {isMobile && !collapsed && (
+                   <button
+diff --git a/packages/desktop/src/renderer/components/settings/SettingsModal/contents/SystemModalContent/VoiceInputSection/SpeechTestPanel.tsx b/packages/desktop/src/renderer/components/settings/SettingsModal/contents/SystemModalContent/VoiceInputSection/SpeechTestPanel.tsx
+index 8f9dd52..ca8241a 100644
+--- a/packages/desktop/src/renderer/components/settings/SettingsModal/contents/SystemModalContent/VoiceInputSection/SpeechTestPanel.tsx
++++ b/packages/desktop/src/renderer/components/settings/SettingsModal/contents/SystemModalContent/VoiceInputSection/SpeechTestPanel.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import type { SpeechToTextConfig } from '@/common/types/provider/speech';
+@@ -157,4 +158,5 @@ const SpeechTestPanel: React.FC<SpeechTestPanelProps> = ({ config, source }) =>
+   );
+ };
+ 
+-export default SpeechTestPanel;
++const DisabledSpeechTestPanel: React.FC<SpeechTestPanelProps> = () => null;
++export default DisabledSpeechTestPanel;
+diff --git a/packages/desktop/src/renderer/components/settings/SettingsModal/contents/WebuiModalContent.tsx b/packages/desktop/src/renderer/components/settings/SettingsModal/contents/WebuiModalContent.tsx
+index be7dc2c..cf6cc8b 100644
+--- a/packages/desktop/src/renderer/components/settings/SettingsModal/contents/WebuiModalContent.tsx
++++ b/packages/desktop/src/renderer/components/settings/SettingsModal/contents/WebuiModalContent.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { WEBUI_DEFAULT_PORT } from '@/common/config/constants';
+@@ -11,13 +12,13 @@ import { configService } from '@/common/config/configService';
+ import AionModal from '@/renderer/components/base/AionModal';
+ import AionScrollArea from '@/renderer/components/base/AionScrollArea';
+ import { useTalkToButler } from '@/renderer/hooks/assistant/useTalkToButler';
+-import ChannelDingTalkLogo from '@/renderer/assets/channel-logos/dingtalk.svg';
+-import ChannelDiscordLogo from '@/renderer/assets/channel-logos/discord.svg';
+-import ChannelLarkLogo from '@/renderer/assets/channel-logos/lark.svg';
+-import ChannelSlackLogo from '@/renderer/assets/channel-logos/slack.svg';
+-import ChannelTelegramLogo from '@/renderer/assets/channel-logos/telegram.svg';
+-import ChannelWecomLogo from '@/renderer/assets/channel-logos/wecom.svg';
+-import ChannelWeixinLogo from '@/renderer/assets/channel-logos/weixin.svg';
++import ChannelDingTalkLogo from '@/renderer/assets/icons/file-icon.svg';
++import ChannelDiscordLogo from '@/renderer/assets/icons/file-icon.svg';
++import ChannelLarkLogo from '@/renderer/assets/icons/file-icon.svg';
++import ChannelSlackLogo from '@/renderer/assets/icons/file-icon.svg';
++import ChannelTelegramLogo from '@/renderer/assets/icons/file-icon.svg';
++import ChannelWecomLogo from '@/renderer/assets/icons/file-icon.svg';
++import ChannelWeixinLogo from '@/renderer/assets/icons/file-icon.svg';
+ import { isElectronDesktop } from '@/renderer/utils/platform';
+ import { Button, Form, Input, Message, Switch, Tabs, Tooltip } from '@arco-design/web-react';
+ import { CheckOne, Communication, Copy, Earth, EditTwo, Refresh } from '@icon-park/react';
+diff --git a/packages/desktop/src/renderer/components/settings/SettingsModal/contents/channels/ChannelHeader.tsx b/packages/desktop/src/renderer/components/settings/SettingsModal/contents/channels/ChannelHeader.tsx
+index 57a8b31..ed9f38a 100644
+--- a/packages/desktop/src/renderer/components/settings/SettingsModal/contents/channels/ChannelHeader.tsx
++++ b/packages/desktop/src/renderer/components/settings/SettingsModal/contents/channels/ChannelHeader.tsx
+@@ -2,15 +2,16 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+-import ChannelDingTalkLogo from '@/renderer/assets/channel-logos/dingtalk.svg';
+-import ChannelDiscordLogo from '@/renderer/assets/channel-logos/discord.svg';
+-import ChannelLarkLogo from '@/renderer/assets/channel-logos/lark.svg';
+-import ChannelSlackLogo from '@/renderer/assets/channel-logos/slack.svg';
+-import ChannelTelegramLogo from '@/renderer/assets/channel-logos/telegram.svg';
+-import ChannelWecomLogo from '@/renderer/assets/channel-logos/wecom.svg';
+-import ChannelWeixinLogo from '@/renderer/assets/channel-logos/weixin.svg';
++import ChannelDingTalkLogo from '@/renderer/assets/icons/file-icon.svg';
++import ChannelDiscordLogo from '@/renderer/assets/icons/file-icon.svg';
++import ChannelLarkLogo from '@/renderer/assets/icons/file-icon.svg';
++import ChannelSlackLogo from '@/renderer/assets/icons/file-icon.svg';
++import ChannelTelegramLogo from '@/renderer/assets/icons/file-icon.svg';
++import ChannelWecomLogo from '@/renderer/assets/icons/file-icon.svg';
++import ChannelWeixinLogo from '@/renderer/assets/icons/file-icon.svg';
+ import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
+ import { Switch, Tag } from '@arco-design/web-react';
+ import React from 'react';
+diff --git a/packages/desktop/src/renderer/hooks/agent/useAcpModelInfo.ts b/packages/desktop/src/renderer/hooks/agent/useAcpModelInfo.ts
+index 3fcccd6..603cd73 100644
+--- a/packages/desktop/src/renderer/hooks/agent/useAcpModelInfo.ts
++++ b/packages/desktop/src/renderer/hooks/agent/useAcpModelInfo.ts
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { ipcBridge } from '@/common';
+@@ -36,6 +37,7 @@ export type UseAcpModelInfoResult = {
+   selectModel: (model_id: string) => void;
+   thoughtLevel: AcpDerivedOption | null;
+   setStatus: AcpConfigSetStatus;
++  pendingValues?: Record<string, string>;
+   setConfigOption: (optionId: string, value: string) => Promise<AcpConfigOptionDto[]>;
+   isConfigOptionBlocked: (optionId: string) => boolean;
+ };
+@@ -148,7 +150,10 @@ export const useAcpModelInfo = ({
+       // the opposite of what happened.
+       void setConfigOption(model.id, model_id)
+         .then(
+-          () => onSelectModelSuccess?.(model_id),
++          (next) => {
++            if (next?.find((option) => option.id === model.id)?.current_value === model_id)
++              onSelectModelSuccess?.(model_id);
++          },
+           (error) => onSelectModelFailed?.(model_id, error)
+         )
+         // Best-effort: swallow anything the callbacks themselves throw. It cannot
+@@ -170,6 +175,7 @@ export const useAcpModelInfo = ({
+     selectModel,
+     thoughtLevel,
+     setStatus,
++    pendingValues: runtimeConfig.pendingValues,
+     setConfigOption,
+     isConfigOptionBlocked,
+   };
+diff --git a/packages/desktop/src/renderer/hooks/chat/useCompositionInput.ts b/packages/desktop/src/renderer/hooks/chat/useCompositionInput.ts
+index 91fdf63..5ddd800 100644
+--- a/packages/desktop/src/renderer/hooks/chat/useCompositionInput.ts
++++ b/packages/desktop/src/renderer/hooks/chat/useCompositionInput.ts
+@@ -1,3 +1,4 @@
++/** Modified by rmAgentMa contributors for the renderer probe. */
+ import { useRef, useState } from 'react';
+ 
+ /**
+@@ -21,7 +22,8 @@ export const useCompositionInput = () => {
+ 
+   const createKeyDownHandler = (onEnterPress: () => void, onKeyDownIntercept?: (e: React.KeyboardEvent) => boolean) => {
+     return (e: React.KeyboardEvent) => {
+-      if (isComposing.current) return;
++      if (isComposing.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
++      if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && window.matchMedia?.('(pointer: coarse)').matches) return;
+       if (onKeyDownIntercept?.(e)) return;
+       if (e.key === 'Enter' && !e.shiftKey) {
+         e.preventDefault();
+diff --git a/packages/desktop/src/renderer/hooks/chat/useSendBoxDraft.ts b/packages/desktop/src/renderer/hooks/chat/useSendBoxDraft.ts
+index a7a77b1..85a2f18 100644
+--- a/packages/desktop/src/renderer/hooks/chat/useSendBoxDraft.ts
++++ b/packages/desktop/src/renderer/hooks/chat/useSendBoxDraft.ts
+@@ -1,5 +1,13 @@
+-import { useCallback, useEffect, useRef } from 'react';
++/** Modified by rmAgentMa contributors for the renderer probe. */
++import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
+ import useSWR from 'swr';
++import { isNativeHost } from '@/common/host/hostTransport';
++import {
++  getDraftSaveStatus,
++  subscribeDraftSaveStatus,
++  loadNativeDraft,
++  saveNativeDraft,
++} from '@/renderer/host/nativeDrafts';
+ import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
+ export type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
+ 
+@@ -173,24 +181,42 @@ export const getSendBoxDraftHook = <K extends DraftConversationType>(
+   initialValue: Extract<Draft, { _type: K }>
+ ) => {
+   function useDraft(conversation_id: string) {
+-    const swrRet = useSWR([`/send-box/${type}/draft/${conversation_id}`, conversation_id], ([_, id]) => {
+-      return getDraft(type, id);
++    const saveStatus = useSyncExternalStore(
++      useCallback((listener) => subscribeDraftSaveStatus(conversation_id, listener), [conversation_id]),
++      useCallback(() => getDraftSaveStatus(conversation_id), [conversation_id])
++    );
++    const swrRet = useSWR([`/send-box/${type}/draft/${conversation_id}`, conversation_id], async ([_, id]) => {
++      const cached = getDraft(type, id);
++      if (!isNativeHost()) return cached;
++      const saved = await loadNativeDraft(id);
++      const latest = getDraft(type, id);
++      const restored =
++        latest && latest !== cached
++          ? latest
++          : ({
++              ...(cached ?? initialValue),
++              content: saved.text,
++              uploadFile: saved.files.map((ref) => ref.path),
++              atPath: [],
++            } as Extract<Draft, { _type: K }>);
++      setDraft(type, id, restored);
++      return restored;
+     });
+ 
+     const mutateDraft = useCallback(
+       (draft: (k: Extract<Draft, { _type: K }>) => typeof k | undefined): void => {
+-        swrRet
+-          .mutate(
+-            (prev) => {
+-              const newDraft = draft(prev ?? initialValue);
+-              setDraft(type, conversation_id, newDraft);
+-              return newDraft;
+-            },
+-            { revalidate: false }
+-          )
+-          .catch((error) => {
+-            console.error('Failed to mutate draft:', error);
++        const newDraft = draft(getDraft(type, conversation_id) ?? initialValue);
++        setDraft(type, conversation_id, newDraft);
++        if (isNativeHost())
++          void saveNativeDraft(conversation_id, {
++            text: newDraft?.content ?? '',
++            files: (newDraft?.uploadFile ?? []).map((path) => ({ kind: 'upload' as const, path })),
++          }).catch((error: unknown) => {
++            console.error('[host] draft persistence failed; local draft retained', error);
+           });
++        swrRet.mutate(newDraft, { revalidate: false }).catch((error) => {
++          console.error('Failed to mutate draft:', error);
++        });
+       },
+       [conversation_id]
+     );
+@@ -200,6 +226,7 @@ export const getSendBoxDraftHook = <K extends DraftConversationType>(
+         return swrRet.data;
+       },
+       mutate: mutateDraft,
++      saveStatus: isNativeHost() ? saveStatus : 'saved',
+     };
+   }
+ 
+diff --git a/packages/desktop/src/renderer/hooks/context/AuthContext.tsx b/packages/desktop/src/renderer/hooks/context/AuthContext.tsx
+index 6e56c94..be9c655 100644
+--- a/packages/desktop/src/renderer/hooks/context/AuthContext.tsx
++++ b/packages/desktop/src/renderer/hooks/context/AuthContext.tsx
+@@ -1,6 +1,8 @@
++/** Modified by rmAgentMa contributors for the renderer probe. */
+ import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+ import { PREVIEW_SCOPE_KEY_PREFIX } from '@/renderer/pages/conversation/Preview/context/previewScope';
+ import { refreshSession } from '@/common/adapter/sessionRefresh';
++import { hostFetch, isNativeHost } from '@/common/host/hostTransport';
+ // M6: CSRF removed with legacy webserver — stub functions for compatibility, re-implement in M7
+ const withCsrfToken = <T extends Record<string, unknown>>(data: T): T => data;
+ const hasValidCsrfToken = (): boolean => true;
+@@ -86,7 +88,7 @@ function clearAuthCache(): void {
+ 
+ async function fetchCurrentUser(signal?: AbortSignal): Promise<AuthUser | null> {
+   try {
+-    let response = await fetch(AUTH_USER_ENDPOINT, {
++    let response = await hostFetch(AUTH_USER_ENDPOINT, {
+       method: 'GET',
+       credentials: 'include',
+       signal,
+@@ -96,10 +98,10 @@ async function fetchCurrentUser(signal?: AbortSignal): Promise<AuthUser | null>
+     // and re-check before concluding the user is unauthenticated. Without this
+     // the status poll would kick a refreshable session to /login (#4124).
+     // refreshSession() single-flights with the httpBridge refresh path.
+-    if (response.status === 401) {
++    if (response.status === 401 && !isNativeHost()) {
+       const refreshed = await refreshSession();
+       if (refreshed) {
+-        response = await fetch(AUTH_USER_ENDPOINT, {
++        response = await hostFetch(AUTH_USER_ENDPOINT, {
+           method: 'GET',
+           credentials: 'include',
+           signal,
+@@ -183,7 +185,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
+ 
+       // P1 安全修复：登录请求需要 CSRF Token / P1 Security fix: Login needs CSRF token
+       // Backend route is /login; web-host's static-server explicitly proxies it.
+-      const response = await fetch('/login', {
++      const response = await hostFetch('/login', {
+         method: 'POST',
+         headers: {
+           'Content-Type': 'application/json',
+@@ -203,7 +205,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
+         let message = data?.message ?? 'Login failed';
+         let shouldClearCache = false;
+ 
+-        if (response.status === 401) {
++        if (response.status === 401 && !isNativeHost()) {
+           code = 'invalidCredentials';
+         } else if (response.status === 403) {
+           // CSRF validation failed - clear cache
+@@ -277,7 +279,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
+     }
+ 
+     try {
+-      await fetch('/logout', {
++      await hostFetch('/logout', {
+         method: 'POST',
+         // Logout also needs CSRF token / 登出同样需要 CSRF Token
+         headers: {
+diff --git a/packages/desktop/src/renderer/index.html b/packages/desktop/src/renderer/index.html
+index 71afabd..db22ead 100644
+--- a/packages/desktop/src/renderer/index.html
++++ b/packages/desktop/src/renderer/index.html
+@@ -1,18 +1,20 @@
+ <!doctype html>
++<!-- Modified by rmAgentMa contributors for the renderer probe. -->
+ <html data-theme="light" data-color-scheme="default">
+   <head>
+     <meta charset="UTF-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+-    <meta name="application-name" content="AionUi" />
++    <meta name="application-name" content="RmAgentMa" />
+     <meta name="apple-mobile-web-app-capable" content="yes" />
+     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+-    <meta name="apple-mobile-web-app-title" content="AionUi" />
++    <meta name="apple-mobile-web-app-title" content="RmAgentMa" />
+     <meta name="mobile-web-app-capable" content="yes" />
+     <meta name="theme-color" content="#4E5969" />
+-    <link rel="icon" type="image/png" href="./pwa/icon-192.png" />
+-    <link rel="manifest" href="./manifest.webmanifest" />
+-    <link rel="apple-touch-icon" href="./pwa/icon-180.png" />
+-    <title>AionUi</title>
++    <meta
++      http-equiv="Content-Security-Policy"
++      content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws://127.0.0.1:* ws://localhost:*; worker-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'"
++    />
++    <title>RmAgentMa</title>
+     <script>
+       // Synchronously restore theme appearance from localStorage to prevent theme flash
+       (function () {
+@@ -43,6 +45,6 @@
+       } catch (e) {}
+     </script>
+     <div id="root"></div>
+-    <script type="module" src="./main.tsx"></script>
++    <script type="module" src="./hostBootstrap.ts"></script>
+   </body>
+ </html>
+diff --git a/packages/desktop/src/renderer/main.tsx b/packages/desktop/src/renderer/main.tsx
+index ab784ba..9c6f90a 100644
+--- a/packages/desktop/src/renderer/main.tsx
++++ b/packages/desktop/src/renderer/main.tsx
+@@ -2,36 +2,9 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+-// Sentry must be initialized first
+-// Use electron-specific renderer package only inside Electron; fall back to the
+-// browser SDK when running as a web server (no window.electronAPI).
+-if ((window as { electronAPI?: unknown }).electronAPI) {
+-  // Dynamic import avoids bundling sentry-ipc:// protocol code into the web build
+-  import('@sentry/electron/renderer')
+-    .then((Sentry) =>
+-      Sentry.init({
+-        beforeSend(event) {
+-          if (!(window as { __backendStartupFailed?: boolean }).__backendStartupFailed) {
+-            return event;
+-          }
+-          const haystacks: string[] = [];
+-          if (event.message) haystacks.push(event.message);
+-          const exceptions = event.exception?.values ?? [];
+-          for (const ex of exceptions) {
+-            if (ex.value) haystacks.push(ex.value);
+-          }
+-          if (haystacks.some((h) => /Failed to fetch|window\.__backendPort|__backendPort unset/.test(h))) {
+-            return null;
+-          }
+-          return event;
+-        },
+-      })
+-    )
+-    .catch(() => {});
+-}
+-
+ // Runtime patches must be imported early
+ import './utils/ui/runtimePatches';
+ 
+@@ -184,17 +157,7 @@ function captureRuntimeInstallationIntegrityFailure(event: IRuntimeStatusEvent):
+     return;
+   }
+ 
+-  void import('@sentry/electron/renderer')
+-    .then((Sentry) => {
+-      Sentry.withScope((scope) => {
+-        scope.setTag('aionui.installation_integrity', event.failure_kind ?? 'unknown');
+-        scope.setTag('aionui.runtime_resource', event.resource);
+-        scope.setTag('aionui.runtime_resource_id', event.resource_id ?? '');
+-        scope.setTag('aionui.runtime_scope', event.scope.kind);
+-        Sentry.captureMessage('runtime-installation-integrity-failure', 'error');
+-      });
+-    })
+-    .catch(() => {});
++  console.error('[host] runtime installation integrity failure', event.failure_kind);
+ }
+ 
+ function buildRuntimeInstallationDiagnostics(
+@@ -477,7 +440,9 @@ const BackendStartupFailureDialog: React.FC<{ failure: BackendStartupFailureInfo
+           <Typography.Paragraph className='mb-0 text-t-secondary'>{description}</Typography.Paragraph>
+           {requiredVersions ? (
+             <Typography.Paragraph className='mt-12px mb-0 text-12px text-t-tertiary'>
+-              {t('common.backendStartup.incompatibleRuntime.requiredVersions', { versions: requiredVersions })}
++              {t('common.backendStartup.incompatibleRuntime.requiredVersions', {
++                versions: requiredVersions,
++              })}
+             </Typography.Paragraph>
+           ) : null}
+         </div>
+diff --git a/packages/desktop/src/renderer/pages/conversation/Messages/acp/MessageAcpPermission.tsx b/packages/desktop/src/renderer/pages/conversation/Messages/acp/MessageAcpPermission.tsx
+index c3e0513..4ef4c26 100644
+--- a/packages/desktop/src/renderer/pages/conversation/Messages/acp/MessageAcpPermission.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/Messages/acp/MessageAcpPermission.tsx
+@@ -2,10 +2,11 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import type { IMessageAcpPermission } from '@/common/chat/chatLib';
+-import { conversation } from '@/common/adapter/ipcBridge';
++import { submitPendingApproval, usePendingApproval } from '@/renderer/host/usePendingApproval';
+ import {
+   classifyAcpPermission,
+   normalizePermissionOperationKind,
+@@ -23,34 +24,33 @@ const MessageAcpPermission: React.FC<MessageAcpPermissionProps> = React.memo(({
+   const { tool_call } = content;
+   const options = Array.isArray(content.options) ? content.options : [];
+   const { t } = useTranslation();
+-  const toolCallId = tool_call?.tool_call_id;
++  const requestId = content.readonly ? undefined : content.request_id;
++  const pending = usePendingApproval(message.conversation_id, requestId, content.epoch);
+ 
+   const panelOptions = useMemo(
+     () =>
+-      options.map((option, index) => {
+-        const fallbackId = `option_${index}`;
+-        const value = option?.option_id || fallbackId;
+-        return {
+-          id: `${value}:${index}`,
+-          value,
+-          label: option?.name || `${t('messages.option')} ${index + 1}`,
+-          intent: classifyAcpPermission(option?.kind || ''),
+-          testId: `message-acp-permission-option-${value}`,
+-        };
+-      }),
+-    [options, t]
++      options
++        .filter((option) => Boolean(option?.option_id))
++        .map((option, index) => {
++          const value = option.option_id;
++          return {
++            id: `${value}:${index}`,
++            value,
++            label: option.name || `${t('messages.option')} ${index + 1}`,
++            intent: classifyAcpPermission(option.kind || ''),
++            testId: `message-acp-permission-option-${value}`,
++            disabled: !pending?.options.some((item) => item.option_id === value),
++          };
++        }),
++    [options, pending, t]
+   );
+ 
+   const handleConfirm = useCallback(
+     async (selectedValue: string) => {
+-      await conversation.confirmMessage.invoke({
+-        confirm_key: selectedValue,
+-        msg_id: message.id,
+-        conversation_id: message.conversation_id,
+-        call_id: toolCallId || message.id,
+-      });
++      if (!requestId || content.epoch === undefined) throw new Error('APPROVAL_NOT_PENDING');
++      await submitPendingApproval(message.conversation_id, requestId, content.epoch, message.id, selectedValue);
+     },
+-    [message.conversation_id, message.id, toolCallId]
++    [message.conversation_id, message.id, requestId, content.epoch]
+   );
+ 
+   if (!tool_call) {
+@@ -86,7 +86,9 @@ const MessageAcpPermission: React.FC<MessageAcpPermissionProps> = React.memo(({
+       requestKey={`${message.id}:${tool_call.tool_call_id}`}
+       testIdPrefix='message-acp-permission'
+       title={title}
+-      description={description && description !== title ? description : undefined}
++      description={
++        !pending ? t('messages.approvalReadOnly') : description && description !== title ? description : undefined
++      }
+       operationKind={normalizePermissionOperationKind(tool_call.kind)}
+       detail={detail}
+       detailLabelKey={command ? undefined : 'messages.requestDetails'}
+diff --git a/packages/desktop/src/renderer/pages/conversation/Messages/hooks.ts b/packages/desktop/src/renderer/pages/conversation/Messages/hooks.ts
+index 80a5ab7..68257fa 100644
+--- a/packages/desktop/src/renderer/pages/conversation/Messages/hooks.ts
++++ b/packages/desktop/src/renderer/pages/conversation/Messages/hooks.ts
+@@ -2,9 +2,11 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { ipcBridge } from '@/common';
++import { wsEmitter } from '@/common/adapter/httpBridge';
+ import type { AgentStreamErrorInfo, IMessageText, IMessageTips, TMessage } from '@/common/chat/chatLib';
+ import {
+   composeMessage,
+@@ -773,6 +775,7 @@ export function foldSupersededTips(messages: TMessage[]): TMessage[] {
+  * Normalize a message loaded from backend DB into renderer runtime shape.
+  */
+ export function normalizeDbMessage(msg: TMessage): TMessage {
++  if (msg.type === 'acp_permission') return { ...msg, content: { ...msg.content, readonly: true } };
+   if (msg.type === 'tips') return normalizeDbTipsMessage(msg);
+   if (msg.type !== 'text') return msg;
+ 
+@@ -964,6 +967,25 @@ export const useMessageLstCache = (key: string) => {
+     return [];
+   }, [key, setPagination, update]);
+ 
++  useEffect(() => {
++    if (!key) return;
++    const reload = () => {
++      void loadMessages()
++        .then(() => {
++          window.dispatchEvent(new CustomEvent('rmagent-history-reconciled', { detail: { conversation_id: key } }));
++        })
++        .catch((error: unknown) => console.error('[host] history reconciliation failed', error));
++    };
++    const offReconnect = wsEmitter('realtime.reconnected').on(reload);
++    const offSnapshot = wsEmitter<{ conversation_id: string }>('runtime.snapshot').on((event) => {
++      if (event.conversation_id === key) reload();
++    });
++    return () => {
++      offReconnect();
++      offSnapshot();
++    };
++  }, [key, loadMessages]);
++
+   useEffect(() => {
+     if (!key) return;
+     let cancelled = false;
+diff --git a/packages/desktop/src/renderer/pages/conversation/Messages/usePendingConfirmationsRecovery.ts b/packages/desktop/src/renderer/pages/conversation/Messages/usePendingConfirmationsRecovery.ts
+index 1b61d32..ebc43e8 100644
+--- a/packages/desktop/src/renderer/pages/conversation/Messages/usePendingConfirmationsRecovery.ts
++++ b/packages/desktop/src/renderer/pages/conversation/Messages/usePendingConfirmationsRecovery.ts
+@@ -2,10 +2,19 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { ipcBridge } from '@/common';
+-import type { IConfirmation, IMessageAsk, IMessagePermission, TMessage } from '@/common/chat/chatLib';
++import { wsEmitter } from '@/common/adapter/httpBridge';
++import type {
++  IConfirmation,
++  IMessageAcpPermission,
++  IMessageAsk,
++  IMessagePermission,
++  TMessage,
++} from '@/common/chat/chatLib';
++import type { AcpPermissionRequest } from '@/common/types/platform/acpTypes';
+ import { useEffect } from 'react';
+ import { useUpdateMessageList } from './hooks';
+ 
+@@ -14,7 +23,24 @@ export const pendingConfirmationMsgId = (confirmationId: string) => `confirmatio
+ export function buildPendingConfirmationMessage(
+   conversation_id: string,
+   confirmation: IConfirmation<unknown>
+-): IMessagePermission | IMessageAsk {
++): IMessagePermission | IMessageAsk | IMessageAcpPermission {
++  const pending = confirmation as unknown as AcpPermissionRequest & { conversation_id?: string };
++  if (
++    pending.request_id &&
++    pending.tool_call &&
++    pending.conversation_id === conversation_id &&
++    (Number.isSafeInteger(pending.epoch) || typeof pending.epoch === 'string')
++  ) {
++    return {
++      id: pendingConfirmationMsgId(pending.request_id),
++      msg_id: pendingConfirmationMsgId(pending.request_id),
++      type: 'acp_permission',
++      position: 'left',
++      conversation_id,
++      created_at: Date.now(),
++      content: { ...pending, readonly: false, session_id: conversation_id },
++    };
++  }
+   // A pending AskUserQuestion carries its questions[] payload — rebuild the
+   // REAL question card (title/multi-question/multiSelect/Other), answered via
+   // the ask confirm contract keyed on call_id = request_id. Without this the
+@@ -49,6 +75,7 @@ export function buildPendingConfirmationMessage(
+ export function hasPermissionMessageForCallId(list: TMessage[], callId: string): boolean {
+   return list.some(
+     (message) =>
++      (message.type === 'acp_permission' && !message.content?.readonly && message.content?.request_id === callId) ||
+       (message.type === 'permission' && message.content?.call_id === callId) ||
+       (message.type === 'ask' && message.content?.request_id === callId)
+   );
+@@ -80,34 +107,51 @@ export function usePendingConfirmationsRecovery(conversation_id: string) {
+     if (!conversation_id) return;
+     let cancelled = false;
+ 
+-    void ipcBridge.conversation.confirmation.list
+-      .invoke({ conversation_id })
+-      .then((confirmations) => {
+-        if (cancelled) return;
+-        updateMessageList((list) => {
+-          let next = list;
+-          for (const confirmation of confirmations ?? []) {
+-            if (hasPermissionMessageForCallId(next, confirmation.call_id)) continue;
+-            next = next.concat(buildPendingConfirmationMessage(conversation_id, confirmation));
+-          }
+-          return next;
+-        });
+-      })
+-      .catch((error) => {
+-        console.warn('[pending-confirmations] failed to recover pending confirmations', {
+-          conversation_id,
+-          error: errorMessage(error),
++    let revision = 0;
++    const refresh = () => {
++      const current = ++revision;
++      void ipcBridge.conversation.confirmation.list
++        .invoke({ conversation_id })
++        .then((confirmations) => {
++          if (cancelled || current !== revision) return;
++          updateMessageList((list) => {
++            const next = list.filter(
++              (message) => !(message.conversation_id === conversation_id && message.id.startsWith('confirmation:'))
++            );
++            for (const confirmation of confirmations ?? []) {
++              const recovered = buildPendingConfirmationMessage(conversation_id, confirmation);
++              if (recovered.type === 'acp_permission' || !hasPermissionMessageForCallId(next, confirmation.call_id))
++                next.push(recovered);
++            }
++            return next;
++          });
++        })
++        .catch((error: unknown) => {
++          if (cancelled || current !== revision) return;
++          updateMessageList((list) =>
++            list.filter(
++              (message) => !(message.conversation_id === conversation_id && message.id.startsWith('confirmation:'))
++            )
++          );
++          console.warn('[pending-confirmations] reconciliation failed', errorMessage(error));
+         });
+-      });
+-
++    };
++    refresh();
+     const off = ipcBridge.conversation.confirmation.remove.on((event) => {
+       if (event.conversation_id !== conversation_id) return;
+       updateMessageList((list) => removePermissionMessage(list, { id: event.id, call_id: event.id }));
++      refresh();
+     });
+-
++    const disposers = ['realtime.reconnected', 'runtime.snapshot', 'message.stream', 'turn.completed'].map((name) =>
++      wsEmitter(name).on(refresh)
++    );
++    const historyReconciled = () => refresh();
++    window.addEventListener('rmagent-history-reconciled', historyReconciled);
+     return () => {
++      window.removeEventListener('rmagent-history-reconciled', historyReconciled);
+       cancelled = true;
+       off();
++      disposers.forEach((dispose) => dispose());
+     };
+   }, [conversation_id, updateMessageList]);
+ }
+diff --git a/packages/desktop/src/renderer/pages/conversation/Preview/components/viewers/HTMLViewer.tsx b/packages/desktop/src/renderer/pages/conversation/Preview/components/viewers/HTMLViewer.tsx
+index dba2f24..feedf34 100644
+--- a/packages/desktop/src/renderer/pages/conversation/Preview/components/viewers/HTMLViewer.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/Preview/components/viewers/HTMLViewer.tsx
+@@ -2,10 +2,12 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { Message } from '@arco-design/web-react';
+-import MonacoEditor from '@monaco-editor/react';
++import CodeMirror from '@uiw/react-codemirror';
++import { html } from '@codemirror/lang-html';
+ import React, { useCallback, useEffect, useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ 
+@@ -378,22 +380,13 @@ const HTMLPreview: React.FC<HTMLPreviewProps> = ({ content, file_path, hideToolb
+         {/* 左侧：代码编辑器（编辑模式时显示） */}
+         {editMode && (
+           <div className='flex-1 overflow-hidden border-e border-border-base'>
+-            <MonacoEditor
++            <CodeMirror
+               height='100%'
+-              language='html'
+-              theme={currentTheme === 'dark' ? 'vs-dark' : 'vs'}
++              extensions={[html()]}
++              theme={currentTheme}
+               value={htmlCode}
+-              onChange={(value) => setHtmlCode(value || '')}
+-              options={{
+-                minimap: { enabled: false },
+-                fontSize: 13,
+-                lineNumbers: 'on',
+-                wordWrap: 'on',
+-                automaticLayout: true,
+-                scrollBeyondLastLine: false,
+-                formatOnPaste: true,
+-                formatOnType: true,
+-              }}
++              onChange={(value) => setHtmlCode(value)}
++              basicSetup={{ lineNumbers: true, foldGutter: true }}
+             />
+           </div>
+         )}
+diff --git a/packages/desktop/src/renderer/pages/conversation/Preview/components/viewers/MarkdownViewer.tsx b/packages/desktop/src/renderer/pages/conversation/Preview/components/viewers/MarkdownViewer.tsx
+index eb6c296..dfbd86c 100644
+--- a/packages/desktop/src/renderer/pages/conversation/Preview/components/viewers/MarkdownViewer.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/Preview/components/viewers/MarkdownViewer.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { joinPath } from '@/common/chat/chatLib';
+@@ -17,7 +18,6 @@ import {
+ } from '@/renderer/components/Markdown/markdownComponents';
+ import { resolveLocalFileLinkReference } from '@/renderer/components/Markdown/markdownUtils';
+ import { useTextSelection } from '@/renderer/hooks/ui/useTextSelection';
+-import 'katex/dist/katex.min.css';
+ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import ReactMarkdown from 'react-markdown';
+ import MarkdownEditor from '../editors/MarkdownEditor';
+@@ -148,16 +148,27 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({ src, alt, baseDir, worksp
+         const slash = mdRel.lastIndexOf('/');
+         const dir = slash === -1 ? '' : mdRel.slice(0, slash);
+         const imgRel = joinRelativePosix(dir, cleanedSrc);
+-        const imgRef: ChatFileRef = { kind: 'project', pe_id: docFileRef.pe_id, relative_path: imgRel };
++        const imgRef: ChatFileRef = {
++          kind: 'project',
++          pe_id: docFileRef.pe_id,
++          relative_path: imgRel,
++        };
+         resolveImage(`project:${docFileRef.pe_id}:${imgRel}`, async () => {
+-          const dataUrl = await ipcBridge.fs.readContent.invoke({ file: imgRef, encoding: 'dataurl' });
++          const dataUrl = await ipcBridge.fs.readContent.invoke({
++            file: imgRef,
++            encoding: 'dataurl',
++          });
+           return dataUrl || src;
+         })
+           .then((dataUrl) => {
+             if (!cancelled) setResolvedSrc(dataUrl);
+           })
+           .catch((error) => {
+-            console.error('[MarkdownPreview] Failed to load project image:', { src, imgRel, error });
++            console.error('[MarkdownPreview] Failed to load project image:', {
++              src,
++              imgRel,
++              error,
++            });
+             if (!cancelled) setResolvedSrc(src);
+           });
+         return;
+@@ -185,7 +196,11 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({ src, alt, baseDir, worksp
+           }
+         })
+         .catch((error) => {
+-          console.error('[MarkdownPreview] Failed to load local image:', { src, absolutePath, error });
++          console.error('[MarkdownPreview] Failed to load local image:', {
++            src,
++            absolutePath,
++            error,
++          });
+           if (!cancelled) {
+             setResolvedSrc(src);
+           }
+@@ -209,7 +224,13 @@ const MarkdownImage: React.FC<MarkdownImageProps> = ({ src, alt, baseDir, worksp
+       alt={alt}
+       referrerPolicy='no-referrer'
+       crossOrigin='anonymous'
+-      style={{ maxWidth: '100%', width: 'auto', height: 'auto', display: 'block', objectFit: 'contain' }}
++      style={{
++        maxWidth: '100%',
++        width: 'auto',
++        height: 'auto',
++        display: 'block',
++        objectFit: 'contain',
++      }}
+       {...props}
+     />
+   );
+diff --git a/packages/desktop/src/renderer/pages/conversation/components/ChatConversation.tsx b/packages/desktop/src/renderer/pages/conversation/components/ChatConversation.tsx
+index 1b597cc..43dcaa7 100644
+--- a/packages/desktop/src/renderer/pages/conversation/components/ChatConversation.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/components/ChatConversation.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { ipcBridge } from '@/common';
+@@ -364,11 +365,8 @@ const ChatConversation: React.FC<{
+ 
+   // For ACP/Codex conversations, use AcpModelSelector that can show/switch models.
+   // For other conversations, show disabled model selector.
+-  // Mobile: model selection moves into the sendbox `+` action sheet, so the
+-  // header selector is suppressed to free up vertical space.
+   const modelSelector = useMemo(() => {
+     if (!conversation || isAionrsConversation) return undefined;
+-    if (isMobile) return undefined;
+     if (isLegacyReadOnlyConversation) return undefined;
+     // Antigravity included: the backend discovers agy's model list and writes it
+     // into the same catalog the ACP picker reads, so it must not fall through to
+diff --git a/packages/desktop/src/renderer/pages/conversation/explorer/fileIcon/FileTypeIcon.tsx b/packages/desktop/src/renderer/pages/conversation/explorer/fileIcon/FileTypeIcon.tsx
+index 5bb1956..f3570a8 100644
+--- a/packages/desktop/src/renderer/pages/conversation/explorer/fileIcon/FileTypeIcon.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/explorer/fileIcon/FileTypeIcon.tsx
+@@ -2,56 +2,20 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+-
+ import type { IDirOrFile } from '@/common/adapter/ipcBridge';
+-import { useThemeDetection } from '@/renderer/pages/conversation/Preview/hooks/useThemeDetection';
+-import { getFileIconName, getFolderIconName, ICON_PREFIX_DARK, ICON_PREFIX_LIGHT } from './fileIcon';
+-import { addCollection, Icon, type IconifyJSON } from '@iconify/react';
++import { FileText, FolderOpen, FolderOne } from '@icon-park/react';
+ import React from 'react';
+-import catppuccinLatte from './catppuccinLatte.json';
+-import catppuccinMacchiato from './catppuccinMacchiato.json';
+-
+-// Register both bundled catppuccin flavors once, so <Icon> resolves names
+-// offline without hitting the Iconify API. Intentional, isolated deviation from
+-// the @icon-park-only icon convention (see AGENTS.md): the file tree uses the
+-// catppuccin file-icon theme for a softer, uniform look. The two flavors share
+-// identical icon names — only the palette (and thus the prefix) differs, picked
+-// by the active theme so neutral icons don't wash out on a light background.
+-addCollection(catppuccinLatte as IconifyJSON);
+-addCollection(catppuccinMacchiato as IconifyJSON);
+-
+-const ICON_SIZE = 16;
+ 
+ type FileTypeIconProps = {
+   node: Pick<IDirOrFile, 'name' | 'relativePath' | 'isFile'>;
+-  /** Whether the folder node is currently expanded (ignored for files). */
+   expanded?: boolean;
+ };
+ 
+-/**
+- * File-tree leading icon rendered with the "catppuccin" file-icon theme: a
+- * colored per-type icon for files and an open/closed folder icon for directories.
+- */
+ const FileTypeIcon: React.FC<FileTypeIconProps> = ({ node, expanded }) => {
+-  // Pick the catppuccin flavor from the active appearance (data-theme on <html>,
+-  // written as 'light'/'dark' by applyTheme — so custom themes resolve correctly
+-  // too). Reads the DOM signal rather than the theme context so the file-tree row
+-  // needs no ThemeProvider wrapper.
+-  const appearance = useThemeDetection();
+-  const prefix = appearance === 'dark' ? ICON_PREFIX_DARK : ICON_PREFIX_LIGHT;
+-  const isFolder = !node.isFile;
+-  const name = isFolder ? getFolderIconName(Boolean(expanded)) : getFileIconName(node);
+-
+-  return (
+-    <span
+-      data-testid={isFolder ? 'file-type-icon-folder' : 'file-type-icon-file'}
+-      className='inline-flex items-center justify-center flex-shrink-0'
+-      style={{ width: ICON_SIZE, height: ICON_SIZE, lineHeight: 0 }}
+-    >
+-      <Icon icon={`${prefix}:${name}`} width={ICON_SIZE} height={ICON_SIZE} />
+-    </span>
+-  );
++  const Icon = node.isFile ? FileText : expanded ? FolderOpen : FolderOne;
++  return <Icon size={16} data-testid={node.isFile ? 'file-type-icon-file' : 'file-type-icon-folder'} />;
+ };
+ 
+ export default FileTypeIcon;
+diff --git a/packages/desktop/src/renderer/pages/conversation/platforms/acp/AcpSendBox.tsx b/packages/desktop/src/renderer/pages/conversation/platforms/acp/AcpSendBox.tsx
+index bf9ccd0..ef0ef0e 100644
+--- a/packages/desktop/src/renderer/pages/conversation/platforms/acp/AcpSendBox.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/platforms/acp/AcpSendBox.tsx
+@@ -1,3 +1,4 @@
++/** Modified by rmAgentMa contributors for the renderer probe. */
+ import { ipcBridge } from '@/common';
+ import type { IConversationMcpStatus } from '@/common/config/storage';
+ import { isBackendHttpError } from '@/common/adapter/httpBridge';
+@@ -48,7 +49,7 @@ import { collectChatFileRefs, splitChatFileRefs } from '@/renderer/utils/file/me
+ import type { ChatFileRef } from '@/common/types/chatFile';
+ import { Button, Message, Tag } from '@arco-design/web-react';
+ import { Brain, Lightning, MagicHat, Shield } from '@icon-park/react';
+-import React, { useCallback, useEffect, useMemo, useState } from 'react';
++import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { classifyConversationBusyError } from '../conversationBusyError';
+ import { buildSendFailureError } from './buildSendFailureError';
+@@ -74,7 +75,7 @@ const EMPTY_AT_PATH: Array<string | FileOrFolderItem> = [];
+ const EMPTY_UPLOAD_FILES: string[] = [];
+ 
+ const useSendBoxDraft = (conversation_id: string) => {
+-  const { data, mutate } = useAcpSendBoxDraft(conversation_id);
++  const { data, mutate, saveStatus } = useAcpSendBoxDraft(conversation_id);
+   const atPath = data?.atPath ?? EMPTY_AT_PATH;
+   const uploadFile = data?.uploadFile ?? EMPTY_UPLOAD_FILES;
+   const content = data?.content ?? '';
+@@ -102,6 +103,7 @@ const useSendBoxDraft = (conversation_id: string) => {
+     setUploadFile,
+     content,
+     setContent,
++    saveStatus,
+   };
+ };
+ 
+@@ -130,7 +132,8 @@ const AcpSendBox: React.FC<{
+   const showModeSelector = true;
+   const isLeaderInTeam = teamPermission && conversation_id === teamPermission.leaderConversationId;
+   const { checkAndUpdateTitle } = useAutoTitle();
+-  const { atPath, uploadFile, setAtPath, setUploadFile, content, setContent } = useSendBoxDraft(conversation_id);
++  const { atPath, uploadFile, setAtPath, setUploadFile, content, setContent, saveStatus } =
++    useSendBoxDraft(conversation_id);
+   const layout = useLayoutContext();
+   const isMobile = Boolean(layout?.isMobile);
+   const conversationContext = useConversationContextSafe();
+@@ -203,10 +206,12 @@ const AcpSendBox: React.FC<{
+     async (mode: string) => {
+       if (!runtimeMode || mode === runtimeMode.currentValue) return;
+       try {
+-        await runtimeConfig.setConfigOption(runtimeMode.id, mode);
+-        setCurrentMode(mode);
+-        if (isLeaderInTeam) teamPermission?.propagateMode?.(mode);
+-        Message.success(t('agentMode.switchSuccess'));
++        const next = await runtimeConfig.setConfigOption(runtimeMode.id, mode);
++        if (next?.find((option) => option.id === runtimeMode.id)?.current_value === mode) {
++          setCurrentMode(mode);
++          if (isLeaderInTeam) teamPermission?.propagateMode?.(mode);
++          Message.success(t('agentMode.switchSuccess'));
++        }
+       } catch (error) {
+         console.error('[AcpSendBox] Failed to switch mode via sheet:', error);
+         Message.error(t(configErrorMessageKey(error)));
+@@ -281,8 +286,17 @@ const AcpSendBox: React.FC<{
+     addOrUpdateMessage: addOrUpdateMessageRef.current,
+   });
+ 
++  const submissionKeys = useRef(new Map<string, string>());
+   const executeCommand = useCallback(
+-    async ({ input, files, sessions }: Pick<ConversationCommandQueueItem, 'input' | 'files' | 'sessions'>) => {
++    async ({
++      input,
++      files,
++      sessions,
++      id,
++    }: Pick<ConversationCommandQueueItem, 'input' | 'files' | 'sessions'> & { id?: string }) => {
++      const fingerprint = JSON.stringify({ conversation_id, input, files, sessions });
++      const loadingId = submissionKeys.current.get(fingerprint) || id || uuid();
++      submissionKeys.current.set(fingerprint, loadingId);
+       // Plain user text; the backend resolves each ChatFileRef and injects the
+       // [[AION_FILES]] marker at the send edge (no front-end path/marker building).
+       try {
+@@ -306,7 +320,9 @@ const AcpSendBox: React.FC<{
+           // `@@` references. Dropping this here is a silent failure: the agent
+           // simply never receives the session block.
+           sessions,
++          loading_id: loadingId,
+         });
++        submissionKeys.current.delete(fingerprint);
+         markSendAccepted(result.turn_id, result.runtime, result.msg_id);
+         emitter.emit('chat.history.refresh');
+       } catch (error: unknown) {
+@@ -435,6 +451,7 @@ Please check your local CLI tool authentication status`,
+   // `@@` session references the user picked. Declared before the handlers that
+   // read it — every send path has to both forward and release it.
+   const [selectedSessions, setSelectedSessions] = useState<SessionRef[]>([]);
++  const attachmentSnapshot = useLatestRef({ uploadFile, atPath, selectedSessions });
+   const { enabled: crossSessionEnabled } = useCrossSessionMessageEnabled();
+ 
+   // Supporting agents (mid-turn delivery) send immediately, busy or not.
+@@ -452,12 +469,19 @@ Please check your local CLI tool authentication status`,
+       return false;
+     }
+ 
+-    const allFiles = collectChatFileRefs(uploadFile, atPath);
+-    const sessions = selectedSessions.length > 0 ? selectedSessions : undefined;
+-    clearFiles();
+-    setSelectedSessions([]);
+-    emitter.emit('acp.selected.file.clear');
++    const submitted = attachmentSnapshot.current;
++    const allFiles = collectChatFileRefs(submitted.uploadFile, submitted.atPath);
++    const sessions = submitted.selectedSessions.length > 0 ? submitted.selectedSessions : undefined;
+     await executeCommand({ input: message, files: allFiles, sessions });
++    const current = attachmentSnapshot.current;
++    if (current.uploadFile === submitted.uploadFile && current.atPath === submitted.atPath) {
++      clearFiles();
++      emitter.emit('acp.selected.file.clear');
++    } else {
++      setUploadFile(current.uploadFile.filter((path) => !submitted.uploadFile.includes(path)));
++      setAtPath(current.atPath.filter((item) => !submitted.atPath.includes(item)));
++    }
++    setSelectedSessions((items) => items.filter((item) => !submitted.selectedSessions.includes(item)));
+   };
+ 
+   const [interrupting, setInterrupting] = useState(false);
+@@ -494,7 +518,11 @@ Please check your local CLI tool authentication status`,
+     // `@@` references must ride along, and must be released from the send box
+     // the same way the draft text is — otherwise they leak into whatever the
+     // user sends next.
+-    enqueue({ input: content, files: allFiles, sessions: selectedSessions.length > 0 ? selectedSessions : undefined });
++    enqueue({
++      input: content,
++      files: allFiles,
++      sessions: selectedSessions.length > 0 ? selectedSessions : undefined,
++    });
+     setContent('');
+     clearFiles();
+     setSelectedSessions([]);
+@@ -602,7 +630,10 @@ Please check your local CLI tool authentication status`,
+           })),
+           onSelect: (value) => {
+             void handleThoughtLevelSetOption(runtimeThoughtLevel.id, value)
+-              .then(() => Message.success(t('agent.thoughtLevel.switchSuccess')))
++              .then((next) => {
++                if (next?.find((option) => option.id === runtimeThoughtLevel.id)?.current_value === value)
++                  Message.success(t('agent.thoughtLevel.switchSuccess'));
++              })
+               .catch((error) => Message.error(t(configErrorMessageKey(error))));
+           },
+         },
+@@ -718,25 +749,15 @@ Please check your local CLI tool authentication status`,
+ 
+   // Stop conversation handler
+   const handleStop = async (): Promise<void> => {
+-    // Cancelling is best-effort: swallow errors (e.g. backend WS not yet
+-    // connected → 409) so they don't bubble up as unhandled rejections.
+-    // UI state is still reset via finally.
+     const turnId = runtimeView.activeTurnId;
+-    if (!turnId) {
+-      resetState();
+-      resetActiveExecution('stop');
+-      return;
+-    }
++    if (!turnId) return;
+     runtimeView.markStopRequested(turnId);
+     try {
+       const result = await ipcBridge.conversation.stop.invoke({ conversation_id, turn_id: turnId });
+       runtimeView.markStopAcknowledged(turnId, result.runtime);
+     } catch (error) {
+-      console.warn('[AcpSendBox] stop request failed', error);
+-      runtimeView.resetLocalGate('stop_failed');
+-    } finally {
+-      resetState();
+-      resetActiveExecution('stop');
++      console.warn('[AcpSendBox] stop request failed; completion unconfirmed', error);
++      Message.error(t('messages.stopUnconfirmed'));
+     }
+   };
+   const effectiveHandleStop = teamRuntime?.onStop ?? handleStop;
+@@ -753,14 +774,18 @@ Please check your local CLI tool authentication status`,
+         // Removing first closes that race in both cases.
+         remove(item.id);
+         try {
+-          await executeCommand({ input: item.input, files: item.files, sessions: item.sessions });
++          await executeCommand({ id: item.id, input: item.input, files: item.files, sessions: item.sessions });
+         } catch {
+           // executeCommand already surfaces the failure (busy-conflict toast,
+           // error message card, etc.) via its own catch path — don't show a
+           // second one. Restore the user's content instead of dropping it:
+           // enqueue appends to the end, so promote it back to the front to
+           // match "send now" intent (it was already next in line).
+-          const restored = enqueue({ input: item.input, files: item.files, sessions: item.sessions });
++          const restored = enqueue({
++            input: item.input,
++            files: item.files,
++            sessions: item.sessions,
++          });
+           if (restored) prioritize(restored.id);
+         }
+         return;
+@@ -780,6 +805,11 @@ Please check your local CLI tool authentication status`,
+ 
+   return (
+     <div className={`${sendBoxWidthClass} flex flex-col mt-auto mb-16px`}>
++      {saveStatus === 'unsaved' && (
++        <div role='alert' data-testid='draft-unsaved' className='text-t-secondary p-8px'>
++          {t('messages.draftUnsaved')}
++        </div>
++      )}
+       <CommandQueuePanel
+         items={queuedCommands}
+         mode={queueMode}
+diff --git a/packages/desktop/src/renderer/pages/conversation/runtime/useConversationRuntimeView.ts b/packages/desktop/src/renderer/pages/conversation/runtime/useConversationRuntimeView.ts
+index 726188a..a16b3c8 100644
+--- a/packages/desktop/src/renderer/pages/conversation/runtime/useConversationRuntimeView.ts
++++ b/packages/desktop/src/renderer/pages/conversation/runtime/useConversationRuntimeView.ts
+@@ -2,9 +2,11 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { ipcBridge } from '@/common';
++import { wsEmitter } from '@/common/adapter/httpBridge';
+ import type { TConversationRuntimeSummary } from '@/common/config/storage';
+ import {
+   reconcileGeneratingFromRuntime,
+@@ -118,6 +120,25 @@ export const useConversationRuntimeView = (conversation_id: string): UseConversa
+     };
+   }, [conversation_id]);
+ 
++  useEffect(() => {
++    const reconcile = (event: { conversation_id: string; runtime: TConversationRuntimeSummary }) => {
++      if (event.conversation_id !== conversation_id || !event.runtime) return;
++      flushRuntimeViewLogs(hydrateSucceeded(conversation_id, event.runtime));
++      reconcileGeneratingFromRuntime(conversation_id, event.runtime.is_processing === true);
++      reconcileWaitingConfirmationFromRuntime(conversation_id, event.runtime.pending_confirmations ?? 0);
++    };
++    const offSnapshot = wsEmitter<{ conversation_id: string; runtime: TConversationRuntimeSummary }>(
++      'runtime.snapshot'
++    ).on(reconcile);
++    const offUpdated = wsEmitter<{ conversation_id: string; runtime: TConversationRuntimeSummary }>(
++      'runtime.updated'
++    ).on(reconcile);
++    return () => {
++      offSnapshot();
++      offUpdated();
++    };
++  }, [conversation_id]);
++
+   useEffect(() => {
+     if (!conversation_id) {
+       return;
+diff --git a/packages/desktop/src/renderer/pages/conversation/utils/ensureConversationRuntime.ts b/packages/desktop/src/renderer/pages/conversation/utils/ensureConversationRuntime.ts
+index ed12b4f..88c281d 100644
+--- a/packages/desktop/src/renderer/pages/conversation/utils/ensureConversationRuntime.ts
++++ b/packages/desktop/src/renderer/pages/conversation/utils/ensureConversationRuntime.ts
+@@ -1,5 +1,7 @@
++/** Modified by rmAgentMa contributors for the renderer probe. */
+ import { ipcBridge } from '@/common';
+ import type { EnsureConversationRuntimeResponse } from '@/common/types/platform/acpTypes';
++import { hydrateSucceeded } from '@/renderer/pages/conversation/runtime/conversationRuntimeViewStore';
+ 
+ const ensureRuntimeByConversation = new Map<string, Promise<EnsureConversationRuntimeResponse>>();
+ 
+@@ -9,9 +11,15 @@ export function ensureConversationRuntime(conversation_id: string): Promise<Ensu
+     return existing;
+   }
+ 
+-  const promise = ipcBridge.conversation.ensureRuntime.invoke({ conversation_id }).finally(() => {
+-    ensureRuntimeByConversation.delete(conversation_id);
+-  });
++  const promise = ipcBridge.conversation.ensureRuntime
++    .invoke({ conversation_id })
++    .then((result) => {
++      hydrateSucceeded(conversation_id, result.runtime);
++      return result;
++    })
++    .finally(() => {
++      ensureRuntimeByConversation.delete(conversation_id);
++    });
+   ensureRuntimeByConversation.set(conversation_id, promise);
+   return promise;
+ }
+diff --git a/packages/desktop/src/renderer/pages/login/index.tsx b/packages/desktop/src/renderer/pages/login/index.tsx
+index 827a717..5df29d7 100644
+--- a/packages/desktop/src/renderer/pages/login/index.tsx
++++ b/packages/desktop/src/renderer/pages/login/index.tsx
+@@ -1,4 +1,5 @@
+-import loginLogo from '@renderer/assets/logos/brand/app.png';
++/** Modified by rmAgentMa contributors for the renderer probe. */
++import loginLogo from '@renderer/assets/icons/file-icon.svg';
+ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { changeLanguage } from '@/renderer/services/i18n';
+diff --git a/packages/desktop/src/renderer/pages/settings/AppearanceSettings/themeCovers.ts b/packages/desktop/src/renderer/pages/settings/AppearanceSettings/themeCovers.ts
+index be73f47..94d0a63 100644
+--- a/packages/desktop/src/renderer/pages/settings/AppearanceSettings/themeCovers.ts
++++ b/packages/desktop/src/renderer/pages/settings/AppearanceSettings/themeCovers.ts
+@@ -2,11 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+-// Theme cover image — Vite resolves this to a hashed asset URL at build time.
+-// Only the official Light theme ships a cover; the former community-skin covers
+-// were removed alongside their deprecated themes.
+-import defaultThemeCover from '@renderer/assets/themes/default-theme.png';
+-
+-export { defaultThemeCover };
++export const defaultThemeCover: string | undefined = undefined;
+diff --git a/packages/desktop/src/renderer/services/FileService.ts b/packages/desktop/src/renderer/services/FileService.ts
+index 03b60fe..68fa449 100644
+--- a/packages/desktop/src/renderer/services/FileService.ts
++++ b/packages/desktop/src/renderer/services/FileService.ts
+@@ -2,9 +2,12 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { getBaseUrl } from '@/common/adapter/httpBridge';
++import { isNativeHost } from '@/common/host/hostTransport';
++import { uploadHostAttachment } from '@/common/host/hostAttachments';
+ import { trackUpload, type UploadSource } from '@/renderer/hooks/file/useUploadState';
+ 
+ /** Sentinel error message used when an upload is cancelled by the caller. */
+@@ -36,6 +39,8 @@ export async function uploadFileViaHttp(
+   file_name?: string,
+   options?: UploadFileOptions
+ ): Promise<string> {
++  if (isNativeHost())
++    return uploadHostAttachment(file, conversation_id || 'conv-probe-1', onProgress, file_name, options?.signal);
+   const formData = new FormData();
+   formData.append('file', file);
+   if (file_name) {
+diff --git a/packages/desktop/src/renderer/services/feedback/submitFeedbackReport.ts b/packages/desktop/src/renderer/services/feedback/submitFeedbackReport.ts
+index 793da24..89bb66c 100644
+--- a/packages/desktop/src/renderer/services/feedback/submitFeedbackReport.ts
++++ b/packages/desktop/src/renderer/services/feedback/submitFeedbackReport.ts
+@@ -1,26 +1,18 @@
++/**
++ * @license
++ * Copyright 2025 AionUi (aionui.com)
++ * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
++ */
+ import type { FeedbackDiagnosticsContextInput } from '@/common/types/feedbackDiagnostics';
+-import { httpRequest } from '@/common/adapter/httpBridge';
+-
+-const SUMMARY_PREVIEW_LENGTH = 60;
+-const LOG_PREFIX = '[FeedbackReport]';
+-type FeedbackLogLevel = 'info' | 'warn' | 'error';
+-type FeedbackLogAttachmentStatus = 'collected' | 'empty' | 'failed' | 'skipped' | 'unavailable';
+-type FeedbackDbDiagnosticsAttachmentStatus = 'collected' | 'empty' | 'failed' | 'skipped' | 'unavailable';
+-type FeedbackDiagnosticsAttachmentPayload = {
+-  contentType: string;
+-  data: Uint8Array<ArrayBuffer>;
+-  filename: string;
+-};
+ 
+ export type FeedbackAttachment = {
+   filename: string;
+   data: Uint8Array<ArrayBuffer>;
+   contentType: string;
+ };
+-
+ export type FeedbackEventTags = Record<string, string>;
+ export type FeedbackEventExtra = Record<string, unknown>;
+-
+ export type SubmitFeedbackReportInput = {
+   attachments?: FeedbackAttachment[];
+   collectDbDiagnostics?: FeedbackDiagnosticsContextInput;
+@@ -34,307 +26,10 @@ export type SubmitFeedbackReportInput = {
+   tags?: FeedbackEventTags;
+ };
+ 
+-function summarizeAttachments(attachments: FeedbackAttachment[]): Array<{
+-  contentType: string;
+-  filename: string;
+-  size: number;
+-}> {
+-  return attachments.map((attachment) => ({
+-    filename: attachment.filename,
+-    contentType: attachment.contentType,
+-    size: attachment.data.byteLength,
+-  }));
+-}
+-
+-function summarizeLogAttachment(
+-  status: FeedbackLogAttachmentStatus,
+-  attachment: FeedbackAttachment | null
+-): {
+-  filename?: string;
+-  size?: number;
+-  status: FeedbackLogAttachmentStatus;
+-} {
+-  if (!attachment) {
+-    return { status };
+-  }
+-
+-  return {
+-    status,
+-    filename: attachment.filename,
+-    size: attachment.data.byteLength,
+-  };
+-}
+-
+-function summarizeDbDiagnosticsAttachment(
+-  status: FeedbackDbDiagnosticsAttachmentStatus,
+-  attachment: FeedbackAttachment | null
+-): {
+-  filename?: string;
+-  size?: number;
+-  status: FeedbackDbDiagnosticsAttachmentStatus;
+-} {
+-  if (!attachment) {
+-    return { status };
+-  }
+-
+-  return {
+-    status,
+-    filename: attachment.filename,
+-    size: attachment.data.byteLength,
+-  };
+-}
+-
+-function normalizeLogDetails(details: unknown): unknown {
+-  if (details instanceof Error) {
+-    return {
+-      name: details.name,
+-      message: details.message,
+-      stack: details.stack,
+-    };
+-  }
+-  return details;
+-}
+-
+-export function logFeedbackReport(level: FeedbackLogLevel, message: string, details?: unknown): void {
+-  const normalizedDetails = normalizeLogDetails(details);
+-  const consoleMessage = `${LOG_PREFIX} ${message}`;
+-  if (level === 'error') {
+-    console.error(consoleMessage, normalizedDetails);
+-  } else if (level === 'warn') {
+-    console.warn(consoleMessage, normalizedDetails);
+-  } else {
+-    console.info(consoleMessage, normalizedDetails);
+-  }
+-
+-  try {
+-    window.electronAPI?.logFeedbackEvent?.({
+-      level,
+-      message,
+-      details: normalizedDetails,
+-    });
+-  } catch {
+-    // Renderer console logging above is the fallback.
+-  }
+-}
+-
+-async function collectLogAttachment(): Promise<{
+-  attachment: FeedbackAttachment | null;
+-  status: FeedbackLogAttachmentStatus;
+-}> {
+-  try {
+-    const electronAPI = typeof window === 'undefined' ? undefined : window.electronAPI;
+-    if (!electronAPI?.collectFeedbackLogs) {
+-      return { attachment: null, status: 'unavailable' };
+-    }
+-
+-    const logData = await electronAPI?.collectFeedbackLogs?.();
+-    if (!logData) {
+-      return { attachment: null, status: 'empty' };
+-    }
+-
+-    return {
+-      attachment: {
+-        filename: logData.filename,
+-        data: new Uint8Array(logData.data),
+-        contentType: 'application/gzip',
+-      },
+-      status: 'collected',
+-    };
+-  } catch {
+-    return { attachment: null, status: 'failed' };
+-  }
++export function logFeedbackReport(level: 'info' | 'warn' | 'error', message: string, _details?: unknown): void {
++  console[level]('[FeedbackReport]', message);
+ }
+ 
+-async function collectDbDiagnosticsAttachment(request: FeedbackDiagnosticsContextInput): Promise<{
+-  attachment: FeedbackAttachment | null;
+-  status: FeedbackDbDiagnosticsAttachmentStatus;
+-}> {
+-  try {
+-    if (typeof fetch === 'undefined') {
+-      return { attachment: null, status: 'unavailable' };
+-    }
+-
+-    const diagnostics = await httpRequest<unknown>('GET', buildFeedbackDiagnosticsPath(request), undefined, {
+-      silentStatuses: [400, 401, 403, 404, 500, 502, 503, 504],
+-    });
+-    if (!diagnostics) {
+-      return { attachment: null, status: 'empty' };
+-    }
+-    const payload = await encodeDiagnosticsAttachmentPayload(diagnostics);
+-
+-    return {
+-      attachment: {
+-        filename: payload.filename,
+-        data: payload.data,
+-        contentType: payload.contentType,
+-      },
+-      status: 'collected',
+-    };
+-  } catch {
+-    return { attachment: null, status: 'failed' };
+-  }
+-}
+-
+-function buildFeedbackDiagnosticsPath(request: FeedbackDiagnosticsContextInput): string {
+-  const params = new URLSearchParams();
+-  appendQueryParam(params, 'route_at_open', request.routeAtOpen);
+-  appendQueryParam(params, 'route_at_submit', request.routeAtSubmit);
+-  appendQueryParam(params, 'selected_module', request.selectedModule);
+-  appendQueryParam(params, 'profiles', request.explicitProfiles?.join(','));
+-  appendQueryParam(params, 'conversation_id', request.explicitContext?.conversationId);
+-  appendQueryParam(params, 'provider_id', request.explicitContext?.providerId);
+-  appendQueryParam(params, 'agent_id', request.explicitContext?.agentId);
+-  appendQueryParam(params, 'team_id', request.explicitContext?.teamId);
+-  appendQueryParam(params, 'mcp_server_id', request.explicitContext?.mcpServerId);
+-
+-  const query = params.toString();
+-  return query ? `/api/system/diagnostics/feedback-report?${query}` : '/api/system/diagnostics/feedback-report';
+-}
+-
+-function appendQueryParam(params: URLSearchParams, key: string, value: string | undefined): void {
+-  const trimmed = value?.trim();
+-  if (trimmed) {
+-    params.set(key, trimmed);
+-  }
+-}
+-
+-async function encodeDiagnosticsAttachmentPayload(value: unknown): Promise<FeedbackDiagnosticsAttachmentPayload> {
+-  const data = new TextEncoder().encode(JSON.stringify(value, null, 2));
+-  try {
+-    if (typeof CompressionStream !== 'function') {
+-      return {
+-        filename: 'db-diagnostics.json',
+-        data,
+-        contentType: 'application/json',
+-      };
+-    }
+-
+-    const stream = new Blob([data]).stream().pipeThrough(new CompressionStream('gzip'));
+-    const compressed = new Uint8Array(await new Response(stream).arrayBuffer());
+-    return {
+-      filename: 'db-diagnostics.json.gz',
+-      data: compressed,
+-      contentType: 'application/gzip',
+-    };
+-  } catch {
+-    return {
+-      filename: 'db-diagnostics.json',
+-      data,
+-      contentType: 'application/json',
+-    };
+-  }
+-}
+-
+-function normalizeDescription(description: string): string {
+-  return description.trim().replace(/\s+/g, ' ');
+-}
+-
+-function buildSummary(moduleLabel: string, description: string): string {
+-  const summaryPreview =
+-    description.length > SUMMARY_PREVIEW_LENGTH
+-      ? `${description.slice(0, SUMMARY_PREVIEW_LENGTH).trimEnd()}...`
+-      : description;
+-  return `${moduleLabel}: ${summaryPreview}`;
+-}
+-
+-export async function submitFeedbackReport(input: SubmitFeedbackReportInput): Promise<void> {
+-  const attachments = [...(input.attachments ?? [])];
+-  let eventId: string | undefined;
+-  let logAttachmentStatus: FeedbackLogAttachmentStatus = input.collectLogs ? 'empty' : 'skipped';
+-  let logAttachment: FeedbackAttachment | null = null;
+-  let dbDiagnosticsAttachmentStatus: FeedbackDbDiagnosticsAttachmentStatus = input.collectDbDiagnostics
+-    ? 'empty'
+-    : 'skipped';
+-  let dbDiagnosticsAttachment: FeedbackAttachment | null = null;
+-
+-  try {
+-    if (input.collectLogs) {
+-      const collectedLogAttachment = await collectLogAttachment();
+-      logAttachmentStatus = collectedLogAttachment.status;
+-      logAttachment = collectedLogAttachment.attachment;
+-      if (logAttachment) {
+-        attachments.unshift(logAttachment);
+-      }
+-    }
+-
+-    if (input.collectDbDiagnostics) {
+-      const collectedDbDiagnosticsAttachment = await collectDbDiagnosticsAttachment(input.collectDbDiagnostics);
+-      dbDiagnosticsAttachmentStatus = collectedDbDiagnosticsAttachment.status;
+-      dbDiagnosticsAttachment = collectedDbDiagnosticsAttachment.attachment;
+-      if (dbDiagnosticsAttachment) {
+-        attachments.unshift(dbDiagnosticsAttachment);
+-      }
+-    }
+-
+-    const normalizedDescription = normalizeDescription(input.description);
+-    const eventSummary = buildSummary(input.moduleLabel, normalizedDescription);
+-    const contactEmail = input.contactEmail?.trim();
+-    const Sentry = await import('@sentry/electron/renderer');
+-
+-    Sentry.withScope((scope) => {
+-      scope.setTag('type', 'user-feedback');
+-      scope.setTag('module', input.module);
+-      // Attach the optional contact email to THIS feedback event only via the
+-      // scoped user, so support can reach the reporter. Intentionally not a
+-      // global Sentry.setUser — that would stick this address onto every later
+-      // event (including crash reports the user never opted to share it on).
+-      if (contactEmail) {
+-        scope.setUser({ email: contactEmail });
+-      }
+-      Object.entries(input.tags ?? {}).forEach(([key, value]) => {
+-        if (value.trim()) {
+-          scope.setTag(key, value);
+-        }
+-      });
+-
+-      eventId = Sentry.captureEvent(
+-        {
+-          level: 'info',
+-          message: eventSummary,
+-          extra: {
+-            description: normalizedDescription,
+-            ...input.extra,
+-          },
+-        },
+-        { attachments }
+-      );
+-    });
+-
+-    if (input.flushTimeoutMs !== undefined) {
+-      const client = Sentry.getClient();
+-      if (!client) {
+-        throw new Error(`Failed to flush feedback report${eventId ? ` (${eventId})` : ''}: Sentry is not initialized`);
+-      }
+-
+-      const flushed = await client.flush(input.flushTimeoutMs);
+-      if (!flushed) {
+-        throw new Error(`Failed to flush feedback report${eventId ? ` (${eventId})` : ''}`);
+-      }
+-    }
+-
+-    logFeedbackReport('info', 'submitted', {
+-      module: input.module,
+-      eventId,
+-      collectLogs: Boolean(input.collectLogs),
+-      logAttachment: summarizeLogAttachment(logAttachmentStatus, logAttachment),
+-      dbDiagnosticsAttachment: summarizeDbDiagnosticsAttachment(dbDiagnosticsAttachmentStatus, dbDiagnosticsAttachment),
+-      attachmentCount: attachments.length,
+-      attachments: summarizeAttachments(attachments),
+-      flushTimeoutMs: input.flushTimeoutMs,
+-      tagKeys: Object.keys(input.tags ?? {}),
+-    });
+-  } catch (error) {
+-    logFeedbackReport('error', 'failed', {
+-      module: input.module,
+-      eventId,
+-      collectLogs: Boolean(input.collectLogs),
+-      logAttachment: summarizeLogAttachment(logAttachmentStatus, logAttachment),
+-      dbDiagnosticsAttachment: summarizeDbDiagnosticsAttachment(dbDiagnosticsAttachmentStatus, dbDiagnosticsAttachment),
+-      attachmentCount: attachments.length,
+-      attachments: summarizeAttachments(attachments),
+-      flushTimeoutMs: input.flushTimeoutMs,
+-      error,
+-    });
+-    throw error;
+-  }
++export async function submitFeedbackReport(_input: SubmitFeedbackReportInput): Promise<void> {
++  throw new Error('HOST_TELEMETRY_DISABLED');
+ }
+diff --git a/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts b/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
+index 677ae71..8af4fba 100644
+--- a/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
++++ b/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
+@@ -2,6 +2,7 @@
+ /**
+  * AUTO-GENERATED FILE - DO NOT EDIT
+  * Generated by scripts/generate-i18n-types.js
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ export type I18nKey =
+@@ -1175,6 +1176,7 @@ export type I18nKey =
+   | 'messages.anchorRail.label'
+   | 'messages.anchorRail.searchAria'
+   | 'messages.anchorRail.tickAria'
++  | 'messages.approvalReadOnly'
+   | 'messages.askAnswered'
+   | 'messages.askDecline'
+   | 'messages.askDeclined'
+@@ -1213,6 +1215,7 @@ export type I18nKey =
+   | 'messages.delivery.pending'
+   | 'messages.downloadFailed'
+   | 'messages.downloadSuccess'
++  | 'messages.draftUnsaved'
+   | 'messages.export.assistantLabel'
+   | 'messages.export.commandDescription'
+   | 'messages.export.conversationIdLabel'
+@@ -1247,6 +1250,7 @@ export type I18nKey =
+   | 'messages.fork.errorPointUnsupported'
+   | 'messages.fork.errorTurnInFlight'
+   | 'messages.fork.errorUnsupported'
++  | 'messages.hostConnectionFailed'
+   | 'messages.imageGenerationModelDetected'
+   | 'messages.imageLoadFailed'
+   | 'messages.noOptionsAvailable'
+@@ -1261,6 +1265,7 @@ export type I18nKey =
+   | 'messages.slash.empty'
+   | 'messages.slash.hint'
+   | 'messages.slash.title'
++  | 'messages.stopUnconfirmed'
+   | 'messages.unknownMessageType'
+   | 'pet.confirmBubble'
+   | 'pet.confirmBubbleDescription'
+diff --git a/packages/desktop/src/renderer/services/i18n/index.ts b/packages/desktop/src/renderer/services/i18n/index.ts
+index 7fc1557..7438597 100644
+--- a/packages/desktop/src/renderer/services/i18n/index.ts
++++ b/packages/desktop/src/renderer/services/i18n/index.ts
+@@ -1,3 +1,4 @@
++/** Modified by rmAgentMa contributors for the renderer probe. */
+ import i18n from 'i18next';
+ import { initReactI18next } from 'react-i18next';
+ 
+@@ -145,7 +146,7 @@ async function initLanguage(): Promise<void> {
+   try {
+     await configService.whenReady();
+     const savedLanguage = configService.get('language');
+-    const language = savedLanguage || normalizeLanguageCode(navigator.language || DEFAULT_LANGUAGE);
++    const language = savedLanguage || 'zh-CN';
+     await ensureAndSwitch(i18n, language, loadLocaleModules);
+     // Sync to localStorage so next page load can use it as a fast hint
+     if (typeof localStorage !== 'undefined') {
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/en-US/messages.json b/packages/desktop/src/renderer/services/i18n/locales/en-US/messages.json
+index 0de6c7d..51e5b35 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/en-US/messages.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/en-US/messages.json
+@@ -69,6 +69,10 @@
+   "processing": "Processing...",
+   "responseSentSuccessfully": "Response sent successfully",
+   "permissionResponseFailed": "Could not send the response. Please try again.",
++  "stopUnconfirmed": "Stopping is unconfirmed. Wait for runtime reconciliation before sending again.",
++  "approvalReadOnly": "This approval is read-only or its pending state has not been confirmed.",
++  "hostConnectionFailed": "Host connection failed. No session was started.",
++  "draftUnsaved": "Draft not saved. Keep this page open and retry after checking the connection or draft size.",
+   "confirmation": {
+     "applyChange": "Apply this change?",
+     "allowExecution": "Allow execution?",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/messages.json b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/messages.json
+index c32cfc7..a169183 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/messages.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/messages.json
+@@ -69,6 +69,10 @@
+   "processing": "处理中...",
+   "responseSentSuccessfully": "响应已成功发送",
+   "permissionResponseFailed": "未能发送响应，请重试。",
++  "stopUnconfirmed": "停止未确认，请等待运行状态核对，不要重复发送。",
++  "approvalReadOnly": "此审批为只读记录，或当前待决状态尚未确认。",
++  "hostConnectionFailed": "宿主连接失败，未启动会话。",
++  "draftUnsaved": "草稿未保存，请保留此页面；检查连接或草稿长度后重试。",
+   "confirmation": {
+     "applyChange": "应用此更改？",
+     "allowExecution": "允许执行？",
+diff --git a/packages/desktop/src/renderer/services/registerPwa.ts b/packages/desktop/src/renderer/services/registerPwa.ts
+index 9c8efc5..cd7ce69 100644
+--- a/packages/desktop/src/renderer/services/registerPwa.ts
++++ b/packages/desktop/src/renderer/services/registerPwa.ts
+@@ -2,47 +2,11 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+-import { isElectronDesktop } from '@renderer/utils/platform';
+-
+-const SERVICE_WORKER_URL = './sw.js';
+-const LOCALHOST_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+-
+-function isPwaRegistrationSupported(): boolean {
+-  if (typeof window === 'undefined' || typeof navigator === 'undefined') {
+-    return false;
+-  }
+-
+-  if (isElectronDesktop() || !('serviceWorker' in navigator)) {
+-    return false;
+-  }
+-
+-  const { protocol, hostname } = window.location;
+-  const isHttpOrigin = protocol === 'http:' || protocol === 'https:';
+-  if (!isHttpOrigin) {
+-    return false;
+-  }
+-
+-  return window.isSecureContext || LOCALHOST_HOSTS.has(hostname);
+-}
+-
+ export async function registerPwa(): Promise<ServiceWorkerRegistration | undefined> {
+-  if (!isPwaRegistrationSupported()) {
+-    return undefined;
+-  }
+-
+-  try {
+-    const registration = await navigator.serviceWorker.register(SERVICE_WORKER_URL, { scope: './' });
+-    // Poll for updates on every page load so a fixed SW (e.g. v2 replacing
+-    // a poisoned v1 cache) reaches users without waiting for the browser's
+-    // own 24h update heuristic.
+-    registration.update().catch((): undefined => undefined);
+-    return registration;
+-  } catch (error) {
+-    console.warn('[PWA] Failed to register service worker:', error);
+-    return undefined;
+-  }
++  return undefined;
+ }
+ 
+ export default registerPwa;
+diff --git a/scripts/generate-i18n-types.js b/scripts/generate-i18n-types.js
+index e1d3b65..b9f51c9 100644
+--- a/scripts/generate-i18n-types.js
++++ b/scripts/generate-i18n-types.js
+@@ -1,5 +1,6 @@
+ #!/usr/bin/env node
+ /**
++ * Modified by rmAgentMa contributors for the renderer probe.
+  * Generate strongly-typed i18n key declarations from en-US locale modules.
+  *
+  * Usage:
+@@ -60,7 +61,7 @@ function collectReferenceKeys() {
+ function buildI18nKeysDts(keys) {
+   const keyUnion = keys.length > 0 ? keys.map((key) => `  | '${key}'`).join('\n') : '  | never';
+ 
+-  return `/* eslint-disable */\n/**\n * AUTO-GENERATED FILE - DO NOT EDIT\n * Generated by scripts/generate-i18n-types.js\n */\n\nexport type I18nKey =\n${keyUnion};\n\nexport type I18nModule =\n${REQUIRED_MODULES.map((moduleName) => `  | '${moduleName}'`).join('\n')};\n`;
++  return `/* eslint-disable */\n/**\n * AUTO-GENERATED FILE - DO NOT EDIT\n * Generated by scripts/generate-i18n-types.js\n * Modified by rmAgentMa contributors for the renderer probe.\n */\n\nexport type I18nKey =\n${keyUnion};\n\nexport type I18nModule =\n${REQUIRED_MODULES.map((moduleName) => `  | '${moduleName}'`).join('\n')};\n`;
+ }
+ 
+ function generateI18nKeysDtsContent() {
+diff --git a/tests/unit/feedback/FeedbackReportModal.dom.test.tsx b/tests/unit/feedback/FeedbackReportModal.dom.test.tsx
+index a53c692..9d963ef 100644
+--- a/tests/unit/feedback/FeedbackReportModal.dom.test.tsx
++++ b/tests/unit/feedback/FeedbackReportModal.dom.test.tsx
+@@ -2,312 +2,38 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
+- *
+- * White-box tests for FeedbackReportModal's prefill behavior.
+- * Verifies that defaultModule + prefilledScreenshots props seed the form
+- * when the modal becomes visible, and that cancel clears the form.
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+-
+ import React from 'react';
+-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
++import { describe, it, expect, vi, afterEach } from 'vitest';
+ import { cleanup, render, screen, waitFor } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+-import { ConfigProvider } from '@arco-design/web-react';
+-
+-vi.mock('@arco-design/web-react', async (importOriginal) => {
+-  const actual = await importOriginal<typeof import('@arco-design/web-react')>();
+-  return {
+-    ...actual,
+-    Message: {
+-      ...actual.Message,
+-      success: vi.fn(),
+-    },
+-  };
+-});
+-
+-vi.mock('react-i18next', () => ({
+-  useTranslation: () => ({ t: (k: string) => k, i18n: { language: 'en' } }),
+-}));
+-
+-// FeedbackReportModal now renders through AionModal, which reads ThemeContext
+-// for font scaling. Provide a minimal theme so the modal mounts without a full
+-// ThemeProvider (which pulls in IPC-backed theme loading).
+-vi.mock('@/renderer/hooks/context/ThemeContext', () => ({
+-  useThemeContext: () => ({ theme: 'light', fontScale: 1 }),
+-}));
+-
+-// FeedbackReportModal reads useAuth() to silently attach the signed-in user's
+-// account email to the report. Mock it with a mutable holder so individual
+-// tests can flip between a logged-out user (no email attached) and one that
+-// carries an email.
+-const authMock = vi.hoisted(() => ({
+-  user: null as { id: string; username: string; email?: string } | null,
+-}));
+-
+-vi.mock('@/renderer/hooks/context/AuthContext', () => ({
+-  useAuth: () => ({ user: authMock.user }),
+-}));
+-
+-const sentryMocks = vi.hoisted(() => {
+-  const setTag = vi.fn();
+-  const setUser = vi.fn();
+-  return {
+-    setTag,
+-    setUser,
+-    captureEvent: vi.fn(),
+-    withScope: vi.fn((callback: (scope: { setTag: typeof setTag; setUser: typeof setUser }) => void) => {
+-      callback({ setTag, setUser });
+-    }),
+-  };
+-});
+-
+-vi.mock('@sentry/electron/renderer', () => sentryMocks);
++import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
+ 
+-import FeedbackReportModal, {
+-  type PrefilledScreenshot,
+-} from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
++vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'zh-CN' } }) }));
++vi.mock('@/renderer/hooks/context/ThemeContext', () => ({ useThemeContext: () => ({ theme: 'light', fontScale: 1 }) }));
++vi.mock('@/renderer/hooks/context/AuthContext', () => ({ useAuth: () => ({ user: null }) }));
+ 
+-const renderModal = (ui: React.ReactElement) => render(<ConfigProvider>{ui}</ConfigProvider>);
+-
+-const buildScreenshot = (name: string, byte: number): PrefilledScreenshot => ({
+-  filename: name,
+-  data: new Uint8Array([byte, byte + 1, byte + 2]),
+-  type: 'image/png',
++afterEach(() => {
++  cleanup();
++  vi.restoreAllMocks();
+ });
+ 
+-describe('FeedbackReportModal — prefill', () => {
+-  beforeEach(() => {
+-    // Ensure no leftover global electronAPI from other tests interferes.
+-    (window as unknown as { electronAPI?: unknown }).electronAPI = undefined;
+-    window.location.hash = '';
+-    authMock.user = null;
+-    sentryMocks.setTag.mockClear();
+-    sentryMocks.setUser.mockClear();
+-    sentryMocks.captureEvent.mockClear();
+-    sentryMocks.withScope.mockClear();
+-  });
+-
+-  afterEach(() => {
+-    cleanup();
+-  });
+-
+-  it('does not render form content when visible=false', () => {
+-    renderModal(<FeedbackReportModal visible={false} onCancel={vi.fn()} />);
++describe('offline probe feedback modal', () => {
++  it('does not render when closed', () => {
++    render(<FeedbackReportModal visible={false} onCancel={vi.fn()} />);
+     expect(screen.queryByTestId('feedback-report-scroll-body')).not.toBeInTheDocument();
+   });
+ 
+-  it('renders the form body when visible=true', () => {
+-    renderModal(<FeedbackReportModal visible={true} onCancel={vi.fn()} />);
+-    expect(screen.getByTestId('feedback-report-scroll-body')).toBeInTheDocument();
+-  });
+-
+-  it('applies defaultModule on open, showing it as the selected option', () => {
+-    renderModal(<FeedbackReportModal visible={true} onCancel={vi.fn()} defaultModule='mcp-tools' />);
+-    // The select shows the i18n key (mock returns the key itself). That is how other
+-    // tests in this repo verify module labels with the t() → identity mock.
+-    expect(screen.getByText('settings.bugReportModuleMcp')).toBeInTheDocument();
+-  });
+-
+-  it('seeds the Upload list with prefilled screenshots', () => {
+-    const shots = [buildScreenshot('shot-a.png', 1), buildScreenshot('shot-b.png', 10)];
+-    renderModal(
+-      <FeedbackReportModal
+-        visible={true}
+-        onCancel={vi.fn()}
+-        defaultModule='conversation-session'
+-        prefilledScreenshots={shots}
+-      />
+-    );
+-
+-    // The picture-card Upload renders one .arco-upload-list-item per screenshot.
+-    // Arco also appends a separate `+` trigger until the 3-item limit is hit.
+-    expect(document.querySelectorAll('.arco-upload-list-item').length).toBe(2);
+-  });
+-
+-  it('shows the uploaded count next to the screenshot label when seeded', () => {
+-    const shots = [buildScreenshot('a.png', 1), buildScreenshot('b.png', 2)];
+-    renderModal(
+-      <FeedbackReportModal visible={true} onCancel={vi.fn()} defaultModule='mcp-tools' prefilledScreenshots={shots} />
+-    );
+-    expect(screen.getByTestId('feedback-report-screenshot-count')).toBeInTheDocument();
+-  });
+-
+-  it('hides the uploaded count when no screenshots are attached', () => {
+-    renderModal(<FeedbackReportModal visible={true} onCancel={vi.fn()} defaultModule='mcp-tools' />);
+-    expect(screen.queryByTestId('feedback-report-screenshot-count')).not.toBeInTheDocument();
+-  });
+-
+-  it('caps prefilled screenshots to the 3-item upload limit', () => {
+-    const shots = [
+-      buildScreenshot('a.png', 1),
+-      buildScreenshot('b.png', 2),
+-      buildScreenshot('c.png', 3),
+-      buildScreenshot('d.png', 4),
+-      buildScreenshot('e.png', 5),
+-    ];
+-    renderModal(
+-      <FeedbackReportModal
+-        visible={true}
+-        onCancel={vi.fn()}
+-        defaultModule='system-settings'
+-        prefilledScreenshots={shots}
+-      />
+-    );
+-
+-    // Only the first 3 screenshots make it into the Upload list.
+-    expect(document.querySelectorAll('.arco-upload-list-item').length).toBe(3);
+-    // When the limit is hit Arco hides the `+` trigger tile.
+-    expect(document.querySelector('.arco-upload-trigger-picture')).toBeNull();
+-  });
+-
+-  it('calls onCancel when the close button is clicked', async () => {
++  it('retains the failure state and sends neither telemetry nor diagnostics', async () => {
++    const network = vi.spyOn(globalThis, 'fetch');
+     const onCancel = vi.fn();
+     const user = userEvent.setup();
+-    renderModal(<FeedbackReportModal visible={true} onCancel={onCancel} defaultModule='agent-detection' />);
+-
+-    const closeBtn = document.querySelector('button[aria-label="Close"]') as HTMLElement | null;
+-    expect(closeBtn).not.toBeNull();
+-    await user.click(closeBtn!);
+-
+-    expect(onCancel).toHaveBeenCalledTimes(1);
+-  });
+-
+-  it('submits feedback tags and extra context to Sentry', async () => {
+-    const user = userEvent.setup();
+-    const onCancel = vi.fn();
+-    renderModal(
+-      <FeedbackReportModal
+-        visible={true}
+-        onCancel={onCancel}
+-        defaultModule='conversation-session'
+-        feedbackTags={{
+-          agent_error_code: 'USER_LLM_PROVIDER_AUTH_FAILED',
+-          agent_error_ownership: 'user_llm_provider',
+-        }}
+-        feedbackExtra={{
+-          agent_error: {
+-            code: 'USER_LLM_PROVIDER_AUTH_FAILED',
+-            ownership: 'user_llm_provider',
+-          },
+-        }}
+-      />
+-    );
+-
+-    await user.type(screen.getByPlaceholderText('settings.bugReportDescriptionPlaceholder'), 'provider failed');
+-    await user.click(screen.getByText('settings.bugReportSubmit'));
+-
+-    await waitFor(() => {
+-      expect(sentryMocks.captureEvent).toHaveBeenCalledTimes(1);
+-    });
+-
+-    expect(sentryMocks.setTag).toHaveBeenCalledWith('type', 'user-feedback');
+-    expect(sentryMocks.setTag).toHaveBeenCalledWith('module', 'conversation-session');
+-    expect(sentryMocks.setTag).toHaveBeenCalledWith('agent_error_code', 'USER_LLM_PROVIDER_AUTH_FAILED');
+-    expect(sentryMocks.setTag).toHaveBeenCalledWith('agent_error_ownership', 'user_llm_provider');
+-    expect(sentryMocks.captureEvent).toHaveBeenCalledWith(
+-      expect.objectContaining({
+-        extra: {
+-          description: 'provider failed',
+-          agent_error: {
+-            code: 'USER_LLM_PROVIDER_AUTH_FAILED',
+-            ownership: 'user_llm_provider',
+-          },
+-        },
+-      }),
+-      expect.objectContaining({ attachments: [] })
+-    );
+-    expect(onCancel).toHaveBeenCalledTimes(1);
+-  });
+-
+-  it('submits route and module diagnostics context for DB attachment collection', async () => {
+-    window.location.hash = '#/conversation/conv-1';
+-    const fetchMock = vi.fn().mockResolvedValue(
+-      new Response(
+-        JSON.stringify({
+-          success: true,
+-          data: {
+-            schema_version: 'feedback-diagnostics/v1',
+-            profiles: [],
+-            privacy: { raw_content_included: false, api_keys_included: false },
+-          },
+-        }),
+-        {
+-          status: 200,
+-          headers: { 'Content-Type': 'application/json' },
+-        }
+-      )
+-    );
+-    vi.stubGlobal('fetch', fetchMock);
+-
+-    const user = userEvent.setup();
+-    renderModal(
+-      <FeedbackReportModal
+-        visible={true}
+-        onCancel={vi.fn()}
+-        defaultModule='system-settings'
+-        feedbackDiagnosticsContext={{
+-          explicitContext: { conversationId: 'conv-1' },
+-          explicitProfiles: ['conversation-session'],
+-          routeAtOpen: '#/conversation/conv-1',
+-        }}
+-      />
+-    );
+-
+-    await user.type(screen.getByPlaceholderText('settings.bugReportDescriptionPlaceholder'), 'wrong module selected');
+-    await user.click(screen.getByText('settings.bugReportSubmit'));
+-
+-    await waitFor(() => {
+-      expect(fetchMock).toHaveBeenCalledOnce();
+-    });
+-    const [path, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+-    expect(path).toContain('/api/system/diagnostics/feedback-report?');
+-    expect(path).toContain('conversation_id=conv-1');
+-    expect(path).toContain('profiles=conversation-session');
+-    expect(path).toContain('route_at_open=%23%2Fconversation%2Fconv-1');
+-    expect(path).toContain('route_at_submit=%23%2Fconversation%2Fconv-1');
+-    expect(path).toContain('selected_module=system-settings');
+-    expect(options.method).toBe('GET');
+-  });
+-
+-  it('attaches the signed-in account email to the feedback event', async () => {
+-    authMock.user = { id: 'u1', username: 'user-one', email: '  me@account.com  ' };
+-    const user = userEvent.setup();
+-    renderModal(<FeedbackReportModal visible={true} onCancel={vi.fn()} defaultModule='conversation-session' />);
+-
+-    await user.type(screen.getByPlaceholderText('settings.bugReportDescriptionPlaceholder'), 'something broke');
++    render(<FeedbackReportModal visible={true} onCancel={onCancel} defaultModule='conversation-session' />);
++    await user.type(screen.getByPlaceholderText('settings.bugReportDescriptionPlaceholder'), 'offline probe');
+     await user.click(screen.getByText('settings.bugReportSubmit'));
+-
+-    await waitFor(() => {
+-      expect(sentryMocks.captureEvent).toHaveBeenCalledTimes(1);
+-    });
+-
+-    // The account email rides along on THIS event's scoped user (trimmed), with
+-    // no visible field for the reporter to fill in or edit.
+-    expect(sentryMocks.setUser).toHaveBeenCalledWith({ email: 'me@account.com' });
+-  });
+-
+-  it('submits without a scoped user when the signed-in user has no email', async () => {
+-    authMock.user = { id: 'u1', username: 'user-one' };
+-    const user = userEvent.setup();
+-    renderModal(<FeedbackReportModal visible={true} onCancel={vi.fn()} defaultModule='conversation-session' />);
+-
+-    await user.type(screen.getByPlaceholderText('settings.bugReportDescriptionPlaceholder'), 'something broke');
+-    await user.click(screen.getByText('settings.bugReportSubmit'));
+-
+-    await waitFor(() => {
+-      expect(sentryMocks.captureEvent).toHaveBeenCalledTimes(1);
+-    });
+-
+-    expect(sentryMocks.setUser).not.toHaveBeenCalled();
+-  });
+-
+-  it('no longer renders the contact email field or its account-fill button', () => {
+-    authMock.user = { id: 'u1', username: 'user-one', email: 'me@account.com' };
+-    renderModal(<FeedbackReportModal visible={true} onCancel={vi.fn()} />);
+-    // Positive control: the description field still renders, so the modal mounted.
+-    expect(screen.getByPlaceholderText('settings.bugReportDescriptionPlaceholder')).toBeInTheDocument();
+-    // The removed contact email input and its "use account email" button are gone.
+-    expect(screen.queryByPlaceholderText('settings.bugReportContactEmailPlaceholder')).not.toBeInTheDocument();
+-    expect(screen.queryByTestId('btn-feedback-use-account-email')).not.toBeInTheDocument();
++    await waitFor(() => expect(screen.getByText('settings.bugReportError')).toBeInTheDocument());
++    expect(network).not.toHaveBeenCalled();
++    expect(onCancel).not.toHaveBeenCalled();
+   });
+ });
+diff --git a/tests/unit/feedback/submitFeedbackReport.test.ts b/tests/unit/feedback/submitFeedbackReport.test.ts
+index 010b759..12283d6 100644
+--- a/tests/unit/feedback/submitFeedbackReport.test.ts
++++ b/tests/unit/feedback/submitFeedbackReport.test.ts
+@@ -1,326 +1,30 @@
+-import { beforeEach, describe, expect, it, vi } from 'vitest';
++/**
++ * @license
++ * Copyright 2025 AionUi (aionui.com)
++ * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
++ */
++import { afterEach, describe, expect, it, vi } from 'vitest';
+ import { submitFeedbackReport } from '@/renderer/services/feedback/submitFeedbackReport';
+ 
+-const sentryMocks = vi.hoisted(() => {
+-  const setTag = vi.fn();
+-  const setUser = vi.fn();
+-  const flush = vi.fn(async () => true);
+-  return {
+-    captureEvent: vi.fn(() => 'event-id'),
+-    flush,
+-    getClient: vi.fn(() => ({ flush })),
+-    setTag,
+-    setUser,
+-    withScope: vi.fn((callback: (scope: { setTag: typeof setTag; setUser: typeof setUser }) => void) => {
+-      callback({ setTag, setUser });
+-    }),
+-  };
+-});
+-
+-vi.mock('@sentry/electron/renderer', () => sentryMocks);
+-
+-describe('submitFeedbackReport', () => {
+-  beforeEach(() => {
+-    sentryMocks.captureEvent.mockClear();
+-    sentryMocks.captureEvent.mockReturnValue('event-id');
+-    sentryMocks.flush.mockClear();
+-    sentryMocks.flush.mockResolvedValue(true);
+-    sentryMocks.getClient.mockClear();
+-    sentryMocks.getClient.mockReturnValue({ flush: sentryMocks.flush });
+-    sentryMocks.setTag.mockClear();
+-    sentryMocks.setUser.mockClear();
+-    sentryMocks.withScope.mockClear();
+-    vi.stubGlobal('window', { electronAPI: undefined });
+-  });
+-
+-  it('submits a user-feedback event with tags, extra context, logs, and attachments', async () => {
+-    const collectFeedbackLogs = vi.fn().mockResolvedValue({
+-      filename: 'aionui-logs.log.gz',
+-      data: [1, 2, 3],
+-    });
+-    const logFeedbackEvent = vi.fn();
+-    vi.stubGlobal('window', {
+-      electronAPI: {
+-        collectFeedbackLogs,
+-        emit: vi.fn(),
+-        logFeedbackEvent,
+-        on: vi.fn(),
+-      },
+-    });
+-
+-    await submitFeedbackReport({
+-      attachments: [
+-        {
+-          filename: 'screenshot.png',
+-          data: new Uint8Array([4, 5, 6]),
+-          contentType: 'image/png',
+-        },
+-      ],
+-      collectLogs: true,
+-      description: '  AionCore   cannot start  ',
+-      extra: {
+-        installation_integrity: {
+-          source: 'backend_startup_failure',
+-        },
+-      },
+-      module: 'installation-integrity',
+-      moduleLabel: 'AionUi installation is incomplete',
+-      tags: {
+-        'aionui.installation_integrity.report_source': 'backend_startup_failure',
+-      },
+-    });
+-
+-    expect(collectFeedbackLogs).toHaveBeenCalledOnce();
+-    expect(sentryMocks.setTag).toHaveBeenCalledWith('type', 'user-feedback');
+-    expect(sentryMocks.setTag).toHaveBeenCalledWith('module', 'installation-integrity');
+-    expect(sentryMocks.setTag).toHaveBeenCalledWith(
+-      'aionui.installation_integrity.report_source',
+-      'backend_startup_failure'
+-    );
+-    expect(sentryMocks.captureEvent).toHaveBeenCalledWith(
+-      {
+-        level: 'info',
+-        message: 'AionUi installation is incomplete: AionCore cannot start',
+-        extra: {
+-          description: 'AionCore cannot start',
+-          installation_integrity: {
+-            source: 'backend_startup_failure',
+-          },
+-        },
+-      },
+-      {
+-        attachments: [
+-          {
+-            filename: 'aionui-logs.log.gz',
+-            data: new Uint8Array([1, 2, 3]),
+-            contentType: 'application/gzip',
+-          },
+-          {
+-            filename: 'screenshot.png',
+-            data: new Uint8Array([4, 5, 6]),
+-            contentType: 'image/png',
+-          },
+-        ],
+-      }
+-    );
+-    expect(sentryMocks.flush).not.toHaveBeenCalled();
+-    expect(logFeedbackEvent).toHaveBeenCalledOnce();
+-    expect(logFeedbackEvent).toHaveBeenCalledWith(
+-      expect.objectContaining({
+-        level: 'info',
+-        message: 'submitted',
+-      })
+-    );
+-  });
+-
+-  it('scopes a trimmed contact email onto this feedback event via setUser', async () => {
+-    await submitFeedbackReport({
+-      collectLogs: false,
+-      contactEmail: '  reporter@example.com  ',
+-      description: 'Please reach out',
+-      module: 'installation-integrity',
+-      moduleLabel: 'AionUi installation is incomplete',
+-    });
+-
+-    // Scoped to this event only (inside withScope), never the global
+-    // Sentry.setUser — so crash reports and later events stay free of it.
+-    expect(sentryMocks.setUser).toHaveBeenCalledTimes(1);
+-    expect(sentryMocks.setUser).toHaveBeenCalledWith({ email: 'reporter@example.com' });
+-  });
+-
+-  it('does not set a user when no contact email is provided', async () => {
+-    await submitFeedbackReport({
+-      collectLogs: false,
+-      description: 'No email here',
+-      module: 'installation-integrity',
+-      moduleLabel: 'AionUi installation is incomplete',
+-    });
+-
+-    expect(sentryMocks.setUser).not.toHaveBeenCalled();
+-  });
+-
+-  it('does not set a user when the contact email is blank', async () => {
+-    await submitFeedbackReport({
+-      collectLogs: false,
+-      contactEmail: '   ',
+-      description: 'Whitespace email',
+-      module: 'installation-integrity',
+-      moduleLabel: 'AionUi installation is incomplete',
+-    });
+-
+-    expect(sentryMocks.setUser).not.toHaveBeenCalled();
+-  });
+-
+-  it('continues without logs when log collection is unavailable', async () => {
+-    await submitFeedbackReport({
+-      collectLogs: true,
+-      description: 'No logs available',
+-      module: 'installation-integrity',
+-      moduleLabel: 'AionUi installation is incomplete',
+-    });
+-
+-    expect(sentryMocks.captureEvent).toHaveBeenCalledWith(
+-      expect.objectContaining({
+-        extra: {
+-          description: 'No logs available',
+-        },
+-      }),
+-      { attachments: [] }
+-    );
+-  });
+-
+-  it('attaches db diagnostics when collection succeeds', async () => {
+-    const fetchMock = vi.fn().mockResolvedValue(
+-      new Response(
+-        JSON.stringify({
+-          success: true,
+-          data: {
+-            schema_version: 'feedback-diagnostics/v1',
+-            profiles: [{ name: 'conversation-session', mode: 'detail', data: { conversation: { id: 'conv-1' } } }],
+-            privacy: { raw_content_included: false, api_keys_included: false },
+-          },
+-        }),
+-        {
+-          status: 200,
+-          headers: { 'Content-Type': 'application/json' },
+-        }
+-      )
+-    );
+-    vi.stubGlobal('fetch', fetchMock);
+-    vi.stubGlobal('window', {
+-      electronAPI: {
+-        emit: vi.fn(),
+-        on: vi.fn(),
+-      },
+-    });
+-
+-    await submitFeedbackReport({
+-      collectDbDiagnostics: {
+-        routeAtOpen: '#/conversation/conv-1',
+-        routeAtSubmit: '#/conversation/conv-1',
+-        selectedModule: 'conversation-session',
+-        explicitContext: {
+-          conversationId: 'conv-1',
+-        },
+-      },
+-      collectLogs: false,
+-      description: 'Conversation stuck',
+-      module: 'conversation-session',
+-      moduleLabel: 'Conversation & Sessions',
+-    });
+-
+-    expect(fetchMock).toHaveBeenCalledOnce();
+-    const [path, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+-    expect(path).toContain('/api/system/diagnostics/feedback-report?');
+-    expect(path).toContain('route_at_open=%23%2Fconversation%2Fconv-1');
+-    expect(path).toContain('route_at_submit=%23%2Fconversation%2Fconv-1');
+-    expect(path).toContain('selected_module=conversation-session');
+-    expect(path).toContain('conversation_id=conv-1');
+-    expect(options.method).toBe('GET');
+-    expect(sentryMocks.captureEvent).toHaveBeenCalledWith(
+-      expect.objectContaining({
+-        extra: {
+-          description: 'Conversation stuck',
+-        },
+-      }),
+-      {
+-        attachments: [
+-          expect.objectContaining({
+-            filename: expect.stringMatching(/^db-diagnostics\.json(?:\.gz)?$/),
+-            data: expect.any(Uint8Array),
+-            contentType: expect.stringMatching(/^application\/(?:gzip|json)$/),
+-          }),
+-        ],
+-      }
+-    );
+-  });
+-
+-  it('continues without db diagnostics when collection fails', async () => {
+-    const fetchMock = vi.fn(async () => {
+-      throw new Error('db locked');
+-    });
+-    vi.stubGlobal('fetch', fetchMock);
+-    vi.stubGlobal('window', {
+-      electronAPI: {
+-        emit: vi.fn(),
+-        on: vi.fn(),
+-      },
+-    });
+-
+-    await submitFeedbackReport({
+-      collectDbDiagnostics: {
+-        routeAtOpen: '#/conversation/conv-1',
+-        selectedModule: 'conversation-session',
+-      },
+-      collectLogs: false,
+-      description: 'Conversation stuck',
+-      module: 'conversation-session',
+-      moduleLabel: 'Conversation & Sessions',
+-    });
+-
+-    expect(fetchMock).toHaveBeenCalledOnce();
+-    expect(sentryMocks.captureEvent).toHaveBeenCalledWith(
+-      expect.objectContaining({
+-        extra: {
+-          description: 'Conversation stuck',
+-        },
+-      }),
+-      { attachments: [] }
+-    );
+-  });
+-
+-  it('flushes when requested', async () => {
+-    await submitFeedbackReport({
+-      collectLogs: false,
+-      description: 'Flush me',
+-      flushTimeoutMs: 2000,
+-      module: 'installation-integrity',
+-      moduleLabel: 'AionUi installation is incomplete',
+-    });
+-
+-    expect(sentryMocks.captureEvent).toHaveBeenCalledOnce();
+-    expect(sentryMocks.getClient).toHaveBeenCalledOnce();
+-    expect(sentryMocks.flush).toHaveBeenCalledWith(2000);
+-  });
+-
+-  it('rejects when requested flush does not complete', async () => {
+-    sentryMocks.flush.mockResolvedValue(false);
+-    const logFeedbackEvent = vi.fn();
+-    vi.stubGlobal('window', {
+-      electronAPI: {
+-        logFeedbackEvent,
+-      },
+-    });
+-
+-    await expect(
+-      submitFeedbackReport({
+-        collectLogs: false,
+-        description: 'Flush me',
+-        flushTimeoutMs: 2000,
+-        module: 'installation-integrity',
+-        moduleLabel: 'AionUi installation is incomplete',
+-      })
+-    ).rejects.toThrow('Failed to flush feedback report (event-id)');
+-    expect(logFeedbackEvent).toHaveBeenCalledOnce();
+-    expect(logFeedbackEvent).toHaveBeenCalledWith(
+-      expect.objectContaining({
+-        level: 'error',
+-        message: 'failed',
+-      })
+-    );
+-  });
+-
+-  it('rejects when requested flush has no initialized Sentry client', async () => {
+-    sentryMocks.getClient.mockReturnValue(undefined);
++afterEach(() => vi.unstubAllGlobals());
+ 
++describe('offline probe feedback boundary', () => {
++  it('rejects telemetry before collecting diagnostics or accessing the network', async () => {
++    const network = vi.fn();
++    const collectFeedbackLogs = vi.fn();
++    vi.stubGlobal('fetch', network);
++    vi.stubGlobal('window', { electronAPI: { collectFeedbackLogs } });
+     await expect(
+       submitFeedbackReport({
+-        collectLogs: false,
+-        description: 'Flush me',
+-        flushTimeoutMs: 2000,
+-        module: 'installation-integrity',
+-        moduleLabel: 'AionUi installation is incomplete',
++        description: 'probe',
++        module: 'conversation',
++        moduleLabel: 'conversation',
++        collectLogs: true,
++        collectDbDiagnostics: { selectedModule: 'conversation' },
+       })
+-    ).rejects.toThrow('Sentry is not initialized');
++    ).rejects.toThrow('HOST_TELEMETRY_DISABLED');
++    expect(network).not.toHaveBeenCalled();
++    expect(collectFeedbackLogs).not.toHaveBeenCalled();
+   });
+ });
+diff --git a/tests/unit/previews/MarkdownViewer.dom.test.tsx b/tests/unit/previews/MarkdownViewer.dom.test.tsx
+index 98d53d5..bf01717 100644
+--- a/tests/unit/previews/MarkdownViewer.dom.test.tsx
++++ b/tests/unit/previews/MarkdownViewer.dom.test.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { beforeEach, describe, it, expect, vi } from 'vitest';
+@@ -253,9 +254,10 @@ describe('MarkdownViewer', () => {
+     expect(container.querySelector('b')?.textContent).toBe('bold');
+   });
+ 
+-  it('renders math via KaTeX in preview mode', () => {
++  it('preserves formula source when font assets are not admitted', () => {
+     const { container } = render(<MarkdownViewer content='inline $x + y = z$ done' />);
+-    expect(container.querySelectorAll('.katex')).toHaveLength(1);
++    expect(container.querySelectorAll('.katex')).toHaveLength(0);
++    expect(container.textContent).toContain('$x + y = z$');
+   });
+ 
+   it('continues rendering local image markdown inline', async () => {
+diff --git a/tests/unit/renderer/AcpModelSelector.dom.test.tsx b/tests/unit/renderer/AcpModelSelector.dom.test.tsx
+index e1e26e9..e34ddcb 100644
+--- a/tests/unit/renderer/AcpModelSelector.dom.test.tsx
++++ b/tests/unit/renderer/AcpModelSelector.dom.test.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+@@ -381,7 +382,7 @@ describe('AcpModelSelector runtime options', () => {
+   });
+ 
+   it('sets thought level through the existing config option setter', async () => {
+-    const setConfigOption = vi.fn().mockResolvedValue(undefined);
++    const setConfigOption = vi.fn().mockResolvedValue([{ id: 'thought_level', current_value: 'low' }]);
+     useAcpModelInfoMock.mockReturnValue(makeResult({ setConfigOption }));
+ 
+     render(<AcpModelSelector conversation_id='conversation-1' backend='codex' />);
+diff --git a/tests/unit/renderer/SpeechInputButton.dom.test.tsx b/tests/unit/renderer/SpeechInputButton.dom.test.tsx
+index afb8c82..63707a1 100644
+--- a/tests/unit/renderer/SpeechInputButton.dom.test.tsx
++++ b/tests/unit/renderer/SpeechInputButton.dom.test.tsx
+@@ -2,120 +2,19 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+-
+-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
++import { fireEvent, render } from '@testing-library/react';
+ import React from 'react';
+-import { beforeEach, describe, expect, it, vi } from 'vitest';
+-
+-const mocks = vi.hoisted(() => ({
+-  startRecording: vi.fn(() => Promise.resolve()),
+-  stopRecording: vi.fn(),
+-  status: 'idle' as 'idle' | 'recording' | 'transcribing',
+-}));
+-
+-vi.mock('@/renderer/services/clientBusinessSettings', () => ({
+-  getClientBusinessSetting: vi.fn(() => Promise.resolve({ enabled: true })),
+-}));
+-
+-vi.mock('@/renderer/services/SpeechToTextService', () => ({
+-  SPEECH_TO_TEXT_CONFIG_CHANGED_EVENT: 'speech-to-text-config-changed',
+-}));
+-
+-vi.mock('@/renderer/hooks/system/useSpeechInput', () => ({
+-  getSpeechInputErrorMessageKey: vi.fn(),
+-  useSpeechInput: () => ({
+-    availability: 'record',
+-    clearError: vi.fn(),
+-    errorCode: null,
+-    errorMessage: null,
+-    recordingDurationMs: 0,
+-    recordingLevels: [],
+-    startRecording: mocks.startRecording,
+-    status: mocks.status,
+-    stopRecording: mocks.stopRecording,
+-    transcribeFile: vi.fn(),
+-  }),
+-}));
+-
+-vi.mock('react-i18next', () => ({
+-  useTranslation: () => ({
+-    t: (key: string, options?: { shortcut?: string }) =>
+-      key === 'conversation.chat.speech.recordTooltipWithShortcut'
+-        ? '语音输入 cmd+M'
+-        : options?.shortcut
+-          ? `${key}:${options.shortcut}`
+-          : key,
+-  }),
+-}));
+-
+-vi.mock('@arco-design/web-react', () => ({
+-  Button: ({ icon, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon?: React.ReactNode }) => (
+-    <button {...props}>{icon}</button>
+-  ),
+-  Tooltip: ({ children }: { children: React.ReactNode }) => <span data-testid='speech-tooltip'>{children}</span>,
+-  Message: { warning: vi.fn(), error: vi.fn() },
+-}));
+-
++import { describe, expect, it, vi } from 'vitest';
+ import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
+ 
+-describe('SpeechInputButton', () => {
+-  beforeEach(() => {
+-    vi.clearAllMocks();
+-    mocks.status = 'idle';
+-  });
+-
+-  it('shows the shortcut and toggles recording on consecutive presses', async () => {
+-    const view = render(<SpeechInputButton onTranscript={vi.fn()} />);
+-
+-    const button = await screen.findByRole('button');
+-    expect(button.getAttribute('aria-label')).toContain('M');
+-    fireEvent.mouseEnter(view.container.querySelector('.speech-input-control') as Element);
+-
+-    // The window keydown listener is attached in an effect gated on async
+-    // config loading, so a single fire can race the attachment on slow CI
+-    // runners. Retry the press until it is observed; presses before the
+-    // listener exists contribute zero calls, so the final count stays exact.
+-    await waitFor(() => {
+-      fireEvent.keyDown(window, { code: 'KeyM', metaKey: true });
+-      expect(mocks.startRecording).toHaveBeenCalled();
+-    });
+-    expect(mocks.startRecording).toHaveBeenCalledTimes(1);
+-
+-    mocks.status = 'recording';
+-    view.rerender(<SpeechInputButton onTranscript={vi.fn()} />);
++describe('offline probe voice boundary', () => {
++  it('does not mount a recorder or register voice shortcuts', () => {
++    const transcript = vi.fn();
++    const { container } = render(<SpeechInputButton onTranscript={transcript} />);
+     fireEvent.keyDown(window, { code: 'KeyM', metaKey: true });
+-    await waitFor(() => expect(mocks.stopRecording).toHaveBeenCalledTimes(1));
+-  });
+-
+-  it('only triggers the active voice input when several send boxes are mounted', async () => {
+-    const view = render(
+-      <>
+-        <SpeechInputButton onTranscript={vi.fn()} />
+-        <SpeechInputButton onTranscript={vi.fn()} />
+-      </>
+-    );
+-    await screen.findAllByRole('button');
+-    const controls = view.container.querySelectorAll('.speech-input-control');
+-    fireEvent.mouseEnter(controls[1]);
+-
+-    // Same listener-attachment race as above: retry the press until observed.
+-    // Only the hovered instance passes the ownership check, so the final
+-    // count still proves exactly one recording started.
+-    await waitFor(() => {
+-      fireEvent.keyDown(window, { code: 'KeyM', metaKey: true });
+-      expect(mocks.startRecording).toHaveBeenCalled();
+-    });
+-    expect(mocks.startRecording).toHaveBeenCalledTimes(1);
+-  });
+-
+-  it('shows only the spinner button while transcribing', async () => {
+-    mocks.status = 'transcribing';
+-    const { container } = render(<SpeechInputButton onTranscript={vi.fn()} />);
+-    const button = await screen.findByRole('button');
+-
+-    expect(button).toBeDisabled();
+-    expect(container.querySelector('.speech-input-feedback')).toBeNull();
+-    expect(screen.queryByTestId('speech-tooltip')).toBeNull();
++    expect(container).toBeEmptyDOMElement();
++    expect(transcript).not.toHaveBeenCalled();
+   });
+ });
+diff --git a/tests/unit/renderer/conversation/AcpSendBox.dom.test.tsx b/tests/unit/renderer/conversation/AcpSendBox.dom.test.tsx
+index 6970bfd..df65d9e 100644
+--- a/tests/unit/renderer/conversation/AcpSendBox.dom.test.tsx
++++ b/tests/unit/renderer/conversation/AcpSendBox.dom.test.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { act, render, screen, waitFor } from '@testing-library/react';
+@@ -214,10 +215,11 @@ vi.mock('@/renderer/hooks/chat/useSendBoxDraft', () => ({
+   getSendBoxDraftHook: () => () => ({
+     data: {
+       atPath: [],
+-      uploadFile: [],
++      uploadFile: draftAttachments.uploads,
+       content: draftContentRef.current,
+     },
+     mutate: draftMutateMock,
++    saveStatus: draftAttachments.status,
+   }),
+ }));
+ vi.mock('@/renderer/hooks/chat/useSendBoxFiles', () => ({
+@@ -225,7 +227,7 @@ vi.mock('@/renderer/hooks/chat/useSendBoxFiles', () => ({
+     handleFilesAdded: vi.fn(),
+     clearFiles: clearFilesMock,
+   }),
+-  createSetUploadFile: () => vi.fn(),
++  createSetUploadFile: () => draftAttachments.setUploads,
+ }));
+ vi.mock('@/renderer/hooks/chat/useAutoTitle', () => ({
+   useAutoTitle: () => ({
+@@ -245,7 +247,11 @@ vi.mock('@/renderer/hooks/file/useOpenFileSelector', () => ({
+   }),
+ }));
+ vi.mock('@/renderer/hooks/ui/useLatestRef', () => ({
+-  useLatestRef: <T,>(value: T) => ({ current: value }),
++  useLatestRef: <T,>(value: T) => {
++    const ref = React.useRef(value);
++    ref.current = value;
++    return ref;
++  },
+ }));
+ vi.mock('@/renderer/pages/conversation/Messages/hooks', () => ({
+   useAddOrUpdateMessage: () => addOrUpdateMessageMock,
+@@ -284,6 +290,9 @@ vi.mock('@/renderer/pages/team/hooks/TeamPermissionContext', () => ({
+ }));
+ vi.mock('@/renderer/services/FileService', () => ({
+   allSupportedExts: [],
++  getFileExtension: () => '',
++  imageExts: [],
++  audioExts: [],
+ }));
+ vi.mock('@/renderer/utils/emitter', () => ({
+   emitter: {
+@@ -324,6 +333,12 @@ vi.mock('@arco-design/web-react', () => ({
+   ),
+ }));
+ 
++const draftAttachments = vi.hoisted(() => ({
++  uploads: [] as string[],
++  setUploads: vi.fn(),
++  status: 'saved' as 'saved' | 'unsaved',
++}));
++
+ const makeMessageState = (): UseAcpMessageReturn => ({
+   thought: { subject: '', description: '' },
+   setThought: vi.fn(),
+@@ -343,6 +358,8 @@ const makeMessageState = (): UseAcpMessageReturn => ({
+ describe('AcpSendBox', () => {
+   beforeEach(() => {
+     vi.clearAllMocks();
++    draftAttachments.uploads = [];
++    draftAttachments.status = 'saved';
+     isMobileMock.current = false;
+     mobileActionSheetEntries.current = [];
+     runtimeViewMock.hydrated = true;
+@@ -363,6 +380,99 @@ describe('AcpSendBox', () => {
+     });
+   });
+ 
++  it('shows an explicit unsaved warning when native draft persistence failed', () => {
++    draftAttachments.status = 'unsaved';
++    render(<AcpSendBox conversation_id='conv-unsaved' backend='dsh' messageState={makeMessageState()} />);
++    expect(screen.getByTestId('draft-unsaved')).toHaveTextContent('messages.draftUnsaved');
++  });
++
++  it('keeps attachments added while an older submission is awaiting acceptance', async () => {
++    let finish!: (result: unknown) => void;
++    sendMessageInvokeMock.mockReturnValue(
++      new Promise((resolve) => {
++        finish = resolve;
++      })
++    );
++    draftAttachments.uploads = ['probe-upload:old'];
++    const props = { conversation_id: 'conv-attachments', backend: 'dsh', messageState: makeMessageState() };
++    const view = render(<AcpSendBox {...props} />);
++    await act(async () => {
++      screen.getByRole('button', { name: 'send' }).click();
++    });
++    draftAttachments.uploads = ['probe-upload:old', 'probe-upload:new'];
++    view.rerender(<AcpSendBox {...props} />);
++    await act(async () => finish({ msg_id: 'accepted', turn_id: 'turn', runtime: { state: 'idle' } }));
++    expect(clearFilesMock).not.toHaveBeenCalled();
++    expect(draftAttachments.setUploads).toHaveBeenCalledWith(['probe-upload:new']);
++  });
++
++  it('sends ordinary and queued commands through the actual HTTP/native mapper with stable submission keys', async () => {
++    const realWindow = window;
++    const bodies: Record<string, unknown>[] = [];
++    const nativeWindow = new Proxy(realWindow, {
++      get(target, key) {
++        if (key === 'location') return { origin: 'https://appassets.androidplatform.net' };
++        return Reflect.get(target, key);
++      },
++    });
++    vi.stubGlobal('window', nativeWindow);
++    const transport =
++      await vi.importActual<typeof import('@/common/host/hostTransport')>('@/common/host/hostTransport');
++    const actual = await vi.importActual<typeof import('@/common/adapter/ipcBridge')>('@/common/adapter/ipcBridge');
++    const host = {
++      postMessage(raw: string) {
++        const request = JSON.parse(raw);
++        let body: unknown = {};
++        if (request.action === 'host.handshake') body = { documentId: 'mapper-document', protocolVersion: 1 };
++        if (request.action === 'messages.send') {
++          bodies.push(request.payload.body);
++          if (!request.payload.body.loading_id) throw new Error('INVALID_REQUEST');
++          body = {
++            success: true,
++            data: { msg_id: 'native-msg', turn_id: 'native-turn', runtime: { state: 'idle', can_send_message: true } },
++          };
++        }
++        queueMicrotask(() =>
++          host.onmessage?.({
++            data: JSON.stringify({
++              requestId: request.requestId,
++              documentId: 'mapper-document',
++              ok: true,
++              status: 200,
++              body,
++            }),
++          } as MessageEvent<string>)
++        );
++      },
++      onmessage: undefined as ((event: MessageEvent<string>) => void) | undefined,
++    };
++    window.RmAgentHost = host;
++    try {
++      await transport.initializeHost();
++      sendMessageInvokeMock.mockImplementation(actual.conversation.sendMessage.invoke);
++      render(<AcpSendBox conversation_id='conv-probe-1' backend='dsh' messageState={makeMessageState()} />);
++      await act(async () => {
++        screen.getByRole('button', { name: 'send' }).click();
++      });
++      await waitFor(() => expect(bodies).toHaveLength(1));
++      expect(bodies[0]).toMatchObject({ content: 'Hello', files: [], loading_id: expect.any(String) });
++      const execute = useConversationCommandQueueSpy.mock.calls.at(-1)?.[0].onExecute;
++      await act(async () => {
++        await execute({ id: 'queue-stable-key', input: '队列中文', files: [] });
++      });
++      expect(bodies[1]).toMatchObject({ content: '队列中文', loading_id: 'queue-stable-key' });
++      sendMessageInvokeMock.mockRejectedValueOnce(new Error('HOST_TIMEOUT: result unknown'));
++      await expect(execute({ input: '结果未知重试', files: [] })).rejects.toThrow('HOST_TIMEOUT');
++      const failedKey = sendMessageInvokeMock.mock.calls.at(-1)?.[0].loading_id;
++      await act(async () => {
++        await execute({ input: '结果未知重试', files: [] });
++      });
++      expect(bodies[2]).toMatchObject({ content: '结果未知重试', loading_id: failedKey });
++    } finally {
++      vi.unstubAllGlobals();
++    }
++  });
++
+   it('resets ACP loading state when sendMessage fails before any stream error arrives', async () => {
+     sendMessageInvokeMock.mockRejectedValue(
+       new BackendHttpError({
+diff --git a/tests/unit/renderer/conversation/PermissionMessages.dom.test.tsx b/tests/unit/renderer/conversation/PermissionMessages.dom.test.tsx
+index 3245824..0164478 100644
+--- a/tests/unit/renderer/conversation/PermissionMessages.dom.test.tsx
++++ b/tests/unit/renderer/conversation/PermissionMessages.dom.test.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import React from 'react';
+@@ -28,12 +29,12 @@ vi.mock('@/common', () => ({
+   },
+ }));
+ 
+-vi.mock('@/common/adapter/ipcBridge', () => ({
+-  conversation: {
+-    confirmMessage: {
+-      invoke: acpInvoke,
+-    },
+-  },
++vi.mock('@/renderer/host/usePendingApproval', () => ({
++  usePendingApproval: (_conversation: string, requestId?: string) =>
++    requestId
++      ? { options: [{ option_id: 'allow-once-id' }, { option_id: 'allow-always-id' }, { option_id: 'reject-once-id' }] }
++      : undefined,
++  submitPendingApproval: acpInvoke,
+ }));
+ 
+ vi.mock('react-i18next', () => ({
+@@ -70,6 +71,8 @@ const makeAcpMessage = (): IMessageAcpPermission => ({
+   position: 'left',
+   content: {
+     session_id: 'session-1',
++    request_id: 'request-1',
++    epoch: 1,
+     tool_call: {
+       tool_call_id: 'tool-call-1',
+       title: 'Edit package.json',
+@@ -138,16 +141,11 @@ describe('permission message adapters', () => {
+     fireEvent.click(screen.getByTestId('message-acp-permission-option-allow-once-id'));
+ 
+     expect(acpInvoke).toHaveBeenCalledTimes(1);
+-    expect(acpInvoke).toHaveBeenCalledWith({
+-      confirm_key: 'allow-once-id',
+-      msg_id: 'acp-message-1',
+-      conversation_id: 'conversation-1',
+-      call_id: 'tool-call-1',
+-    });
++    expect(acpInvoke).toHaveBeenCalledWith('conversation-1', 'request-1', 1, 'acp-message-1', 'allow-once-id');
+     expect(await screen.findByTestId('message-acp-permission-status')).toBeInTheDocument();
+   });
+ 
+-  it('keeps ACP fallbacks actionable when optional display fields are empty', async () => {
++  it('does not invent actionable ACP options when original option ids are empty', () => {
+     const message = makeAcpMessage();
+     message.content.tool_call = {
+       tool_call_id: '',
+@@ -156,17 +154,19 @@ describe('permission message adapters', () => {
+     };
+     message.content.options = [{ option_id: '', name: '', kind: 'reject_always' }];
+     render(<MessageAcpPermission message={message} />);
+-
+     expect(screen.getByText('Fetch package metadata')).toBeInTheDocument();
+-    fireEvent.click(screen.getByTestId('message-acp-permission-option-option_0'));
++    expect(screen.queryByTestId('message-acp-permission-option-option_0')).not.toBeInTheDocument();
++    expect(acpInvoke).not.toHaveBeenCalled();
++  });
+ 
+-    expect(acpInvoke).toHaveBeenCalledWith({
+-      confirm_key: 'option_0',
+-      msg_id: 'acp-message-1',
+-      conversation_id: 'conversation-1',
+-      call_id: 'acp-message-1',
+-    });
+-    expect(await screen.findByTestId('message-acp-permission-status')).toBeInTheDocument();
++  it('keeps old cards without request_id read-only instead of falling back to tool id', () => {
++    const message = makeAcpMessage();
++    message.content.request_id = undefined;
++    render(<MessageAcpPermission message={message} />);
++    const option = screen.getByTestId('message-acp-permission-option-allow-once-id');
++    expect(option).toBeDisabled();
++    fireEvent.click(option);
++    expect(acpInvoke).not.toHaveBeenCalled();
+   });
+ 
+   it('shows the title once and no detail block when no raw command is available', () => {
+@@ -343,12 +343,11 @@ describe('permission message adapters', () => {
+     expect(screen.queryByTestId('message-acp-permission-options')).not.toBeInTheDocument();
+   });
+ 
+-  it('renders a localized ACP fallback for an option without display metadata', () => {
++  it('does not invent an option for malformed ACP metadata', () => {
+     const message = makeAcpMessage();
+     message.content.options = [undefined] as unknown as IMessageAcpPermission['content']['options'];
+     render(<MessageAcpPermission message={message} />);
+-
+-    expect(screen.getByText('messages.option 1')).toBeInTheDocument();
+-    expect(screen.getByTestId('message-acp-permission-option-option_0')).toBeInTheDocument();
++    expect(screen.getByText('messages.noOptionsAvailable')).toBeInTheDocument();
++    expect(screen.queryByTestId('message-acp-permission-option-option_0')).not.toBeInTheDocument();
+   });
+ });
+diff --git a/tests/unit/renderer/conversation/sendBoxActiveFocus.dom.test.tsx b/tests/unit/renderer/conversation/sendBoxActiveFocus.dom.test.tsx
+index 0c03428..82d3fd2 100644
+--- a/tests/unit/renderer/conversation/sendBoxActiveFocus.dom.test.tsx
++++ b/tests/unit/renderer/conversation/sendBoxActiveFocus.dom.test.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2026 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+@@ -281,6 +282,31 @@ describe('SendBox selection→focus downward effect', () => {
+     expect(textarea.selectionStart).toBe(2);
+   });
+ 
++  it('preserves typed text on send rejection instead of persisting an empty draft', async () => {
++    layoutState.isMobile = false;
++    const send = vi.fn().mockRejectedValue(new Error('offline'));
++    render(<SendBoxHarness active={true} initialValue='发送失败保留中文' onSend={send} />);
++    fireEvent.click(screen.getByTestId('sendbox-send-btn'));
++    await waitFor(() => expect(send).toHaveBeenCalledWith('发送失败保留中文'));
++    expect(screen.getByTestId('sendbox-input')).toHaveValue('发送失败保留中文');
++  });
++
++  it('does not clear newer text after an older send is acknowledged', async () => {
++    layoutState.isMobile = false;
++    let finish!: () => void;
++    const send = vi.fn(
++      () =>
++        new Promise<void>((resolve) => {
++          finish = resolve;
++        })
++    );
++    render(<SendBoxHarness active={true} initialValue='先发送' onSend={send} />);
++    fireEvent.click(screen.getByTestId('sendbox-send-btn'));
++    fireEvent.change(screen.getByTestId('sendbox-input'), { target: { value: '发送期间的新草稿' } });
++    await act(async () => finish());
++    expect(screen.getByTestId('sendbox-input')).toHaveValue('发送期间的新草稿');
++  });
++
+   it('never focuses while active stays false', async () => {
+     layoutState.isMobile = false;
+     render(
+diff --git a/tests/unit/renderer/layout/LayoutSiderBrandHome.dom.test.tsx b/tests/unit/renderer/layout/LayoutSiderBrandHome.dom.test.tsx
+index c679385..1cbb2a2 100644
+--- a/tests/unit/renderer/layout/LayoutSiderBrandHome.dom.test.tsx
++++ b/tests/unit/renderer/layout/LayoutSiderBrandHome.dom.test.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+@@ -159,7 +160,7 @@ describe('Layout sider brand Home button', () => {
+ 
+     // No actionable role/label in chat routes.
+     expect(screen.queryByLabelText(BACK_KEY)).toBeNull();
+-    const wordmark = screen.getByText('AionUi');
++    const wordmark = screen.getByText('RmAgentMa');
+     fireEvent.click(wordmark);
+     expect(navigate).not.toHaveBeenCalled();
+   });
+@@ -168,7 +169,7 @@ describe('Layout sider brand Home button', () => {
+     currentPathname = '/conversation/xyz';
+     renderLayout();
+ 
+-    fireEvent.click(screen.getByText('AionUi'));
++    fireEvent.click(screen.getByText('RmAgentMa'));
+     expect(navigate).not.toHaveBeenCalled();
+   });
+ 
+@@ -201,8 +202,7 @@ describe('Layout sider brand Home button', () => {
+     sessionStorage.setItem('aion:last-non-settings-path', '/conversation/abc');
+     const { container } = renderLayout();
+ 
+-    // The icon is the SVG-wrapping div (bg-black), separate from the wordmark.
+-    const icon = container.querySelector('.bg-black') as HTMLElement;
++    const icon = container.querySelector('.layout-sider-header .bg-fill-2') as HTMLElement;
+     expect(icon).toBeTruthy();
+     for (let i = 0; i < 4; i++) fireEvent.click(icon);
+     expect(openDevTools).toHaveBeenCalled();
+diff --git a/tests/unit/renderer/markdownPreviewPipeline.dom.test.tsx b/tests/unit/renderer/markdownPreviewPipeline.dom.test.tsx
+index 7a7fd95..26e6a9f 100644
+--- a/tests/unit/renderer/markdownPreviewPipeline.dom.test.tsx
++++ b/tests/unit/renderer/markdownPreviewPipeline.dom.test.tsx
+@@ -1,3 +1,4 @@
++/** Modified by rmAgentMa contributors for the renderer probe. */
+ import {
+   MARKDOWN_REMARK_PLUGINS,
+   SANITIZED_HTML_REHYPE_PLUGINS,
+@@ -7,10 +8,6 @@ import React from 'react';
+ import ReactMarkdown from 'react-markdown';
+ import { describe, expect, it } from 'vitest';
+ 
+-// Exercises the EXACT plugin pipeline the preview panel (MarkdownViewer) uses,
+-// imported from the shared module so removing rehype-sanitize or breaking the
+-// plugin order fails this test. Guards the two things PR #4079 got wrong:
+-// (1) math must render, (2) raw HTML must be sanitized.
+ function renderPreviewMarkdown(md: string) {
+   const { container } = render(
+     <ReactMarkdown remarkPlugins={MARKDOWN_REMARK_PLUGINS} rehypePlugins={SANITIZED_HTML_REHYPE_PLUGINS}>
+@@ -20,22 +17,18 @@ function renderPreviewMarkdown(md: string) {
+   return container;
+ }
+ 
+-describe('preview markdown pipeline — math rendering', () => {
+-  it('renders inline math as a single KaTeX node', () => {
++describe('preview markdown pipeline — formula source fallback', () => {
++  it('preserves inline formula source without depending on unadmitted fonts', () => {
+     const c = renderPreviewMarkdown('inline $x + y = z$ here');
+-    expect(c.querySelectorAll('.katex')).toHaveLength(1);
+-    // No raw remark-math marker nodes should be left behind (would mean KaTeX did not run).
+-    expect(c.querySelectorAll('code.math-inline, code.math-display')).toHaveLength(0);
++    expect(c.textContent).toContain('$x + y = z$');
++    expect(c.querySelectorAll('.katex')).toHaveLength(0);
+   });
+ 
+-  it('renders a multi-line $$ block as a single KaTeX node (the core PR fix)', () => {
+-    const c = renderPreviewMarkdown('$$\n\\begin{aligned}\nf(x) &= a \\\\\ng(x) &= b\n\\end{aligned}\n$$');
+-    expect(c.querySelectorAll('.katex')).toHaveLength(1);
+-  });
+-
+-  it('renders inline and block math together without duplication', () => {
+-    const c = renderPreviewMarkdown('inline $a^2$ and\n\n$$b^2 + c^2$$');
+-    expect(c.querySelectorAll('.katex')).toHaveLength(2);
++  it('preserves block formula delimiters and source', () => {
++    const c = renderPreviewMarkdown('$$\nx^2 + y^2\n$$');
++    expect(c.textContent).toContain('x^2 + y^2');
++    expect(c.textContent).toContain('$$');
++    expect(c.querySelectorAll('.katex')).toHaveLength(0);
+   });
+ });
+ 
+diff --git a/tests/unit/renderer/mermaidBlockPanZoom.dom.test.tsx b/tests/unit/renderer/mermaidBlockPanZoom.dom.test.tsx
+index 6671730..46e0b3a 100644
+--- a/tests/unit/renderer/mermaidBlockPanZoom.dom.test.tsx
++++ b/tests/unit/renderer/mermaidBlockPanZoom.dom.test.tsx
+@@ -2,163 +2,28 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+-
+-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+-import { fireEvent, render, screen } from '@testing-library/react';
++import { describe, expect, it, vi } from 'vitest';
++import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+ import React from 'react';
++import MermaidBlock from '@/renderer/components/Markdown/MermaidBlock';
+ 
+-const renderMock = vi.hoisted(() => vi.fn());
+-
+-vi.mock('mermaid', () => ({
+-  default: { initialize: vi.fn(), render: renderMock },
+-}));
+-
+-vi.mock('@/renderer/pages/conversation/Preview', () => ({
+-  usePreviewContext: () => ({ openPreview: vi.fn() }),
+-}));
+-
+-vi.mock('react-i18next', () => ({
+-  useTranslation: () => ({ t: (key: string) => key }),
+-}));
+-
+-vi.mock('react-syntax-highlighter', () => ({
+-  default: ({ children }: { children?: React.ReactNode }) => <pre data-testid='mermaid-source'>{children}</pre>,
+-}));
+-vi.mock('react-syntax-highlighter/dist/esm/styles/hljs', () => ({ vs: {}, vs2015: {} }));
+-
+-vi.mock('@arco-design/web-react', () => ({
++const { copy } = vi.hoisted(() => ({ copy: vi.fn().mockResolvedValue(undefined) }));
++vi.mock('@/renderer/utils/ui/clipboard', () => ({ copyText: copy }));
++vi.mock('@arco-design/web-react', async (original) => ({
++  ...(await original<typeof import('@arco-design/web-react')>()),
+   Message: { success: vi.fn(), error: vi.fn() },
+ }));
+-
+-vi.mock('@/renderer/utils/ui/clipboard', () => ({
+-  copyText: vi.fn().mockResolvedValue(undefined),
+-}));
+-
+-// icon-park icons render as clickable spans that forward data-testid/title/onClick.
+-const makeIcon = vi.hoisted(
+-  () =>
+-    (name: string) =>
+-    ({
+-      ['data-testid']: testId,
+-      title,
+-      onClick,
+-    }: {
+-      ['data-testid']?: string;
+-      title?: string;
+-      onClick?: () => void;
+-    }) => <span data-icon={name} data-testid={testId} title={title} onClick={onClick} />
+-);
+-
+-vi.mock('@icon-park/react', () => ({
+-  Copy: makeIcon('copy'),
+-  PreviewOpen: makeIcon('preview-open'),
+-  ZoomIn: makeIcon('zoom-in'),
+-  ZoomOut: makeIcon('zoom-out'),
+-  Refresh: makeIcon('refresh'),
+-  Close: makeIcon('close'),
+-}));
+-
+-import MermaidBlock from '@/renderer/components/Markdown/MermaidBlock';
+-
+-// jsdom lacks the pointer capture API used by the drag handlers.
+-beforeAll(() => {
+-  Object.defineProperty(Element.prototype, 'setPointerCapture', {
+-    value: vi.fn(),
+-    configurable: true,
+-    writable: true,
+-  });
+-  Object.defineProperty(Element.prototype, 'hasPointerCapture', {
+-    value: vi.fn(() => false),
+-    configurable: true,
+-    writable: true,
+-  });
+-  Object.defineProperty(Element.prototype, 'releasePointerCapture', {
+-    value: vi.fn(),
+-    configurable: true,
+-    writable: true,
+-  });
+-});
+-
+-describe('MermaidBlock pan/zoom', () => {
+-  beforeEach(() => {
+-    renderMock.mockReset().mockResolvedValue({ svg: '<svg width="120" height="80"></svg>' });
+-    document.documentElement.setAttribute('data-theme', 'light');
+-  });
+-
+-  it('renders a static diagram without zoom controls by default', async () => {
+-    render(<MermaidBlock code={'graph TD; A-->B'} />);
+-    const diagram = await screen.findByTestId('mermaid-diagram');
+-    // Default path scrolls natively and exposes no zoom controls.
+-    expect(diagram.style.overflowX).toBe('auto');
+-    expect(screen.queryByTestId('mermaid-zoom-in')).toBeNull();
+-    expect(screen.queryByTestId('mermaid-zoom-reset')).toBeNull();
+-  });
+-
+-  it('shows zoom controls and applies/resets scale when enablePanZoom is set', async () => {
+-    render(<MermaidBlock code={'graph TD; A-->B'} enablePanZoom />);
+-    const diagram = await screen.findByTestId('mermaid-diagram');
+-    // Pan viewport clips (hidden overflow) instead of native scroll.
+-    expect(diagram.style.overflow).toBe('hidden');
+-
+-    const inner = diagram.firstElementChild as HTMLElement;
+-    expect(inner.style.transform).toContain('scale(1)');
+-
+-    fireEvent.click(screen.getByTestId('mermaid-zoom-in'));
+-    expect(inner.style.transform).toContain('scale(1.25)');
+-
+-    fireEvent.click(screen.getByTestId('mermaid-zoom-out'));
+-    expect(inner.style.transform).toContain('scale(1)');
+-
+-    fireEvent.click(screen.getByTestId('mermaid-zoom-in'));
+-    fireEvent.click(screen.getByTestId('mermaid-zoom-reset'));
+-    expect(inner.style.transform).toContain('translate(0px, 0px) scale(1)');
+-  });
+-
+-  it('caps narrow diagrams at their natural width so they render 1:1', async () => {
+-    renderMock.mockResolvedValue({ svg: '<svg viewBox="0 0 100 200" width="100%"></svg>' });
+-    render(<MermaidBlock code={'graph TD; A-->B'} />);
+-    const diagram = await screen.findByTestId('mermaid-diagram');
+-    expect(diagram.querySelector('svg')?.getAttribute('style')).toContain('max-width: min(100%, 100px)');
+-  });
+-
+-  it('caps wide diagrams at the container width', async () => {
+-    renderMock.mockResolvedValue({ svg: '<svg viewBox="0 0 2000 100" width="100%"></svg>' });
+-    render(<MermaidBlock code={'graph TD; A-->B'} />);
+-    const diagram = await screen.findByTestId('mermaid-diagram');
+-    expect(diagram.querySelector('svg')?.getAttribute('style')).toContain('max-width: min(100%, 2000px)');
+-  });
+-
+-  it('opens the zoom overlay when the static diagram is clicked', async () => {
+-    render(<MermaidBlock code={'graph TD; A-->B'} />);
+-    const diagram = await screen.findByTestId('mermaid-diagram');
+-    fireEvent.click(diagram);
+-    expect(screen.getByTestId('diagram-zoom-overlay')).toBeInTheDocument();
+-  });
+-
+-  it('opens the zoom overlay on click without panning when drag-to-pan is enabled', async () => {
+-    render(<MermaidBlock code={'graph TD; A-->B'} enablePanZoom />);
+-    const diagram = await screen.findByTestId('mermaid-diagram');
+-
+-    fireEvent.pointerDown(diagram, { pointerId: 1, button: 0, clientX: 10, clientY: 10 });
+-    fireEvent.pointerMove(diagram, { pointerId: 1, clientX: 12, clientY: 11 });
+-    fireEvent.pointerUp(diagram, { pointerId: 1 });
+-
+-    const inner = diagram.firstElementChild as HTMLElement;
+-    expect(inner.style.transform).toContain('translate(0px, 0px) scale(1)');
+-    expect(screen.getByTestId('diagram-zoom-overlay')).toBeInTheDocument();
+-  });
+-
+-  it('pans instead of opening the overlay when the pointer drags past the threshold', async () => {
+-    render(<MermaidBlock code={'graph TD; A-->B'} enablePanZoom />);
+-    const diagram = await screen.findByTestId('mermaid-diagram');
+-
+-    fireEvent.pointerDown(diagram, { pointerId: 1, button: 0, clientX: 10, clientY: 10 });
+-    fireEvent.pointerMove(diagram, { pointerId: 1, clientX: 60, clientY: 40 });
+-    fireEvent.pointerUp(diagram, { pointerId: 1 });
+-
+-    const inner = diagram.firstElementChild as HTMLElement;
+-    expect(inner.style.transform).toContain('translate(50px, 30px)');
+-    expect(screen.queryByTestId('mermaid-zoom-overlay')).toBeNull();
++vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
++
++describe('Mermaid source fallback without optional font runtime', () => {
++  it('keeps diagram source readable and copyable without evaluating the diagram', async () => {
++    const code = 'graph TD; A["$$x^2$$"]-->B';
++    const { container } = render(<MermaidBlock code={code} enablePanZoom />);
++    expect(screen.getByTestId('mermaid-source')).toHaveTextContent(code);
++    expect(container.querySelector('svg')).toBeNull();
++    fireEvent.click(screen.getByRole('button', { name: 'common.copy' }));
++    await waitFor(() => expect(copy).toHaveBeenCalledWith(code));
+   });
+ });
+diff --git a/tests/unit/renderer/speechTestPanel.dom.test.tsx b/tests/unit/renderer/speechTestPanel.dom.test.tsx
+index 0787e82..a56fa5a 100644
+--- a/tests/unit/renderer/speechTestPanel.dom.test.tsx
++++ b/tests/unit/renderer/speechTestPanel.dom.test.tsx
+@@ -2,69 +2,28 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+-
+-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
++import { render } from '@testing-library/react';
+ import React from 'react';
+ import { describe, expect, it, vi } from 'vitest';
+-import type { SpeechToTextConfig } from '@/common/types/provider/speech';
+-
+-const speechSettingsMocks = vi.hoisted(() => ({
+-  setClientBusinessSetting: vi.fn(() => Promise.resolve()),
+-}));
+-
+-vi.mock('@/renderer/services/clientBusinessSettings', () => ({
+-  getClientBusinessSetting: vi.fn(),
+-  setClientBusinessSetting: speechSettingsMocks.setClientBusinessSetting,
+-  removeClientBusinessSetting: vi.fn(() => Promise.resolve()),
+-}));
+-
+-vi.mock('react-i18next', () => ({
+-  useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'en-US' } }),
+-}));
+-
+ import SpeechTestPanel from '@/renderer/components/settings/SettingsModal/contents/SystemModalContent/VoiceInputSection/SpeechTestPanel';
+ 
+-const makeConfig = (overrides?: Partial<SpeechToTextConfig>): SpeechToTextConfig => ({
+-  enabled: true,
+-  provider: 'openai',
+-  openai: { api_key: '', base_url: '', model: 'gpt-4o-transcribe', language: '' },
+-  ...overrides,
+-});
+-
+-describe('SpeechTestPanel', () => {
+-  it('shows validation error when api key is missing in official mode', async () => {
+-    render(<SpeechTestPanel config={makeConfig()} source='openai' />);
+-    fireEvent.click(screen.getByText('settings.speechToTextTest'));
+-    await waitFor(() => expect(screen.getByText('settings.speechToTextTestMissingKey')).toBeTruthy());
+-  });
+-
+-  it('shows validation error for invalid custom base_url', async () => {
+-    const config = makeConfig({
+-      openai: { api_key: '', base_url: 'not-a-url', model: 'm', language: '' },
+-    });
+-    render(<SpeechTestPanel config={config} source='custom' />);
+-    fireEvent.click(screen.getByText('settings.speechToTextTest'));
+-    await waitFor(() => expect(screen.getByText('settings.speechToTextBaseUrlInvalid')).toBeTruthy());
+-  });
+-
+-  it('shows validation error in custom mode when base_url is empty', async () => {
+-    const config = makeConfig({
+-      openai: { api_key: '', base_url: '', model: 'm', language: '' },
+-    });
+-    render(<SpeechTestPanel config={config} source='custom' />);
+-    fireEvent.click(screen.getByText('settings.speechToTextTest'));
+-    await waitFor(() => expect(screen.getByText('settings.speechToTextBaseUrlInvalid')).toBeTruthy());
+-  });
+-
+-  it('saves config before starting a test when validation passes', async () => {
+-    const config = makeConfig({
+-      openai: { api_key: 'sk-test', base_url: '', model: 'gpt-4o-transcribe', language: '' },
+-    });
+-    render(<SpeechTestPanel config={config} source='openai' />);
+-    fireEvent.click(screen.getByText('settings.speechToTextTest'));
+-    await waitFor(() =>
+-      expect(speechSettingsMocks.setClientBusinessSetting).toHaveBeenCalledWith('tools.speechToText', config)
++describe('offline probe speech settings boundary', () => {
++  it('does not expose an unenabled transcription test', () => {
++    const network = vi.spyOn(globalThis, 'fetch');
++    const { container } = render(
++      <SpeechTestPanel
++        config={{
++          enabled: true,
++          provider: 'openai',
++          openai: { api_key: '', base_url: '', model: 'not-enabled', language: '' },
++        }}
++        source='openai'
++      />
+     );
++    expect(container).toBeEmptyDOMElement();
++    expect(network).not.toHaveBeenCalled();
++    network.mockRestore();
+   });
+ });
+diff --git a/tests/unit/renderer/useAcpModelInfo.dom.test.ts b/tests/unit/renderer/useAcpModelInfo.dom.test.ts
+index 99e93b6..b37e8be 100644
+--- a/tests/unit/renderer/useAcpModelInfo.dom.test.ts
++++ b/tests/unit/renderer/useAcpModelInfo.dom.test.ts
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { act, renderHook, waitFor } from '@testing-library/react';
+@@ -532,6 +533,20 @@ describe('useAcpModelInfo', () => {
+     expect(ensureRuntimeInvokeMock).toHaveBeenCalledTimes(1);
+   });
+ 
++  it('does not report a pending_next_turn model as switched', async () => {
++    const success = vi.fn();
++    setConfigOptionInvokeMock.mockResolvedValue({
++      confirmation: 'pending_next_turn',
++      config_options: buildConfigOptions('sonnet-4'),
++    });
++    const { result } = renderUseAcpModelInfo({ conversation_id: 'pending-model-only', onSelectModelSuccess: success });
++    await waitFor(() => expect(result.current.canSwitch).toBe(true));
++    act(() => result.current.selectModel('opus-4'));
++    await waitFor(() => expect(result.current.pendingValues?.model).toBe('opus-4'));
++    expect(result.current.model_info?.current_model_id).toBe('sonnet-4');
++    expect(success).not.toHaveBeenCalled();
++  });
++
+   it('uses legacy acp_model_info stream only before config options are available', async () => {
+     ensureRuntimeInvokeMock.mockResolvedValue({ recovered: true, config_options: [], runtime: null });
+ 

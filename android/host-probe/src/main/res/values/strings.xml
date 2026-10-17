@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright 2026 rmAgentMa contributors
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+  Unless required by applicable law or agreed to in writing, software distributed
+  under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+  CONDITIONS OF ANY KIND, either express or implied. See the License for the
+  specific language governing permissions and limitations under the License.
+-->
+<resources>
+    <!-- 独立探针在桌面启动器及系统任务列表中的名称。 -->
+    <string name="app_name">rmAgentMa 宿主探针</string>
+    <!-- 初始化隔离数据源时的原生占位提示。 -->
+    <string name="loading">正在读取隔离探针状态…</string>
+    <!-- WebView 不提供安全消息桥时的阻断提示。 -->
+    <string name="bridge_unsupported">当前 WebView 不支持安全消息桥，请更新系统 WebView 后重试。</string>
+    <!-- 包内资源缺失时显示，不加载替代网页。 -->
+    <string name="assets_missing">缺少已校验的真实 renderer 资源，无法打开探针。</string>
+    <!-- 独立持久状态无法读取时显示，不能静默重置。 -->
+    <string name="state_error">探针状态读取失败。保留原文件，未重置或重发操作。</string>
+    <!-- 原生顶部按钮，重建 WebView 并从快照恢复。 -->
+    <string name="reload">重新加载页面（不重发任务）</string>
+    <!-- API 26 以上的原生诊断按钮，网页不能调用。 -->
+    <string name="crash_probe">诊断：退出页面进程</string>
+    <!-- 主动退出 renderer 前的原生确认，不会自动重发任务。 -->
+    <string name="crash_confirm">将退出当前页面进程，未确认的输入可能丢失。原生状态保留，不自动重发或审批。继续？</string>
+    <!-- 明确限制探针后台能力，始终在原生顶部显示。 -->
+    <string name="background_unverified">仅合成数据；长期后台、锁屏及省电行为未验证。</string>
+    <!-- 主文档导航被阻断时的原生提示。 -->
+    <string name="navigation_blocked">已阻止非包内页面导航。</string>
+    <!-- renderer 进程退出后显示，原生恢复按钮位于下方。 -->
+    <string name="renderer_gone">页面进程已退出。可重新加载已确认的草稿与快照，未自动发送或审批。</string>
+    <!-- 原生敏感审批对话框标题。 -->
+    <string name="approval_title">原生确认：本次合成操作</string>
+    <!-- 原生数据源的固定权威上下文，不使用网页提交的摘要。 -->
+    <string name="approval_detail">主机：本机隔离探针\nAgent：合成探针\n目录：/probe\n操作：将“探针.txt”的合成内容由“旧内容”改为“中文新内容”。\n范围：只更新探针状态，不写入任何用户文件、不执行命令、不调用模型。\n本次选择不会改变后续审批设置。</string>
+    <!-- 原生确认页显示权威请求引用，区分不同回合。 -->
+    <string name="approval_reference">本次请求：%1$s</string>
+    <!-- 原生审批的一次性允许按钮。 -->
+    <string name="allow_once">允许本次</string>
+    <!-- 原生审批的一次性拒绝按钮。 -->
+    <string name="reject_once">拒绝本次</string>
+    <!-- 关闭原生审批但保留待决状态。 -->
+    <string name="later">稍后处理</string>
+    <!-- 原生提交时发现取消、换代或已处理后的提示。 -->
+    <string name="approval_expired">请求已失效或已处理，请刷新当前待办。</string>
+</resources>

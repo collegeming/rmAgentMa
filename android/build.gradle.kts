@@ -92,6 +92,7 @@ spotless {
         target(
             "agent-core/src/**/*.kt",
             "agent-ui/src/**/*.kt",
+            "host-probe/src/**/*.kt",
             "app/src/main/java/org/connectbot/agent/**/*.kt",
             "app/src/main/java/org/connectbot/ui/screens/agents/**/*.kt",
             "app/src/main/java/org/connectbot/service/AgentConnectionService.kt",

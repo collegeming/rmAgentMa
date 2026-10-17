@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "deniedPaths": [
+    "channel-logos",
+    "catppuccin",
+    "vscode-icons",
+    "pet-states",
+    "/pet/",
+    "assets/logo.svg",
+    "assets/logos/",
+    "/pwa/",
+    "/katex/",
+    "@sentry/",
+    "sharp-libvips",
+    "/sharp/",
+    "@monaco-editor/loader"
+  ],
+  "deniedOutputExtensions": [".ttf", ".otf", ".woff", ".woff2", ".node", ".exe", ".dll", ".so", ".map"],
+  "allowedPackageLicenses": [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    "BlueOak-1.0.0",
+    "(MIT OR CC0-1.0)",
+    "MIT AND Zlib",
+    "(MIT AND Zlib)",
+    "(MIT OR GPL-3.0-or-later)",
+    "(WTFPL OR MIT)"
+  ],
+  "sourceAssets": [
+    {
+      "path": "packages/desktop/src/renderer/assets/icons/add-chat.svg",
+      "sha256": "5a4b3ab9b5b28235ba74a8158a500b698b4d8af0a3770e6d2c8084bdb38f04c5",
+      "source": "https://github.com/iOfficeAI/AionUi/blob/6744099b279b991c17e31c243f0920477bd31cb6/packages/desktop/src/renderer/assets/icons/add-chat.svg",
+      "license": "Apache-2.0",
+      "copyright": "Copyright 2025 AionUi (aionui.com)",
+      "modification": "Unmodified generic chat bubble and plus outline, no brand marks; fixed upstream root LICENSE applies."
+    },
+    {
+      "path": "packages/desktop/src/renderer/assets/icons/file-icon.svg",
+      "sha256": "37f3ee6945d1329f25458aba071dce7604f160cb9f9d128cb1e0310eecc6d36e",
+      "source": "https://github.com/iOfficeAI/AionUi/blob/6744099b279b991c17e31c243f0920477bd31cb6/packages/desktop/src/renderer/assets/icons/file-icon.svg",
+      "license": "Apache-2.0",
+      "copyright": "Copyright 2025 AionUi (aionui.com)",
+      "modification": "Unmodified generic document outline, no brand marks; fixed upstream root LICENSE applies."
+    }
+  ],
+  "licenseDecisions": {
+    "number-precision@1.6.0": {
+      "licenseConcluded": "MIT",
+      "reason": "Exact npm version gitHead README declares MIT and manifest identifies author cam song. Upstream publishes no separate license text or year; retain README and author unchanged, and supply complete standard MIT grant without inventing a copyright year.",
+      "texts": [
+        {
+          "path": "licenses/number-precision@1.6.0.txt",
+          "sha256": "87dbd70aa61aae3307a27ecbb55b94de051f58506259ed863190449ef3d5cb71",
+          "source": "https://github.com/nefe/number-precision/tree/6e721680ca116b5b2c3c03db2b36ac57358cd595"
+        },
+        {
+          "path": "licenses/number-precision@1.6.0-upstream-readme.txt",
+          "sha256": "168c91b1670fede5dce574ccdc9ed9183bde98fd513f75608da6f0a2613ba9c2",
+          "source": "https://github.com/nefe/number-precision/blob/6e721680ca116b5b2c3c03db2b36ac57358cd595/README.md"
+        }
+      ]
+    },
+    "format@0.2.2": {
+      "licenseConcluded": "MIT",
+      "reason": "Exact npm gitHead README links author's MIT grant; retain both README and shipped format.js copyright years. Complete MIT grant supplied from linked sjs.mit-license.org, not an inferred npm license field.",
+      "texts": [
+        {
+          "path": "licenses/format@0.2.2.txt",
+          "sha256": "e0a10b0670267c38a1224a81aad559566984f80f5897f8d79f890efd3b810c93",
+          "source": "https://sjs.mit-license.org"
+        },
+        {
+          "path": "licenses/format@0.2.2-upstream-readme.txt",
+          "sha256": "e078ab4217332db9ac446cdf23e932eabd21d6db7c239a6495df4d3802251f20",
+          "source": "https://github.com/samsonjs/format/blob/4f898096759776b7c84fa7a25b13c923dadfe46e/Readme.md"
+        }
+      ]
+    },
+    "@uiw/react-codemirror@4.25.8": {
+      "licenseConcluded": "MIT",
+      "reason": "Missing npm license file restored from exact npm gitHead monorepo root LICENSE.",
+      "texts": [
+        {
+          "path": "licenses/uiw-react-codemirror@4.25.8.txt",
+          "sha256": "fd1f049b3bb5cbaf5143516b72dbc6805cd30cca0cda94edb37160e37662fd17",
+          "source": "https://github.com/uiwjs/react-codemirror/blob/4d7fbebec0ddc6516b7706995536683f45acb7c8/LICENSE"
+        }
+      ]
+    },
+    "@uiw/codemirror-extensions-basic-setup@4.25.8": {
+      "licenseConcluded": "MIT",
+      "reason": "Missing npm license file restored from exact npm gitHead monorepo root LICENSE.",
+      "texts": [
+        {
+          "path": "licenses/uiw-react-codemirror@4.25.8.txt",
+          "sha256": "fd1f049b3bb5cbaf5143516b72dbc6805cd30cca0cda94edb37160e37662fd17",
+          "source": "https://github.com/uiwjs/react-codemirror/blob/4d7fbebec0ddc6516b7706995536683f45acb7c8/LICENSE"
+        }
+      ]
+    },
+    "dompurify@3.3.3": {
+      "licenseConcluded": "Apache-2.0",
+      "reason": "Select Apache-2.0 alternative from upstream dual license and retain complete installed LICENSE."
+    },
+    "dompurify@3.2.7": {
+      "licenseConcluded": "Apache-2.0",
+      "reason": "Select Apache-2.0 alternative from upstream dual license and retain complete installed LICENSE."
+    },
+    "jszip@3.10.1": {
+      "licenseConcluded": "MIT",
+      "reason": "Select MIT from the package's MIT/GPL alternative; retain the complete upstream license text."
+    },
+    "khroma@2.1.0": {
+      "licenseConcluded": "MIT",
+      "reason": "Missing package license field; the installed license file contains the MIT grant and copyrights."
+    }
+  }
+}
