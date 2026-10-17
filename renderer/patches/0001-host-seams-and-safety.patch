@@ -1517,10 +1517,10 @@ index c3e0513..4ef4c26 100644
        detail={detail}
        detailLabelKey={command ? undefined : 'messages.requestDetails'}
 diff --git a/packages/desktop/src/renderer/pages/conversation/Messages/hooks.ts b/packages/desktop/src/renderer/pages/conversation/Messages/hooks.ts
-index 80a5ab7..68257fa 100644
+index 80a5ab7..ddb3d6d 100644
 --- a/packages/desktop/src/renderer/pages/conversation/Messages/hooks.ts
 +++ b/packages/desktop/src/renderer/pages/conversation/Messages/hooks.ts
-@@ -2,9 +2,11 @@
+@@ -2,9 +2,12 @@
   * @license
   * Copyright 2025 AionUi (aionui.com)
   * SPDX-License-Identifier: Apache-2.0
@@ -1529,10 +1529,39 @@ index 80a5ab7..68257fa 100644
  
  import { ipcBridge } from '@/common';
 +import { wsEmitter } from '@/common/adapter/httpBridge';
++import { approvalProjectionKey, mergeApprovalProjection } from '@/renderer/host/approvalProjection';
  import type { AgentStreamErrorInfo, IMessageText, IMessageTips, TMessage } from '@/common/chat/chatLib';
  import {
    composeMessage,
-@@ -773,6 +775,7 @@ export function foldSupersededTips(messages: TMessage[]): TMessage[] {
+@@ -144,6 +147,12 @@ export function composeMessageWithIndex(
+ ): TMessage[] {
+   if (!message) return list || [];
+ 
++  if (message.type === 'acp_permission' && !message.content?.readonly && approvalProjectionKey(message)) {
++    const merged = mergeApprovalProjection(list || [], message);
++    Object.assign(index, buildMessageIndex(merged));
++    return merged;
++  }
++
+   if (logDroppedToolCallWithoutCallId(message)) {
+     return list || [];
+   }
+@@ -443,7 +452,13 @@ export const useMergeLiveMessage = () => {
+           continue;
+         }
+ 
+-        if (item.add) {
++        if (
++          item.message.type === 'acp_permission' &&
++          !item.message.content?.readonly &&
++          approvalProjectionKey(item.message)
++        ) {
++          newList = composeMessageWithIndex(item.message, newList, index);
++        } else if (item.add) {
+           // 新增消息，更新索引
+           // New message, update index
+           const msg = sanitizeMessageForList(item.message);
+@@ -773,6 +788,7 @@ export function foldSupersededTips(messages: TMessage[]): TMessage[] {
   * Normalize a message loaded from backend DB into renderer runtime shape.
   */
  export function normalizeDbMessage(msg: TMessage): TMessage {
@@ -1540,7 +1569,7 @@ index 80a5ab7..68257fa 100644
    if (msg.type === 'tips') return normalizeDbTipsMessage(msg);
    if (msg.type !== 'text') return msg;
  
-@@ -964,6 +967,25 @@ export const useMessageLstCache = (key: string) => {
+@@ -964,6 +980,25 @@ export const useMessageLstCache = (key: string) => {
      return [];
    }, [key, setPagination, update]);
  
@@ -1567,10 +1596,10 @@ index 80a5ab7..68257fa 100644
      if (!key) return;
      let cancelled = false;
 diff --git a/packages/desktop/src/renderer/pages/conversation/Messages/usePendingConfirmationsRecovery.ts b/packages/desktop/src/renderer/pages/conversation/Messages/usePendingConfirmationsRecovery.ts
-index 1b61d32..ebc43e8 100644
+index 1b61d32..74c2d49 100644
 --- a/packages/desktop/src/renderer/pages/conversation/Messages/usePendingConfirmationsRecovery.ts
 +++ b/packages/desktop/src/renderer/pages/conversation/Messages/usePendingConfirmationsRecovery.ts
-@@ -2,10 +2,19 @@
+@@ -2,10 +2,20 @@
   * @license
   * Copyright 2025 AionUi (aionui.com)
   * SPDX-License-Identifier: Apache-2.0
@@ -1580,6 +1609,7 @@ index 1b61d32..ebc43e8 100644
  import { ipcBridge } from '@/common';
 -import type { IConfirmation, IMessageAsk, IMessagePermission, TMessage } from '@/common/chat/chatLib';
 +import { wsEmitter } from '@/common/adapter/httpBridge';
++import { approvalProjectionKey, mergeApprovalProjection } from '@/renderer/host/approvalProjection';
 +import type {
 +  IConfirmation,
 +  IMessageAcpPermission,
@@ -1591,7 +1621,7 @@ index 1b61d32..ebc43e8 100644
  import { useEffect } from 'react';
  import { useUpdateMessageList } from './hooks';
  
-@@ -14,7 +23,24 @@ export const pendingConfirmationMsgId = (confirmationId: string) => `confirmatio
+@@ -14,7 +24,24 @@ export const pendingConfirmationMsgId = (confirmationId: string) => `confirmatio
  export function buildPendingConfirmationMessage(
    conversation_id: string,
    confirmation: IConfirmation<unknown>
@@ -1617,7 +1647,7 @@ index 1b61d32..ebc43e8 100644
    // A pending AskUserQuestion carries its questions[] payload — rebuild the
    // REAL question card (title/multi-question/multiSelect/Other), answered via
    // the ask confirm contract keyed on call_id = request_id. Without this the
-@@ -49,6 +75,7 @@ export function buildPendingConfirmationMessage(
+@@ -49,6 +76,7 @@ export function buildPendingConfirmationMessage(
  export function hasPermissionMessageForCallId(list: TMessage[], callId: string): boolean {
    return list.some(
      (message) =>
@@ -1625,7 +1655,44 @@ index 1b61d32..ebc43e8 100644
        (message.type === 'permission' && message.content?.call_id === callId) ||
        (message.type === 'ask' && message.content?.request_id === callId)
    );
-@@ -80,34 +107,51 @@ export function usePendingConfirmationsRecovery(conversation_id: string) {
+@@ -73,6 +101,36 @@ function errorMessage(error: unknown): string {
+   return error instanceof Error ? error.message : String(error);
+ }
+ 
++export function reconcilePendingConfirmations(
++  list: TMessage[],
++  conversationId: string,
++  confirmations: IConfirmation<unknown>[]
++): TMessage[] {
++  const recovered = confirmations.map((confirmation) => buildPendingConfirmationMessage(conversationId, confirmation));
++  const activeKeys = new Set(recovered.map(approvalProjectionKey).filter((key) => key !== undefined));
++  let next = list.filter(
++    (message) =>
++      !(
++        message.conversation_id === conversationId &&
++        message.id.startsWith('confirmation:') &&
++        (message.type !== 'acp_permission' ||
++          message.content.readonly ||
++          !activeKeys.has(approvalProjectionKey(message)))
++      )
++  );
++  for (const message of recovered) {
++    if (message.type === 'acp_permission') next = mergeApprovalProjection(next, message);
++    else if (
++      !hasPermissionMessageForCallId(
++        next,
++        message.type === 'ask' ? message.content.request_id : message.content.call_id
++      )
++    )
++      next = next.concat(message);
++  }
++  return next;
++}
++
+ export function usePendingConfirmationsRecovery(conversation_id: string) {
+   const updateMessageList = useUpdateMessageList();
+ 
+@@ -80,34 +138,41 @@ export function usePendingConfirmationsRecovery(conversation_id: string) {
      if (!conversation_id) return;
      let cancelled = false;
  
@@ -1653,17 +1720,7 @@ index 1b61d32..ebc43e8 100644
 +        .invoke({ conversation_id })
 +        .then((confirmations) => {
 +          if (cancelled || current !== revision) return;
-+          updateMessageList((list) => {
-+            const next = list.filter(
-+              (message) => !(message.conversation_id === conversation_id && message.id.startsWith('confirmation:'))
-+            );
-+            for (const confirmation of confirmations ?? []) {
-+              const recovered = buildPendingConfirmationMessage(conversation_id, confirmation);
-+              if (recovered.type === 'acp_permission' || !hasPermissionMessageForCallId(next, confirmation.call_id))
-+                next.push(recovered);
-+            }
-+            return next;
-+          });
++          updateMessageList((list) => reconcilePendingConfirmations(list, conversation_id, confirmations ?? []));
 +        })
 +        .catch((error: unknown) => {
 +          if (cancelled || current !== revision) return;

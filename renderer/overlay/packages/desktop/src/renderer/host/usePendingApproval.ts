@@ -85,9 +85,13 @@ export function usePendingApproval(
         });
     };
     refresh();
-    const off = ['message.stream', 'confirmation.remove', 'turn.completed', 'realtime.reconnected'].map((name) =>
-      wsEmitter(name).on(refresh)
-    );
+    const off = [
+      'message.stream',
+      'confirmation.remove',
+      'turn.completed',
+      'realtime.reconnected',
+      'runtime.snapshot',
+    ].map((name) => wsEmitter(name).on(refresh));
     const offline = () => {
       version++;
       setPending(undefined);

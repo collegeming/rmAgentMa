@@ -3,3 +3,4 @@
 /dexout*/
 /ci-artifacts/
 /.device-test/
+node_modules/
