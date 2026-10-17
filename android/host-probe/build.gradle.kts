@@ -22,7 +22,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    sourceSets.getByName("main").assets.srcDir(layout.buildDirectory.dir("generated/rendererAssets").get().asFile)
 }
 
 androidComponents {
@@ -33,12 +32,17 @@ kotlin {
     compilerOptions { jvmTarget.set(JvmTarget.JVM_17) }
 }
 
+abstract class PrepareRendererAssets : DefaultTask() {
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+}
+
 val rendererAssetsDir = providers.gradleProperty("RendererAssetsDir")
 val generatedAssets = layout.buildDirectory.dir("generated/rendererAssets")
-val prepareRendererAssets by tasks.registering {
+val prepareRendererAssets by tasks.registering(PrepareRendererAssets::class) {
     notCompatibleWithConfigurationCache("Renderer verification copies a fully validated file inventory")
     rendererAssetsDir.orNull?.let { inputs.dir(it) }
-    outputs.dir(generatedAssets)
+    outputDirectory.set(generatedAssets)
     outputs.upToDateWhen { false }
     doLast {
         val source = rendererAssetsDir.orNull?.let(::file)
@@ -128,7 +132,7 @@ val prepareRendererAssets by tasks.registering {
         }
         val actual = source.walkTopDown().filter { it.isFile }.map { it.relativeTo(source).invariantSeparatorsPath }.toSet()
         require(actual == files.keys + setOf("asset-manifest.json", "renderer-build.json")) { "Uninventoried renderer asset" }
-        val destination = generatedAssets.get().asFile
+        val destination = outputDirectory.get().asFile
         delete(destination)
         copy {
             from(source)
@@ -137,8 +141,8 @@ val prepareRendererAssets by tasks.registering {
     }
 }
 
-tasks.configureEach {
-    if (name == "mergeDebugAssets") dependsOn(prepareRendererAssets)
+androidComponents.onVariants { variant ->
+    variant.sources.assets?.addGeneratedSourceDirectory(prepareRendererAssets, PrepareRendererAssets::outputDirectory)
 }
 
 dependencies {
