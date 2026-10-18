@@ -28,6 +28,10 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
+import org.rmagentma.rendererhost.ProbeAttachments
+import org.rmagentma.rendererhost.ProbeBridge
+import org.rmagentma.rendererhost.array
+import org.rmagentma.rendererhost.json
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.security.MessageDigest

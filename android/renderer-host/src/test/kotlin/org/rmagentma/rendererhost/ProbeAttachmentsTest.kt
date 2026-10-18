@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.rmagentma.hostprobe
+package org.rmagentma.rendererhost
 
 import android.util.Base64
 import org.json.JSONObject

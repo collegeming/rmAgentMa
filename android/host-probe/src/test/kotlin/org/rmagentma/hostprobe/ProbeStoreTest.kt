@@ -27,6 +27,9 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
+import org.rmagentma.rendererhost.ProbeFailure
+import org.rmagentma.rendererhost.ProbeResult
+import org.rmagentma.rendererhost.json
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 

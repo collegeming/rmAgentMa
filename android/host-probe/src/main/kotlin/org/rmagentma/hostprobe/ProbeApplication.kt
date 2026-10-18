@@ -20,6 +20,8 @@ package org.rmagentma.hostprobe
 import android.app.Application
 import android.os.Handler
 import android.os.Looper
+import org.rmagentma.rendererhost.ProbeAssets
+import org.rmagentma.rendererhost.ProbeAttachments
 import java.io.File
 import java.util.concurrent.Executors
 

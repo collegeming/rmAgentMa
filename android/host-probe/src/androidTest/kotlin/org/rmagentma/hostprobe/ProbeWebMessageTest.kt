@@ -30,6 +30,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.rmagentma.rendererhost.ProbeAssets
+import org.rmagentma.rendererhost.ProbeBridge
+import org.rmagentma.rendererhost.json
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 

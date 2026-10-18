@@ -15,13 +15,13 @@
  * limitations under the License.
  */
 
-package org.rmagentma.hostprobe
+package org.rmagentma.rendererhost
 
 import org.json.JSONObject
 import java.net.URI
 import java.util.UUID
 
-internal class ProbeBridge {
+class ProbeBridge {
     @Volatile
     var documentId: String = ""
         private set
@@ -114,9 +114,9 @@ internal class ProbeBridge {
             requireProbe(params.keys().asSequence().all { it in allowedParams })
             if (action in CONVERSATION_ACTIONS) {
                 val conversation = params.opt("conversationId")
-                requireProbe(conversation == ProbeStore.CONVERSATION || (action in DEFAULT_CONVERSATION_ACTIONS && conversation == null), 404, "CONVERSATION_NOT_FOUND")
+                requireProbe(conversation == CONVERSATION || (action in DEFAULT_CONVERSATION_ACTIONS && conversation == null), 404, "CONVERSATION_NOT_FOUND")
             }
-            if (action == "project.read") requireProbe(params.opt("projectId") == ProbeStore.PROJECT, 404, "PROJECT_NOT_FOUND")
+            if (action == "project.read") requireProbe(params.opt("projectId") == PROJECT, 404, "PROJECT_NOT_FOUND")
             val sequence = requestSequence(requestId)
             val fingerprint = java.security.MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
             val previous = receipts[sequence]
@@ -180,6 +180,8 @@ internal class ProbeBridge {
         }
         const val ORIGIN = "https://appassets.androidplatform.net"
         const val ENTRY = "$ORIGIN/assets/renderer/index.html"
+        const val CONVERSATION = "conv-probe-1"
+        const val PROJECT = "project-probe-1"
         val ACTIONS = setOf(
             "auth.read", "settings.client.read", "settings.client.write", "settings.read",
             "conversations.list", "conversation.read", "messages.list", "messages.latest",

@@ -43,6 +43,11 @@ import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import org.json.JSONObject
+import org.rmagentma.rendererhost.ProbeAssets
+import org.rmagentma.rendererhost.ProbeAttachments
+import org.rmagentma.rendererhost.ProbeBridge
+import org.rmagentma.rendererhost.ProbeFailure
+import org.rmagentma.rendererhost.requireProbe
 class ProbeActivity : Activity() {
     private val owner get() = application as ProbeApplication
     private val worker get() = owner.worker

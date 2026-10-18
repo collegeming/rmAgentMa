@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.rmagentma.hostprobe
+package org.rmagentma.rendererhost
 
 import android.util.Base64
 import org.json.JSONObject
@@ -23,7 +23,7 @@ import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
 
-internal class ProbeAttachments(private val directory: File, private val clock: () -> Long = System::currentTimeMillis) {
+class ProbeAttachments(private val directory: File, private val clock: () -> Long = System::currentTimeMillis) {
     private data class Upload(val document: String, val name: String, val mime: String, val size: Long, val hash: String, val file: File, val deadline: Long)
     private val pending = mutableMapOf<String, Upload>()
     init {

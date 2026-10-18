@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.rmagentma.hostprobe
+package org.rmagentma.rendererhost
 
 import android.content.res.AssetManager
 import android.webkit.WebResourceResponse
@@ -24,7 +24,7 @@ import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.net.URLConnection
 
-internal class ProbeAssets(private val assets: AssetManager) : WebViewAssetLoader.PathHandler {
+class ProbeAssets(private val assets: AssetManager) : WebViewAssetLoader.PathHandler {
     private val files: Set<String> = assets.open("renderer/asset-manifest.json").use { stream ->
         val records = JSONObject(stream.readBytes().toString(Charsets.UTF_8)).getJSONArray("files")
         (0 until records.length()).map { records.getJSONObject(it).getString("path") }.toSet()

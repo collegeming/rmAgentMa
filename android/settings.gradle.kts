@@ -14,5 +14,6 @@ if (TRANSLATIONS_ONLY.isNullOrBlank()) {
     include(":agent-core")
     include(":agent-ui")
     include(":host-probe")
+    include(":renderer-host")
 }
 include(":translations")

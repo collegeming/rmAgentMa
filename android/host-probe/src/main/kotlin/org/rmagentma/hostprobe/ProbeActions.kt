@@ -19,6 +19,9 @@ package org.rmagentma.hostprobe
 
 import org.json.JSONArray
 import org.json.JSONObject
+import org.rmagentma.rendererhost.ProbeAttachments
+import org.rmagentma.rendererhost.ProbeResult
+import org.rmagentma.rendererhost.requireProbe
 
 internal class ProbeActions(private val store: ProbeStore, private val attachments: ProbeAttachments) {
     fun handle(action: String, payload: JSONObject, documentId: String): ProbeResult {

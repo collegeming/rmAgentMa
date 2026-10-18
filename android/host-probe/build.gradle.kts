@@ -146,6 +146,7 @@ androidComponents.onVariants { variant ->
 }
 
 dependencies {
+    implementation(project(":renderer-host"))
     implementation(libs.androidx.webkit)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)

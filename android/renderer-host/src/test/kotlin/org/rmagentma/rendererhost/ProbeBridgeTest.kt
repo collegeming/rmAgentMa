@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.rmagentma.hostprobe
+package org.rmagentma.rendererhost
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -31,7 +31,7 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [28])
 class ProbeBridgeTest {
-    private fun request(action: String, document: String = "", id: String = "renderer-1", params: JSONObject = json("conversationId" to ProbeStore.CONVERSATION)): String = json(
+    private fun request(action: String, document: String = "", id: String = "renderer-1", params: JSONObject = json("conversationId" to ProbeBridge.CONVERSATION)): String = json(
         "requestId" to id,
         "documentId" to document,
         "action" to action,

@@ -20,6 +20,14 @@ package org.rmagentma.hostprobe
 import android.util.AtomicFile
 import org.json.JSONArray
 import org.json.JSONObject
+import org.rmagentma.rendererhost.ProbeBridge
+import org.rmagentma.rendererhost.ProbeFailure
+import org.rmagentma.rendererhost.ProbeLimits
+import org.rmagentma.rendererhost.ProbeResult
+import org.rmagentma.rendererhost.array
+import org.rmagentma.rendererhost.json
+import org.rmagentma.rendererhost.requireProbe
+import org.rmagentma.rendererhost.string
 import java.io.File
 import java.util.UUID
 
@@ -429,7 +437,7 @@ internal class ProbeStore(file: File, private val schedule: (Long, () -> Unit) -
     }
 
     companion object {
-        const val CONVERSATION = "conv-probe-1"
-        const val PROJECT = "project-probe-1"
+        const val CONVERSATION = ProbeBridge.CONVERSATION
+        const val PROJECT = ProbeBridge.PROJECT
     }
 }
