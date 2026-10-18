@@ -1098,6 +1098,20 @@
 	<!-- Text for button to hide advanced host options -->
 	<string name="host_editor_hide_advanced">Hide advanced options</string>
 
+	<!-- Host address history: addresses accepted for this host only after its SSH host key matched -->
+	<!-- Read-only section title for the confirmed address history of a host -->
+	<string name="host_editor_address_history_title">Confirmed addresses</string>
+	<!-- Explains that the listed addresses are read-only and were verified by the host key -->
+	<string name="host_editor_address_history_summary">Read-only. Addresses were accepted only after the SSH host key matched.</string>
+	<!-- Shown when a host has no confirmed address record yet -->
+	<string name="host_editor_address_history_empty">No confirmed address yet.</string>
+	<!-- One confirmed address entry; arguments are the confirmation source and the verification time -->
+	<string name="host_editor_address_history_entry">%1$s · %2$s</string>
+	<!-- Address source: recorded while connecting to the host -->
+	<string name="host_editor_address_source_connected">Connected</string>
+	<!-- Address source: rediscovered automatically after the host changed its address -->
+	<string name="host_editor_address_source_rediscovered">Rediscovered automatically</string>
+
 	<!-- Terminal resize dialog -->
 	<!-- Label for width input field in terminal resize dialog -->
 	<string name="resize_width_label">Width (columns)</string>

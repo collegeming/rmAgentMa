@@ -64,6 +64,8 @@ class AgentSshPoolCryptoTest {
             mock(Context::class.java),
             dispatcher,
             initializer,
+            mock(AgentHostAddressStore::class.java),
+            mock(AgentLanSshDiscovery::class.java),
         )
         val failure = IOException("stop before network")
         mockConstruction(DefaultConfig::class.java) { _, _ -> assertThat(configured).isTrue() }.use { configs ->
@@ -107,6 +109,8 @@ class AgentSshPoolCryptoTest {
             mock(Context::class.java),
             dispatcher,
             initializer,
+            mock(AgentHostAddressStore::class.java),
+            mock(AgentLanSshDiscovery::class.java),
         )
         mockConstruction(DefaultConfig::class.java).use { configs ->
             repeat(2) {

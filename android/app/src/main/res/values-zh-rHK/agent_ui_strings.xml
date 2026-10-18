@@ -54,6 +54,10 @@
     <string name="agent_network_denied" tools:machine_translated="true">在 Android 16 及更高版本上，本機網絡連線需要「附近的裝置」權限。未發出任何網絡請求。請在系統設定中授予權限，或重試。</string>
     <!-- 明確重試執行時權限請求的操作。 -->
     <string name="agent_network_retry" tools:machine_translated="true">允許本機網絡存取</string>
+    <!-- 主機在新區域網絡地址經 SSH 主機金鑰確認後自動更新的單次提示；參數為原地址與新地址。 -->
+    <string name="agent_host_address_updated" tools:machine_translated="true">已自動更新主機地址：%1$s → %2$s（主機指紋已確認）</string>
+    <!-- 關閉主機地址自動更新提示。 -->
+    <string name="agent_host_address_dismiss" tools:machine_translated="true">知道了</string>
     <!-- 對話中的訊息輸入標籤。 -->
     <string name="agent_prompt" tools:machine_translated="true">訊息</string>
     <!-- 提交訊息或自由文字回答。 -->

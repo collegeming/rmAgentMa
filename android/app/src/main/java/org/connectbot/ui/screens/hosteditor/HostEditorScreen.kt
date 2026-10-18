@@ -17,6 +17,8 @@
 
 package org.connectbot.ui.screens.hosteditor
 
+import android.content.Context
+import android.text.format.DateFormat
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -62,6 +64,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -72,6 +75,8 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import kotlinx.coroutines.launch
 import org.connectbot.BuildConfig
 import org.connectbot.R
+import org.connectbot.agent.AgentAddressSource
+import org.connectbot.agent.HostAddressRecord
 import org.connectbot.data.entity.ColorScheme
 import org.connectbot.data.entity.Host
 import org.connectbot.data.entity.Profile
@@ -86,6 +91,7 @@ import org.connectbot.ui.theme.ConnectBotTheme
 import org.connectbot.util.HostConstants
 import org.connectbot.util.LocalFontProvider
 import org.connectbot.util.TerminalFont
+import java.util.Date
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -415,6 +421,12 @@ fun HostEditorScreenContent(
                 }
             }
 
+            // Confirmed addresses (read-only)
+            if (hostId != -1L && uiState.protocol != "local") {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+                AddressHistorySection(history = uiState.addressHistory)
+            }
+
             // Color selector
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
             ColorSelector(
@@ -542,6 +554,56 @@ fun HostEditorScreenContent(
             onDismissRequest = onCancelMoshInstall,
         )
     }
+}
+
+@Composable
+private fun AddressHistorySection(
+    history: List<HostAddressRecord>,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    Column(modifier = modifier.fillMaxWidth()) {
+        Text(stringResource(R.string.host_editor_address_history_title), style = MaterialTheme.typography.bodyLarge)
+        Text(
+            stringResource(R.string.host_editor_address_history_summary),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (history.isEmpty()) {
+            Text(
+                stringResource(R.string.host_editor_address_history_empty),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+        history.forEach { record ->
+            Column(Modifier.padding(top = 8.dp)) {
+                Text(record.address, style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    stringResource(
+                        R.string.host_editor_address_history_entry,
+                        stringResource(addressSourceLabel(record.source)),
+                        formatVerifiedAt(context, record.verifiedAtMillis),
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+private fun addressSourceLabel(source: AgentAddressSource): Int = when (source) {
+    AgentAddressSource.CONNECTED -> R.string.host_editor_address_source_connected
+    AgentAddressSource.REDISCOVERED -> R.string.host_editor_address_source_rediscovered
+}
+
+private fun formatVerifiedAt(context: Context, millis: Long): String {
+    val verified = Date(millis)
+    val date = DateFormat.getDateFormat(context).format(verified)
+    val time = DateFormat.getTimeFormat(context).format(verified)
+    return "$date $time"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1320,6 +1382,10 @@ private fun HostEditorScreenPreview() {
                 stayConnected = false,
                 quickDisconnect = false,
                 automationCount = 1,
+                addressHistory = listOf(
+                    HostAddressRecord("192.168.1.31", 22, System.currentTimeMillis(), AgentAddressSource.REDISCOVERED),
+                    HostAddressRecord("192.168.1.23", 22, System.currentTimeMillis() - 86_400_000L, AgentAddressSource.CONNECTED),
+                ),
             ),
             onNavigateBack = {},
             onNicknameChange = {},

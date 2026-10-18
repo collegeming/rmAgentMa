@@ -29,6 +29,8 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import org.connectbot.agent.AgentHostAddressStore
+import org.connectbot.agent.HostAddressRecord
 import org.connectbot.data.HostRepository
 import org.connectbot.data.ProfileRepository
 import org.connectbot.data.PubkeyRepository
@@ -47,6 +49,7 @@ import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
+import org.mockito.Mockito.withSettings
 import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
@@ -63,6 +66,7 @@ class HostEditorViewModelTest {
     private lateinit var profileRepository: ProfileRepository
     private lateinit var prefs: SharedPreferences
     private lateinit var securePasswordStorage: SecurePasswordStorage
+    private lateinit var addressStore: AgentHostAddressStore
 
     @Before
     fun setUp() {
@@ -75,6 +79,11 @@ class HostEditorViewModelTest {
         profileRepository = mock(ProfileRepository::class.java)
         prefs = mock(SharedPreferences::class.java)
         securePasswordStorage = mock(SecurePasswordStorage::class.java)
+        // The address history is a suspend read, so the whole store answers with an empty history
+        addressStore = mock(
+            AgentHostAddressStore::class.java,
+            withSettings().defaultAnswer { emptyList<HostAddressRecord>() },
+        )
 
         // Mock default behavior for observe calls
         `when`(pubkeyRepository.observeAll()).thenReturn(flowOf(emptyList()))
@@ -99,6 +108,7 @@ class HostEditorViewModelTest {
             profileRepository = profileRepository,
             prefs = prefs,
             securePasswordStorage = securePasswordStorage,
+            addressStore = addressStore,
             dispatchers = dispatchers,
         )
     }

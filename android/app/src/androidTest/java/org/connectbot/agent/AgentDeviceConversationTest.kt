@@ -167,7 +167,17 @@ class AgentDeviceConversationTest {
         val hosts = HostRepository(context, database, database.hostDao(), database.portForwardDao(), database.knownHostDao(), passwords)
         val keys = PubkeyRepository(database.pubkeyDao(), database, AndroidKeyStorePrivateKeyProtector(), dispatchers)
         val challenges = AgentChallenges()
-        val realPool = AgentSshPool(hosts, keys, passwords, challenges, context, dispatchers.io, AgentCryptoInitializer(context, dispatchers))
+        val realPool = AgentSshPool(
+            hosts,
+            keys,
+            passwords,
+            challenges,
+            context,
+            dispatchers.io,
+            AgentCryptoInitializer(context, dispatchers),
+            AgentHostAddressStore(context, dispatchers.io),
+            AgentLanSshDiscovery(context),
+        )
         val rejected = AtomicReference<String?>(null)
         val permissions = AtomicInteger()
         val questions = AtomicInteger()

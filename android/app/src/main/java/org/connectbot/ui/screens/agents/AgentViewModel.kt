@@ -33,6 +33,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.connectbot.agent.AgentConversationState
 import org.connectbot.agent.AgentRepository
+import org.connectbot.agent.HostAddressChange
 import org.connectbot.di.CoroutineDispatchers
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
@@ -58,6 +59,8 @@ class AgentViewModel @Inject constructor(
     val conversationState = repository.conversationState
     val hasEarlier = repository.hasEarlier
     val hasLatest = repository.hasLatest
+    private val mutableAddressChange = MutableStateFlow<HostAddressChange?>(null)
+    val addressChange = mutableAddressChange.asStateFlow()
     private val mutableFullText = MutableStateFlow<String?>(null)
     val fullText = mutableFullText.asStateFlow()
     private val mutableReading = MutableStateFlow(false)
@@ -81,6 +84,10 @@ class AgentViewModel @Inject constructor(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), selectedSession.value)
 
     init {
+        // The repository flow is hot; keep the newest change so it can still be shown after a recomposition.
+        viewModelScope.launch(dispatchers.default) {
+            repository.addressChanges.collect { mutableAddressChange.value = it }
+        }
         viewModelScope.launch(dispatchers.default) {
             combine(selectedSession, events) { _, _ -> Unit }.collect {
                 mutableResponding.update { pending ->
@@ -109,6 +116,10 @@ class AgentViewModel @Inject constructor(
     }
 
     fun refresh(hostId: Long?) = execute(exclusive = true) { repository.refresh(hostId) }
+
+    fun dismissAddressChange() {
+        mutableAddressChange.value = null
+    }
 
     fun selectHost(hostId: Long?) {
         if (hostId != selectedHost.value) requestSelection(AgentSelection.Host(hostId))

@@ -31,6 +31,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -75,6 +76,7 @@ class AgentRepository @Inject constructor(
     private val dispatchers: CoroutineDispatchers,
 ) {
     val hosts: Flow<List<Host>> = hostRepository.observeSshHosts()
+    val addressChanges: SharedFlow<HostAddressChange> = pool.addressChanges
     private val mutableSessions = MutableStateFlow<List<AgentSession>>(emptyList())
     val sessions: StateFlow<List<AgentSession>> = mutableSessions.asStateFlow()
     private val mutableEvents = MutableStateFlow<List<AgentEvent>>(emptyList())
@@ -575,6 +577,7 @@ class AgentRepository @Inject constructor(
             while (true) {
                 kotlinx.coroutines.delay(1000)
                 try {
+                    pool.redialFailedHosts()
                     pool.reconnectDisconnected().forEach { hostId -> refreshIndex(hostId, interactive = false) }
                 } catch (e: CancellationException) {
                     throw e

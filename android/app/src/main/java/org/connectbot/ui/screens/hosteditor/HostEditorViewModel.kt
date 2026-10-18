@@ -31,6 +31,8 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.connectbot.agent.AgentHostAddressStore
+import org.connectbot.agent.HostAddressRecord
 import org.connectbot.data.HostRepository
 import org.connectbot.data.ProfileRepository
 import org.connectbot.data.PubkeyRepository
@@ -41,6 +43,7 @@ import org.connectbot.di.CoroutineDispatchers
 import org.connectbot.transport.Transport
 import org.connectbot.util.InstallMosh
 import org.connectbot.util.SecurePasswordStorage
+import java.io.IOException
 import javax.inject.Inject
 
 data class HostEditorUiState(
@@ -75,6 +78,7 @@ data class HostEditorUiState(
     val locale: String = "en_US.UTF-8",
     val isMoshInstalling: Boolean = false,
     val isLoading: Boolean = false,
+    val addressHistory: List<HostAddressRecord> = emptyList(),
     val error: String? = null,
 ) {
     val isMoshNetworkTimeoutValid: Boolean
@@ -90,6 +94,7 @@ class HostEditorViewModel @Inject constructor(
     private val profileRepository: ProfileRepository,
     private val prefs: android.content.SharedPreferences,
     private val securePasswordStorage: SecurePasswordStorage,
+    private val addressStore: AgentHostAddressStore,
     @ApplicationContext private val context: Context,
     private val dispatchers: CoroutineDispatchers,
 ) : ViewModel() {
@@ -194,6 +199,7 @@ class HostEditorViewModel @Inject constructor(
                             isLoading = false,
                         )
                     }
+                    loadAddressHistory(host.port)
                 } else {
                     _uiState.update {
                         it.copy(isLoading = false, error = "Host not found")
@@ -205,6 +211,16 @@ class HostEditorViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    private suspend fun loadAddressHistory(port: Int) {
+        // This section is informational; an unreadable history store must not block editing the host.
+        val history = try {
+            addressStore.candidates(hostId, port)
+        } catch (_: IOException) {
+            emptyList()
+        }
+        _uiState.update { it.copy(addressHistory = history) }
     }
 
     private fun parseConnectionNickname(value: String): Triple<String, String, String>? {

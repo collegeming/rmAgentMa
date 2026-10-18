@@ -54,6 +54,10 @@
     <string name="agent_network_denied">在 Android 16 及更高版本上，本地网络连接需要“附近的设备”权限。未发起任何网络请求。请在系统设置中授予权限，或重试。</string>
     <!-- Action explicitly retrying the runtime permission request. -->
     <string name="agent_network_retry">允许本地网络访问</string>
+    <!-- One-time notice that a host moved to a new LAN address which was accepted only after the SSH host key matched; arguments are the previous and the accepted address. -->
+    <string name="agent_host_address_updated">已自动更新主机地址：%1$s → %2$s（主机指纹已确认）</string>
+    <!-- Dismisses the automatic host address notice. -->
+    <string name="agent_host_address_dismiss">知道了</string>
     <!-- Message input label in a conversation. -->
     <string name="agent_prompt">消息</string>
     <!-- Submit a prompt or free-text answer. -->

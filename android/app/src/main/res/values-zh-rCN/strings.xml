@@ -392,6 +392,12 @@
   <string name="console_default_title">控制台</string>
   <string name="host_editor_show_advanced">显示高级选项</string>
   <string name="host_editor_hide_advanced">隐藏高级选项</string>
+  <string name="host_editor_address_history_title">已确认的地址</string>
+  <string name="host_editor_address_history_summary">只读。仅在 SSH 主机密钥匹配后才会采纳下列地址。</string>
+  <string name="host_editor_address_history_empty">还没有已确认的地址。</string>
+  <string name="host_editor_address_history_entry">%1$s · %2$s</string>
+  <string name="host_editor_address_source_connected">连接成功</string>
+  <string name="host_editor_address_source_rediscovered">自动重发现</string>
   <string name="resize_width_label">宽度（列数）</string>
   <string name="resize_height_label">高度（行数）</string>
   <string name="resize_disable_force_size">禁用强制尺寸</string>

@@ -54,6 +54,10 @@
     <string name="agent_network_denied" tools:machine_translated="true">在 Android 16 及更高版本上，本地网络连接需要“附近的设备”权限。未发起任何网络请求。请在系统设置中授予权限，或重试。</string>
     <!-- 明确重试运行时权限请求的操作。 -->
     <string name="agent_network_retry" tools:machine_translated="true">允许本地网络访问</string>
+    <!-- 主机在新局域网地址被 SSH 主机密钥确认后自动更新的单次提示；参数为原地址与新地址。 -->
+    <string name="agent_host_address_updated" tools:machine_translated="true">已自动更新主机地址：%1$s → %2$s（主机指纹已确认）</string>
+    <!-- 关闭主机地址自动更新提示。 -->
+    <string name="agent_host_address_dismiss" tools:machine_translated="true">知道了</string>
     <!-- 对话中的消息输入标签。 -->
     <string name="agent_prompt" tools:machine_translated="true">消息</string>
     <!-- 提交消息或自由文本回答。 -->

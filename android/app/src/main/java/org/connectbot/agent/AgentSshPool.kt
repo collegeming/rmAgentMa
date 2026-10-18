@@ -26,6 +26,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.runInterruptible
@@ -42,6 +45,7 @@ import org.connectbot.R
 import org.connectbot.data.HostRepository
 import org.connectbot.data.PubkeyRepository
 import org.connectbot.data.entity.Host
+import org.connectbot.data.entity.KnownHost
 import org.connectbot.di.IoDispatcher
 import org.connectbot.util.PubkeyUtils
 import org.connectbot.util.SecurePasswordStorage
@@ -55,6 +59,8 @@ import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
+private const val ADDRESS_PROBE_TIMEOUT_MS = 5_000
+
 @Singleton
 class AgentSshPool @Inject constructor(
     private val hosts: HostRepository,
@@ -64,6 +70,8 @@ class AgentSshPool @Inject constructor(
     @ApplicationContext private val context: Context,
     @IoDispatcher private val io: CoroutineDispatcher,
     private val crypto: AgentCryptoInitializer,
+    private val addressStore: AgentHostAddressStore,
+    private val discovery: AgentLanSshDiscovery,
 ) {
     private data class Entry(val chain: List<Host>, val client: SSHClient, val tunnel: DirectConnection?)
     private val reconnect = AgentReconnectPolicy()
@@ -72,6 +80,8 @@ class AgentSshPool @Inject constructor(
 
     private val mutableCount = kotlinx.coroutines.flow.MutableStateFlow(0)
     val connectionCount: kotlinx.coroutines.flow.StateFlow<Int> = mutableCount.asStateFlow()
+    private val mutableAddressChanges = MutableSharedFlow<HostAddressChange>(extraBufferCapacity = 8)
+    val addressChanges: SharedFlow<HostAddressChange> = mutableAddressChanges.asSharedFlow()
     private val mutex = Mutex()
     private val entries = ConcurrentHashMap<Long, Entry>()
     private val connecting = ConcurrentHashMap.newKeySet<SSHClient>()
@@ -109,6 +119,81 @@ class AgentSshPool @Inject constructor(
                 }
             }
             restored
+        }
+    }
+
+    suspend fun redialFailedHosts() = withContext(io) {
+        val targets = mutex.withLock {
+            val now = android.os.SystemClock.elapsedRealtime()
+            reconnectHosts.filter { isRedialTarget(it, now) }
+        }
+        for (id in targets) {
+            try {
+                hosts.findHostById(id)?.let { redialHost(it) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // rediscovery is best effort and must not disturb the existing reconnect schedule
+            }
+        }
+    }
+
+    private suspend fun isRedialTarget(id: Long, now: Long): Boolean {
+        val host = hosts.findHostById(id) ?: return false
+        val entry = entries[id]
+        return redialEligible(
+            host,
+            hasTrust = hosts.getKnownHostsForHost(id).isNotEmpty(),
+            hasFailure = reconnect.hasFailure(id),
+            blocked = reconnect.isBlocked(id),
+            waitingMillis = reconnect.waiting(id, now),
+            hasLiveConnection = entry?.client?.isConnected == true && entry.client.isAuthenticated,
+        )
+    }
+
+    private suspend fun redialHost(host: Host) {
+        for (candidate in redialCandidates(host, addressStore.candidates(host.id, host.port), discovery.endpoints())) {
+            if (!probeAddress(host, candidate.address, candidate.port)) continue
+            // A probe can span seconds and HostRepository updates whole rows, so a snapshot read before the probe
+            // would silently overwrite an address the user edited in the meantime; abandon instead of guessing.
+            val current = hosts.findHostById(host.id) ?: return
+            if (current.hostname != host.hostname || current.port != host.port || !isIpLiteral(current.hostname)) return
+            // redialCandidates returns the row's own port only, so the row keeps it unchanged
+            hosts.saveHost(current.copy(hostname = candidate.address))
+            addressStore.record(host.id, candidate.address, host.port, AgentAddressSource.REDISCOVERED)
+            mutableAddressChanges.emit(HostAddressChange(host.id, current.hostname, candidate.address))
+            return
+        }
+    }
+
+    /** Dials a candidate address for its host key only: no authentication, prompt, known-host write or block. */
+    internal suspend fun probeAddress(host: Host, address: String, port: Int): Boolean = withContext(io) {
+        val known = hosts.getKnownHostsForHost(host.id)
+        if (known.isEmpty()) return@withContext false
+        val client = try {
+            crypto.ensureReady()
+            SSHClient(DefaultConfig().apply { keepAliveProvider = KeepAliveProvider.KEEP_ALIVE })
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return@withContext false
+        }
+        try {
+            client.connectTimeout = ADDRESS_PROBE_TIMEOUT_MS
+            // connectTimeout covers only the TCP handshake, so the transport needs its own bound: a peer that
+            // accepts and then never sends its SSH banner would otherwise stall the redial loop forever.
+            client.timeout = ADDRESS_PROBE_TIMEOUT_MS
+            client.addHostKeyVerifier(pinnedHostKeyVerifier(known))
+            runInterruptible(io) { client.connect(address, port) }
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            false
+        } finally {
+            try {
+                client.close()
+            } catch (_: IOException) { }
         }
     }
 
@@ -231,6 +316,13 @@ class AgentSshPool @Inject constructor(
             currentCoroutineContext().ensureActive()
             entries[host.id] = Entry(chain, client, tunnel)
             reconnectHosts.add(host.id)
+            try {
+                addressStore.record(host.id, host.hostname, host.port, AgentAddressSource.CONNECTED)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // address bookkeeping must never tear down an established connection
+            }
             mutableCount.value = entries.values.count { it.client.isConnected && it.client.isAuthenticated }
             reconnect.succeeded(host.id)
             return client
@@ -347,5 +439,15 @@ class AgentSshPool @Inject constructor(
             entry.tunnel?.close()
         } catch (_: IOException) { }
         mutableCount.value = entries.values.count { it.client.isConnected && it.client.isAuthenticated }
+    }
+}
+
+/** Accepts a key only when it matches a pinned known-host record; every other outcome fails the handshake. */
+internal fun pinnedHostKeyVerifier(known: List<KnownHost>): HostKeyVerifier = object : HostKeyVerifier {
+    override fun findExistingAlgorithms(hostname: String, port: Int): List<String> = emptyList()
+
+    override fun verify(hostname: String, port: Int, key: PublicKey): Boolean {
+        val encoded = encodeSshHostKey(key) ?: return false
+        return trustedAgentHostKey(known, encoded.algorithm, encoded.wire)
     }
 }

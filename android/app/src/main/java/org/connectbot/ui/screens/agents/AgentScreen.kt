@@ -115,6 +115,7 @@ fun AgentScreen(
     val conversationState by viewModel.conversationState.collectAsState()
     val hasEarlier by viewModel.hasEarlier.collectAsState()
     val hasLatest by viewModel.hasLatest.collectAsState()
+    val addressChange by viewModel.addressChange.collectAsState()
     val fullText by viewModel.fullText.collectAsState()
     val reading by viewModel.reading.collectAsState()
     val hostId by viewModel.selectedHost.collectAsState()
@@ -279,6 +280,15 @@ fun AgentScreen(
                             color = MaterialTheme.colorScheme.error,
                             modifier = Modifier.padding(12.dp).heightIn(max = 120.dp).verticalScroll(rememberScrollState()),
                         )
+                    }
+                }
+                addressChange?.let { change ->
+                    Text(
+                        stringResource(R.string.agent_host_address_updated, change.fromAddress, change.toAddress),
+                        modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 12.dp),
+                    )
+                    TextButton(onClick = viewModel::dismissAddressChange) {
+                        Text(stringResource(R.string.agent_host_address_dismiss))
                     }
                 }
                 if (session == null) {
