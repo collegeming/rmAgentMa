@@ -37,13 +37,15 @@ metadata = json.loads((renderer / "renderer-build.json").read_text(encoding="utf
 assert metadata["assetManifestSha256"] == digest(renderer / "asset-manifest.json")
 assert metadata["upstream"]["commit"] == run("git", "rev-parse", "HEAD", cwd=upstream)
 
+product_apk = root / "android/app/build/outputs/apk/oss/debug/app-oss-debug.apk"
 apks = {
     "rmAgentMa-host-probe-debug.apk": root / "android/host-probe/build/outputs/apk/debug/host-probe-debug.apk",
     "rmAgentMa-host-probe-tests.apk": root / "android/host-probe/build/outputs/apk/androidTest/debug/host-probe-debug-androidTest.apk",
+    # Only this job builds the product APK with renderer assets, so ship it with the same evidence.
+    "rmAgentMa-app-renderer-debug.apk": product_apk,
 }
 expected = {"asset-manifest.json", "renderer-build.json"} | {record["path"] for record in manifest["files"]}
 verify_renderer_assets(apks["rmAgentMa-host-probe-debug.apk"], expected)
-product_apk = root / "android/app/build/outputs/apk/oss/debug/app-oss-debug.apk"
 verify_renderer_assets(product_apk, expected)
 
 sdk = Path(os.environ["ANDROID_HOME"])
