@@ -48,6 +48,8 @@
     <string name="agent_search_source_remote">远端</string>
     <!-- The hit is known only from the cached index, not from a remote read in this run. -->
     <string name="agent_search_source_cached">仅缓存</string>
+    <!-- Working directory of one search hit: every result shows the host and the directory it belongs to. -->
+    <string name="agent_search_hit_cwd">目录：%1$s</string>
     <!-- Historical sessions remain visible when disconnected. -->
     <string name="agent_cache_hint">历史记录可能来自缓存。刷新需要连接；出现错误并不表示缓存中的会话在线可用。</string>
     <!-- Native driver support is distinct from availability on a particular host. -->

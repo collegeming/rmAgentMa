@@ -20,7 +20,6 @@ package org.connectbot.agent
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
-import org.connectbot.R
 import org.rmagentma.core.AgentAvailability
 
 enum class AgentProbeState {
@@ -82,13 +81,6 @@ fun probeStateOf(availability: AgentAvailability, refreshing: Boolean): AgentPro
     availability.error in probeNoCapabilityCodes -> AgentProbeState.NO_PROTOCOL_CAPABILITY
     availability.error in probeConnectFailedCodes -> AgentProbeState.CONNECT_FAILED
     else -> AgentProbeState.UNKNOWN_FAILURE
-}
-
-/** Null means no existing resource describes the state, so callers keep their own text for it. */
-fun probeReasonKey(state: AgentProbeState): Int? = when (state) {
-    AgentProbeState.AVAILABLE -> R.string.agent_available
-    AgentProbeState.REFRESHING -> null
-    else -> R.string.agent_unavailable
 }
 
 // Declared-and-all-false capabilities disprove protocol readiness; absent capabilities keep the probe verdict.

@@ -20,7 +20,6 @@ package org.connectbot.agent
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.assertj.core.api.Assertions.assertThat
-import org.connectbot.R
 import org.junit.Test
 import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentKind
@@ -98,21 +97,6 @@ class AgentProbeStateTest {
             assertThat(probeStateOf(row, refreshing = true))
                 .describedAs(row.error.ifEmpty { "verified row" })
                 .isEqualTo(AgentProbeState.REFRESHING)
-        }
-    }
-
-    @Test
-    fun reasonKeysPointAtExistingStringsOnly() {
-        assertThat(probeReasonKey(AgentProbeState.AVAILABLE)).isEqualTo(R.string.agent_available)
-        assertThat(probeReasonKey(AgentProbeState.REFRESHING)).isNull()
-        listOf(
-            AgentProbeState.NOT_INSTALLED,
-            AgentProbeState.START_FAILED,
-            AgentProbeState.NO_PROTOCOL_CAPABILITY,
-            AgentProbeState.CONNECT_FAILED,
-            AgentProbeState.UNKNOWN_FAILURE,
-        ).forEach { state ->
-            assertThat(probeReasonKey(state)).describedAs(state.name).isEqualTo(R.string.agent_unavailable)
         }
     }
 

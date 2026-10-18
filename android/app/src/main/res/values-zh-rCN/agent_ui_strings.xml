@@ -48,6 +48,8 @@
     <string name="agent_search_source_remote" tools:machine_translated="true">远端</string>
     <!-- 该命中仅来自缓存索引，本次运行并未从远端读取。 -->
     <string name="agent_search_source_cached" tools:machine_translated="true">仅缓存</string>
+    <!-- 单条搜索命中显示的工作目录：每条结果都要标明所属主机与目录。 -->
+    <string name="agent_search_hit_cwd" tools:machine_translated="true">目录：%1$s</string>
     <!-- 断开连接后历史会话仍然可见。 -->
     <string name="agent_cache_hint" tools:machine_translated="true">历史记录可能来自缓存。刷新需要连接；出现错误并不表示缓存中的会话在线可用。</string>
     <!-- 原生驱动支持与某台主机上的可用性相互独立。 -->

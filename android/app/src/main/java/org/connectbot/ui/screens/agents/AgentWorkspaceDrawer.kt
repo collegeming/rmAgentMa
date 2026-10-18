@@ -146,7 +146,7 @@ internal fun AgentWorkspaceDrawer(
                 items(
                     search.hits,
                     key = { "hit:${it.session.hostId}:${it.session.agent.wireName}:${it.session.sessionId}:${it.session.cwd}" },
-                ) { hit -> AgentSearchHitRow(hit, availability, refreshingHosts, active, onOpen) }
+                ) { hit -> AgentSearchHitRow(hit, hosts, availability, refreshingHosts, active, onOpen) }
                 return@LazyColumn
             }
             if (workspaces.isEmpty()) item(key = "empty") { Text(stringResource(R.string.agent_no_sessions)) }
@@ -274,18 +274,20 @@ private fun AgentSearchRange(scope: AgentSearchScope, modifier: Modifier = Modif
     }
 }
 
-/** One hit keeps the matched field, its snippet and its source, and stays clickable to open the original session. */
+/** One hit keeps its host, agent, directory, matched field, snippet and source, and stays clickable to open it. */
 @Composable
 private fun AgentSearchHitRow(
     hit: AgentSearchHit,
+    hosts: List<Host>,
     availability: List<AgentAvailability>,
     refreshingHosts: Set<Long>,
     active: AgentSession?,
     onOpen: (AgentSession) -> Unit,
 ) {
+    val host = hosts.firstOrNull { it.id == hit.session.hostId }?.nickname ?: stringResource(R.string.agent_missing_host)
     val meta = listOf(
         stringResource(searchFieldText(hit.field)),
-        agentName(hit.session.agent),
+        stringResource(R.string.agent_choice_value, host, agentName(hit.session.agent)),
         stringResource(searchSourceText(hit.source)),
     ).joinToString(" · ")
     NavigationDrawerItem(
@@ -299,6 +301,12 @@ private fun AgentSearchHitRow(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(meta, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    stringResource(R.string.agent_search_hit_cwd, hit.session.cwd),
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Text(hit.snippet, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 AgentUnavailableNote(availability, refreshingHosts, hit.session.hostId, hit.session.agent)
             }

@@ -48,6 +48,8 @@
     <string name="agent_search_source_remote" tools:machine_translated="true">遠端</string>
     <!-- 該命中僅來自快取索引，本次執行並未從遠端讀取。 -->
     <string name="agent_search_source_cached" tools:machine_translated="true">僅快取</string>
+    <!-- 單筆搜尋命中顯示的工作目錄：每筆結果都要標明所屬主機與目錄。 -->
+    <string name="agent_search_hit_cwd" tools:machine_translated="true">目錄：%1$s</string>
     <!-- 中斷連線後歷史會話仍然可見。 -->
     <string name="agent_cache_hint" tools:machine_translated="true">記錄可能來自快取。重新整理需要連線；出現錯誤並不代表快取中的會話可於線上使用。</string>
     <!-- 原生驅動支援與某部主機上的可用性互相獨立。 -->
