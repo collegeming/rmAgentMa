@@ -19,19 +19,24 @@ package org.connectbot.renderer
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.assertj.core.api.Assertions.assertThat
+import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.data.entity.Host
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.rmagentma.core.AgentAvailability
+import org.rmagentma.core.AgentConfigOption
+import org.rmagentma.core.AgentConfigValue
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentOption
 import org.rmagentma.core.AgentSession
+import org.rmagentma.core.AgentSessionConfig
 
 @RunWith(AndroidJUnit4::class)
 class RendererActionsTest {
@@ -42,8 +47,6 @@ class RendererActionsTest {
     fun unsupportedRoutesFailWithAStableCodeAndReason() = runTest {
         val actions = RendererActions(FakeSource())
         val expected = mapOf(
-            "config.read" to "CONFIG_UNSUPPORTED",
-            "config.set" to "CONFIG_UNSUPPORTED",
             "runtime.visible" to "LEASE_UNSUPPORTED",
             "draft.load" to "DRAFT_UNSUPPORTED",
             "draft.save" to "DRAFT_UNSUPPORTED",
@@ -228,6 +231,186 @@ class RendererActionsTest {
         assertThat(anonymous.getString("code")).isEqualTo("HOST_NOT_CONNECTED")
     }
 
+    @Test
+    fun configReadPublishesTheAgentsOwnCatalogueUnderTheDataEnvelope() = runTest {
+        val source = openSource().apply {
+            configAccess = AgentConfigAccess.Available(
+                AgentSessionConfig(options = listOf(selectOption("model", "model", "gpt-5", "gpt-5", "gpt-4"))),
+            )
+        }
+        val result = RendererActions(source).handle("config.read", payload(conversation = true))
+        assertThat(result.status).isEqualTo(200)
+        val data = (result.body as JSONObject).getJSONObject("data")
+        val model = data.getJSONArray("config_options").getJSONObject(0)
+        assertThat(model.getString("id")).isEqualTo("model")
+        assertThat(model.getString("category")).isEqualTo("model")
+        assertThat(model.getString("type")).isEqualTo("select")
+        assertThat(model.getString("current_value")).isEqualTo("gpt-5")
+        assertThat(model.getJSONArray("options").getJSONObject(0).getString("value")).isEqualTo("gpt-5")
+        assertThat(model.getJSONArray("options").getJSONObject(0).getString("name")).isEqualTo("gpt-5 名称")
+    }
+
+    @Test
+    fun anOptionWithoutACurrentValueIsNotShownAsChosen() = runTest {
+        val source = openSource().apply {
+            configAccess = AgentConfigAccess.Available(
+                AgentSessionConfig(options = listOf(selectOption("model", "model", null, "gpt-5", "gpt-4"))),
+            )
+        }
+        val model = configOptions(source).getJSONObject(0)
+        assertThat(model.isNull("current_value")).isTrue()
+        assertThat(model.getJSONArray("options").length()).isEqualTo(2)
+    }
+
+    @Test
+    fun anUnknownOptionTypeStaysReadableInsteadOfBeingDropped() = runTest {
+        val source = openSource().apply {
+            configAccess = AgentConfigAccess.Available(
+                AgentSessionConfig(
+                    options = listOf(
+                        AgentConfigOption(id = "telemetry", name = "遥测", type = "boolean", values = listOf(AgentConfigValue("true", "开"))),
+                        AgentConfigOption(id = "future", name = "未来选项", type = "hologram"),
+                    ),
+                ),
+            )
+        }
+        val options = configOptions(source)
+        assertThat(options.length()).isEqualTo(2)
+        assertThat(options.getJSONObject(0).getString("type")).isEqualTo("boolean")
+        assertThat(options.getJSONObject(1).getString("type")).isEqualTo("hologram")
+        // No catalogue and no current value are invented for it, and only a `select` option is drawn as a picker.
+        assertThat(options.getJSONObject(1).isNull("current_value")).isTrue()
+        assertThat(options.getJSONObject(1).getJSONArray("options").length()).isZero()
+    }
+
+    @Test
+    fun modesAndModelsArePublishedUnderTheRoleTheRendererReads() = runTest {
+        val source = openSource().apply {
+            configAccess = AgentConfigAccess.Available(
+                AgentSessionConfig(
+                    modes = listOf(AgentConfigValue("plan", "计划"), AgentConfigValue("code", "代码")),
+                    currentModeId = "code",
+                    models = listOf(AgentConfigValue("gpt-5", "GPT-5")),
+                ),
+            )
+        }
+        val options = configOptions(source)
+        assertThat(options.length()).isEqualTo(2)
+        val mode = optionById(options, "mode")
+        assertThat(mode.getString("category")).isEqualTo("mode")
+        assertThat(mode.getString("type")).isEqualTo("select")
+        assertThat(mode.getString("current_value")).isEqualTo("code")
+        assertThat(mode.getJSONArray("options").getJSONObject(1).getString("value")).isEqualTo("code")
+        val model = optionById(options, "model")
+        assertThat(model.getString("category")).isEqualTo("model")
+        assertThat(model.isNull("current_value")).isTrue()
+    }
+
+    @Test
+    fun setterAnswersWithTheAgentsOwnNewSnapshot() = runTest {
+        val source = openSource().apply {
+            configAccess = AgentConfigAccess.Available(
+                AgentSessionConfig(options = listOf(selectOption("model", "model", "gpt-5", "gpt-5", "gpt-4"))),
+            )
+            setter = { _, value ->
+                AgentConfigAccess.Available(AgentSessionConfig(options = listOf(selectOption("model", "model", value, "gpt-5", "gpt-4"))))
+            }
+        }
+        val result = RendererActions(source).handle("config.set", payload(conversation = true, params = mapOf("optionId" to "model"), body = mapOf("value" to "gpt-4")))
+        assertThat(result.status).isEqualTo(200)
+        val data = (result.body as JSONObject).getJSONObject("data")
+        assertThat(data.getString("confirmation")).isEqualTo("observed")
+        assertThat(data.getJSONArray("config_options").getJSONObject(0).getString("current_value")).isEqualTo("gpt-4")
+        assertThat(source.writes).containsExactly("model" to "gpt-4")
+    }
+
+    @Test
+    fun setterDistinguishesAnUnconfirmedChangeFromARejection() = runTest {
+        val source = openSource().apply {
+            configAccess = AgentConfigAccess.Available(
+                AgentSessionConfig(options = listOf(selectOption("model", "model", "gpt-5", "gpt-5", "gpt-4"))),
+            )
+            // A switch the Agent takes but applies only from the next turn must not be reported as in use.
+            setter = { _, _ ->
+                AgentConfigAccess.Available(AgentSessionConfig(options = listOf(selectOption("model", "model", "gpt-5", "gpt-5", "gpt-4"))))
+            }
+        }
+        val actions = RendererActions(source)
+        val pending = actions.handle("config.set", payload(conversation = true, params = mapOf("optionId" to "model"), body = mapOf("value" to "gpt-4")))
+        val pendingData = (pending.body as JSONObject).getJSONObject("data")
+        assertThat(pendingData.getString("confirmation")).isEqualTo("pending_next_turn")
+        assertThat(pendingData.getJSONArray("config_options").getJSONObject(0).getString("current_value")).isEqualTo("gpt-5")
+
+        source.setter = { _, _ -> AgentConfigAccess.Unconfirmed((source.configAccess as AgentConfigAccess.Available).config) }
+        val acked = actions.handle("config.set", payload(conversation = true, params = mapOf("optionId" to "model"), body = mapOf("value" to "gpt-4")))
+        val ackedData = (acked.body as JSONObject).getJSONObject("data")
+        assertThat(ackedData.getString("confirmation")).isEqualTo("command_ack")
+        assertThat(ackedData.getJSONArray("config_options").getJSONObject(0).getString("current_value")).isEqualTo("gpt-5")
+    }
+
+    @Test
+    fun aFailedWriteIsReportedAsAFailureAndNeverAsAChange() = runTest {
+        val source = openSource().apply {
+            configAccess = AgentConfigAccess.Available(
+                AgentSessionConfig(options = listOf(selectOption("model", "model", "gpt-5", "gpt-5", "gpt-4"))),
+            )
+            setter = { _, _ -> throw IllegalStateException("ACP request failed (code -32602): unknown configId") }
+        }
+        val result = RendererActions(source).handle("config.set", payload(conversation = true, params = mapOf("optionId" to "model"), body = mapOf("value" to "gpt-4")))
+        assertThat(result.status).isEqualTo(500)
+        val body = result.body as JSONObject
+        assertThat(body.getBoolean("success")).isFalse()
+        assertThat(body.getString("code")).isEqualTo("HANDLE_FAILED")
+        assertThat(body.getString("error")).contains("unknown configId")
+        assertThat(source.writes).containsExactly("model" to "gpt-4")
+    }
+
+    @Test
+    fun configurationRoutesRefuseIdsAndValuesTheCatalogueNeverOffered() = runTest {
+        val source = openSource().apply {
+            configAccess = AgentConfigAccess.Available(
+                AgentSessionConfig(options = listOf(selectOption("model", "model", "gpt-5", "gpt-5", "gpt-4"))),
+            )
+        }
+        val actions = RendererActions(source)
+        val unknown = actions.handle("config.set", payload(conversation = true, params = mapOf("optionId" to "temperature"), body = mapOf("value" to "0.5")))
+        assertThat(unknown.status).isEqualTo(404)
+        assertThat((unknown.body as JSONObject).getString("code")).isEqualTo("OPTION_NOT_FOUND")
+        val value = actions.handle("config.set", payload(conversation = true, params = mapOf("optionId" to "model"), body = mapOf("value" to "gpt-6")))
+        assertThat(value.status).isEqualTo(422)
+        assertThat((value.body as JSONObject).getString("code")).isEqualTo("INVALID_CONFIG")
+        val blank = actions.handle("config.set", payload(conversation = true, params = mapOf("optionId" to "model"), body = mapOf("value" to "")))
+        assertThat(blank.status).isEqualTo(422)
+        assertThat(source.writes).isEmpty()
+    }
+
+    @Test
+    fun configurationRoutesFailExplicitlyWithoutAnOpenAcpConversation() = runTest {
+        val closed = FakeSource()
+        val actions = RendererActions(closed)
+        for (action in listOf("config.read", "config.set")) {
+            val result = actions.handle(action, payload(conversation = true, params = mapOf("optionId" to "model"), body = mapOf("value" to "gpt-5")))
+            assertThat(result.status).describedAs(action).isEqualTo(404)
+            assertThat((result.body as JSONObject).getString("code")).isEqualTo("CONVERSATION_NOT_FOUND")
+        }
+        val loading = openSource().apply { active = false }
+        val loadingActions = RendererActions(loading)
+        for (action in listOf("config.read", "config.set")) {
+            val result = loadingActions.handle(action, payload(conversation = true, params = mapOf("optionId" to "model"), body = mapOf("value" to "gpt-5")))
+            assertThat(result.status).describedAs(action).isEqualTo(409)
+        }
+        // A session whose Agent has no ACP configuration surface must keep failing, not answer with an empty picker.
+        val unsupported = openSource()
+        for (action in listOf("config.read", "config.set")) {
+            val result = RendererActions(unsupported).handle(action, payload(conversation = true, params = mapOf("optionId" to "model"), body = mapOf("value" to "gpt-5")))
+            assertThat(result.status).describedAs(action).isEqualTo(501)
+            assertThat((result.body as JSONObject).getString("code")).describedAs(action).isEqualTo("CONFIG_UNSUPPORTED")
+        }
+        // Runtime ensure answers an empty catalogue for it instead of refusing the whole conversation.
+        val ensured = (RendererActions(unsupported).handle("runtime.ensure", payload(conversation = true)).body as JSONObject).getJSONObject("data")
+        assertThat(ensured.getJSONArray("config_options").length()).isZero()
+    }
+
     private fun payload(conversation: Boolean = false, params: Map<String, String> = emptyMap(), query: Map<String, String> = emptyMap(), body: Map<String, Any?> = emptyMap()): JSONObject {
         val resolved = if (conversation) params + ("conversationId" to RENDERER_CONVERSATION) else params
         return JSONObject()
@@ -238,6 +421,29 @@ class RendererActionsTest {
 
     private fun jsonOf(vararg fields: Pair<String, Any?>): JSONObject = JSONObject().apply {
         fields.forEach { (key, value) -> put(key, value) }
+    }
+
+    /** The open conversation the renderer is bound to, with whatever configuration access a test hands it. */
+    private fun openSource(): FakeSource = FakeSource().apply {
+        session = this@RendererActionsTest.session
+        active = true
+    }
+
+    private fun selectOption(id: String, category: String, current: String?, vararg values: String): AgentConfigOption = AgentConfigOption(
+        id = id,
+        name = id,
+        category = category,
+        type = "select",
+        currentValue = current?.let(::JsonPrimitive),
+        values = values.map { AgentConfigValue(it, "$it 名称") },
+    )
+
+    private fun optionById(catalog: JSONArray, id: String): JSONObject = (0 until catalog.length()).map { catalog.getJSONObject(it) }.first { it.getString("id") == id }
+
+    private suspend fun configOptions(source: FakeSource): JSONArray {
+        val result = RendererActions(source).handle("config.read", payload(conversation = true))
+        assertThat(result.status).isEqualTo(200)
+        return (result.body as JSONObject).getJSONObject("data").getJSONArray("config_options")
     }
 
     /** In-memory stand-in for [RendererSource]; every fact a test needs is set explicitly. */
@@ -254,6 +460,9 @@ class RendererActionsTest {
         var hosts: List<Host> = emptyList()
         var availability: List<AgentAvailability> = emptyList()
         var currentTheme = "light"
+        var configAccess: AgentConfigAccess = AgentConfigAccess.Unsupported
+        var setter: (String, String) -> AgentConfigAccess = { _, _ -> AgentConfigAccess.Closed }
+        val writes = mutableListOf<Pair<String, String>>()
         val responded = mutableListOf<Pair<AgentEvent, String>>()
         var cancelCount = 0
 
@@ -291,6 +500,13 @@ class RendererActionsTest {
 
         override fun setTheme(value: String) {
             currentTheme = value
+        }
+
+        override suspend fun config(): AgentConfigAccess = configAccess
+
+        override suspend fun setConfigOption(optionId: String, value: String): AgentConfigAccess {
+            writes += optionId to value
+            return setter(optionId, value)
         }
     }
 }

@@ -49,6 +49,7 @@ import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
+import org.rmagentma.core.AgentSessionConfig
 import org.rmagentma.core.AgentSessionHandle
 import org.rmagentma.core.RemoteAgentProbe
 import org.rmagentma.core.RemoteScanner
@@ -68,6 +69,29 @@ enum class AgentConversationState {
     Failed,
     Closed,
 }
+
+/** What the open conversation can say about its ACP configuration options. */
+sealed interface AgentConfigAccess {
+    /** The Agent's own snapshot of the open conversation, as it reports it now. */
+    data class Available(val config: AgentSessionConfig) : AgentConfigAccess
+
+    /**
+     * A write the Agent answered without reporting a new snapshot: it was delivered, nothing confirmed it.
+     * [config] is the conversation's configuration as it stands, or null once that conversation stopped being open.
+     */
+    data class Unconfirmed(val config: AgentSessionConfig?) : AgentConfigAccess
+
+    /** The conversation is open on a backend that has no ACP configuration surface. */
+    data object Unsupported : AgentConfigAccess
+
+    /** No conversation is open, or the one this call was made for stopped being open. */
+    data object Closed : AgentConfigAccess
+}
+
+// shortcut: agent-core reports a delivered write that came back without a snapshot as exactly this IOException, so
+// the message is the only signal that separates it from a rejection or a broken channel; upgrade to a typed result
+// if the driver ever grows one.
+private const val UNREPORTED_CONFIG_WRITE = "Agent did not report the updated configuration"
 
 @Singleton
 class AgentRepository @Inject constructor(
@@ -509,6 +533,42 @@ class AgentRepository @Inject constructor(
             }
         }.await()
     }
+
+    /**
+     * The open conversation's ACP configuration as its Agent reports it now, read under the same state lock every
+     * other conversation call uses, so the answer can only describe the conversation that is open at this moment.
+     */
+    suspend fun config(): AgentConfigAccess = withContext(dispatchers.io) {
+        synchronized(stateLock) {
+            val open = handle ?: return@synchronized AgentConfigAccess.Closed
+            (open as? AcpSessionHandle)?.let { AgentConfigAccess.Available(it.config) } ?: AgentConfigAccess.Unsupported
+        }
+    }
+
+    /**
+     * Sets one ACP configuration option and reports what the Agent did with it. A value the Agent rejects throws;
+     * a change it accepted without reporting a snapshot is [AgentConfigAccess.Unconfirmed] and never a success. A
+     * result is only handed back for the conversation it was made for, so a session switch cannot inherit it.
+     */
+    suspend fun setConfigOption(optionId: String, value: String): AgentConfigAccess = operation {
+        require(optionId.isNotBlank())
+        val (open, token) = synchronized(stateLock) {
+            val current = handle ?: return@operation AgentConfigAccess.Closed
+            (current as? AcpSessionHandle)?.let { it to generation } ?: return@operation AgentConfigAccess.Unsupported
+        }
+        try {
+            val updated = open.setConfigOption(optionId, value)
+            if (stillOpen(open, token)) AgentConfigAccess.Available(updated) else AgentConfigAccess.Closed
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: java.io.IOException) {
+            if (e.message != UNREPORTED_CONFIG_WRITE) throw e
+            // The Agent answered the write, so it was delivered; without a snapshot nothing confirms the value.
+            AgentConfigAccess.Unconfirmed(if (stillOpen(open, token)) open.config else null)
+        }
+    }
+
+    private fun stillOpen(open: AcpSessionHandle, token: Long): Boolean = synchronized(stateLock) { generation == token && handle === open }
 
     suspend fun respondPermission(expectedSession: AgentSession, expectedEvent: AgentEvent, id: String, option: String) = respondInteraction(expectedSession, expectedEvent, id, "permission") { current -> current.respondPermission(id, option) }
 

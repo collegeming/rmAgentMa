@@ -17,6 +17,7 @@
 
 package org.connectbot.renderer
 
+import org.connectbot.agent.AgentConfigAccess
 import org.json.JSONArray
 import org.json.JSONObject
 import org.rmagentma.rendererhost.ProbeFailure
@@ -58,6 +59,8 @@ internal class RendererActions(private val source: RendererSource) {
         "approvals.review" -> review(params, body)
         "runtime.ensure" -> ensure()
         "runtime.snapshot" -> snapshot()
+        "config.read" -> readConfig(params)
+        "config.set" -> setConfig(params, body)
         "usage.read" -> usage()
         "projects.list" -> success(RendererProjection.projects(source.snapshot().hosts))
         "project.read" -> readProject(params)
@@ -217,8 +220,7 @@ internal class RendererActions(private val source: RendererSource) {
         return success(
             json(
                 "recovered" to false,
-                // The agent handle never exposed its config options, so none are claimed here.
-                "config_options" to JSONArray(),
+                "config_options" to catalogue(snapshot),
                 "runtime" to RendererProjection.runtime(snapshot, snapshot.pending()),
             ),
         )
@@ -237,12 +239,86 @@ internal class RendererActions(private val source: RendererSource) {
                 "runtime" to RendererProjection.runtime(snapshot, snapshot.pending()),
                 "messages" to JSONArray(RendererProjection.messages(snapshot.events, snapshot.epoch, snapshot.turnId)),
                 "pending" to pending,
-                "config_options" to JSONArray(),
+                "config_options" to catalogue(snapshot),
                 // Background execution is not implemented on this host and must not look verified.
                 "backgroundVerified" to false,
             ),
         )
     }
+
+    /**
+     * The Agent's own configuration catalogue for the open conversation. A conversation that is not open yet has
+     * none to publish, so this reports an empty list instead of the choices of whichever session came before it.
+     */
+    private suspend fun catalogue(snapshot: RendererSnapshot): JSONArray {
+        if (!snapshot.active) return JSONArray()
+        val access = source.config()
+        return if (access is AgentConfigAccess.Available) RendererProjection.configOptions(access.config) else JSONArray()
+    }
+
+    /**
+     * Reads the open conversation's configuration. The catalogue is whatever the Agent reported, including option
+     * types this host cannot draw, and it is only served while that same conversation is open.
+     */
+    private suspend fun readConfig(params: JSONObject): ProbeResult {
+        if (params.optString("conversationId") != RENDERER_CONVERSATION) return notFound()
+        val snapshot = source.snapshot()
+        if (snapshot.session == null) return notFound()
+        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_OPEN", "该会话尚未就绪；请在产品对话页打开后重试。")
+        return when (val access = source.config()) {
+            is AgentConfigAccess.Available -> success(json("config_options" to RendererProjection.configOptions(access.config)))
+            AgentConfigAccess.Unsupported -> fail(501, "CONFIG_UNSUPPORTED", "该会话的 Agent 没有可读的模型或配置选项。")
+            else -> fail(409, "CONVERSATION_NOT_OPEN", "该会话在读取期间已关闭。")
+        }
+    }
+
+    /**
+     * Sets one option of the catalogue this host published, and answers with the Agent's own confirmation. A value
+     * the Agent never advertised is refused before anything is sent, and a change the Agent took without reporting
+     * a snapshot is answered as `command_ack` rather than as applied.
+     */
+    private suspend fun setConfig(params: JSONObject, body: JSONObject): ProbeResult {
+        if (params.optString("conversationId") != RENDERER_CONVERSATION) return notFound()
+        val optionId = params.optString("optionId")
+        val value = body.opt("value")
+        if (value !is String || value.isEmpty()) return fail(422, "INVALID_CONFIG", "配置值必须是非空字符串。")
+        val snapshot = source.snapshot()
+        if (snapshot.session == null) return notFound()
+        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_READY", "会话尚未打开，暂时不能切换配置。")
+        val published = when (val access = source.config()) {
+            is AgentConfigAccess.Available -> RendererProjection.configOptions(access.config)
+            AgentConfigAccess.Unsupported -> return fail(501, "CONFIG_UNSUPPORTED", "该会话的 Agent 没有可切换的模型或配置选项。")
+            else -> return fail(409, "CONVERSATION_NOT_READY", "该会话在写入期间已关闭。")
+        }
+        val option = option(published, optionId) ?: return fail(404, "OPTION_NOT_FOUND", "该会话没有这个配置选项。")
+        val choices = option.optJSONArray("options") ?: JSONArray()
+        if (choices.length() > 0 && (0 until choices.length()).none { choices.getJSONObject(it).optString("value") == value }) {
+            return fail(422, "INVALID_CONFIG", "该配置选项不接受这个值。")
+        }
+        return when (val result = source.setConfigOption(optionId, value)) {
+            is AgentConfigAccess.Available -> {
+                val updated = RendererProjection.configOptions(result.config)
+                success(json("confirmation" to confirmation(updated, optionId, value), "config_options" to updated))
+            }
+
+            // The agent answered the write, so it was delivered; without a snapshot no value can be claimed.
+            is AgentConfigAccess.Unconfirmed -> success(
+                json("confirmation" to "command_ack", "config_options" to result.config?.let(RendererProjection::configOptions)),
+            )
+
+            AgentConfigAccess.Unsupported -> fail(501, "CONFIG_UNSUPPORTED", "该会话的 Agent 没有可切换的模型或配置选项。")
+
+            else -> fail(409, "CONVERSATION_NOT_READY", "该会话已关闭或已切换，配置未在此会话生效。")
+        }
+    }
+
+    /** `observed` only when the Agent's own new catalogue reports the requested value in use. */
+    private fun confirmation(catalog: JSONArray, optionId: String, value: String): String {
+        val current = option(catalog, optionId)?.opt("current_value") as? String
+        return if (current == value) "observed" else "pending_next_turn"
+    }
+
+    private fun option(catalog: JSONArray, optionId: String): JSONObject? = (0 until catalog.length()).map { catalog.getJSONObject(it) }.firstOrNull { it.optString("id") == optionId }
 
     private suspend fun usage(): ProbeResult {
         val snapshot = source.snapshot()
@@ -258,7 +334,6 @@ internal class RendererActions(private val source: RendererSource) {
     }
 
     private fun unsupported(action: String): ProbeResult = when (action) {
-        "config.read", "config.set" -> fail(501, "CONFIG_UNSUPPORTED", "本机未向渲染器开放模型与配置选项。")
         "runtime.visible" -> fail(501, "LEASE_UNSUPPORTED", "本机不支持会话可见租约。")
         "draft.load", "draft.save" -> fail(501, "DRAFT_UNSUPPORTED", "本机没有可供渲染器读写的草稿存储。")
         "attachment.begin", "attachment.chunk", "attachment.finish", "attachment.abort" -> fail(501, "ATTACHMENT_UNSUPPORTED", "本机未开放附件上传。")

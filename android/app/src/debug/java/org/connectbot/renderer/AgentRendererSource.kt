@@ -24,6 +24,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
+import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConversationState
 import org.connectbot.agent.AgentIndexStore
 import org.connectbot.agent.AgentRepository
@@ -31,6 +32,7 @@ import org.connectbot.data.HostRepository
 import org.connectbot.di.CoroutineDispatchers
 import org.connectbot.util.PreferenceConstants
 import org.connectbot.util.ThemeMode
+import org.json.JSONArray
 import org.json.JSONObject
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.rendererhost.json
@@ -180,6 +182,11 @@ class AgentRendererSource @Inject constructor(
         preferences.edit { putString(PreferenceConstants.THEME_MODE, mode.name) }
     }
 
+    /** The renderer reads and writes configuration through the repository singleton, never a channel of its own. */
+    override suspend fun config(): AgentConfigAccess = repository.config()
+
+    override suspend fun setConfigOption(optionId: String, value: String): AgentConfigAccess = repository.setConfigOption(optionId, value)
+
     private fun theme(): String = ThemeMode.fromString(preferences.getString(PreferenceConstants.THEME_MODE, null)).name.lowercase()
 
     private fun active(): Boolean = repository.conversationState.value == AgentConversationState.Ready && repository.activeSession.value != null
@@ -187,8 +194,31 @@ class AgentRendererSource @Inject constructor(
     private suspend fun collect() = supervisorScope {
         launch { repository.events.collect { publishEvents(it) } }
         launch { repository.conversationState.collect { finishOnDisconnect(it) } }
-        launch { repository.activeSession.collect { publishRuntime() } }
+        launch {
+            repository.activeSession.collect {
+                publishRuntime()
+                publishConfigOptions()
+            }
+        }
         launch { repository.busy.collect { publishRuntime() } }
+    }
+
+    /**
+     * Re-announces the open conversation's configuration whenever the product opens or closes a session, so a
+     * picker the renderer already drew cannot keep showing the models and modes of the session it replaced. The
+     * frame is the renderer's own `acp_config_option` message; an empty catalogue is the truth of having none.
+     */
+    private suspend fun publishConfigOptions() {
+        val access = repository.config()
+        val catalog = (access as? AgentConfigAccess.Available)?.let { RendererProjection.configOptions(it.config) } ?: JSONArray()
+        publish(
+            "message.stream",
+            json(
+                "conversation_id" to RENDERER_CONVERSATION,
+                "type" to "acp_config_option",
+                "data" to json("config_options" to catalog),
+            ),
+        )
     }
 
     /** A conversation that stopped being ready can never keep an accepted turn, or the renderer would look busy forever. */

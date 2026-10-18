@@ -18,12 +18,16 @@
 package org.connectbot.renderer
 
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
 import org.connectbot.data.entity.Host
 import org.json.JSONArray
 import org.json.JSONObject
 import org.rmagentma.core.AgentAvailability
+import org.rmagentma.core.AgentConfigOption
+import org.rmagentma.core.AgentConfigValue
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
+import org.rmagentma.core.AgentSessionConfig
 import org.rmagentma.rendererhost.array
 import org.rmagentma.rendererhost.json
 
@@ -80,8 +84,8 @@ internal object RendererProjection {
             "created_at" to (row?.createdAt?.takeIf { it > 0 } ?: session.createdAt),
             "modified_at" to (row?.updatedAt?.takeIf { it > 0 } ?: session.updatedAt),
             "status" to if (snapshot.turnId != null || pending != null) "running" else "finished",
-            // This host never learned which model the conversation uses and refuses config options, so both
-            // stay blank instead of naming a model that is not in use.
+            // The renderer's model and mode pickers read the Agent's own option catalogue from `config.read`; this
+            // row names no model, and the cached list stays empty because the host keeps no catalogue of its own.
             "model" to json("provider_id" to "", "use_model" to "", "model" to ""),
             "fork_capability" to json("at_turn" to false),
             "prompt_capability" to json("image" to false, "audio" to false),
@@ -212,6 +216,48 @@ internal object RendererProjection {
             result.put("cost", json("amount" to amount, "currency" to cost.optString("currency")))
         }
         return result
+    }
+
+    /**
+     * The open conversation's configuration surface as the renderer's own option list. Every option keeps the
+     * Agent's id, category and type, a type this host cannot draw included, so an unknown one stays readable
+     * instead of being dropped or renamed here. A catalogue the Agent never sent stays empty and a current value
+     * it never stated stays null, so no removed or unused option is shown as chosen.
+     */
+    fun configOptions(config: AgentSessionConfig): JSONArray {
+        val options = config.options.map(::configOption)
+        val claimed = options.flatMap { listOf(it.optString("id"), it.optString("category")) }.toSet()
+        val roles = mutableListOf<JSONObject>()
+        // ACP names modes and models in lists of their own, while the renderer reads all three roles from this
+        // option list; an uncovered catalogue is handed over under the protocol's own option id for that role.
+        if (config.models.isNotEmpty() && "model" !in claimed) roles += selectOption("model", "model", config.models, config.currentModelId)
+        if (config.modes.isNotEmpty() && "mode" !in claimed) roles += selectOption("mode", "mode", config.modes, config.currentModeId)
+        return array(*(options + roles).toTypedArray())
+    }
+
+    private fun configOption(option: AgentConfigOption): JSONObject = json(
+        "id" to option.id,
+        "name" to option.name,
+        "description" to option.description,
+        "category" to option.category,
+        "type" to option.type,
+        "current_value" to option.currentValue?.contentOrNull,
+        "options" to array(*option.values.map(::configValue).toTypedArray()),
+    )
+
+    /** One catalogue entry: a role only the Agent's own lists carry has no name or description to report. */
+    private fun selectOption(id: String, category: String, values: List<AgentConfigValue>, current: String?): JSONObject = json(
+        "id" to id,
+        "category" to category,
+        "type" to "select",
+        "current_value" to current,
+        "options" to array(*values.map(::configValue).toTypedArray()),
+    )
+
+    private fun configValue(value: AgentConfigValue): JSONObject {
+        val entry = json("value" to value.value, "name" to value.name)
+        if (value.description.isNotEmpty()) entry.put("description", value.description)
+        return entry
     }
 
     /** The raw update is a kotlinx JSON tree; the renderer's payloads are built with org.json. */

@@ -17,6 +17,7 @@
 
 package org.connectbot.renderer
 
+import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.data.entity.Host
 import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
@@ -78,4 +79,10 @@ interface RendererSource {
 
     /** Persists the whitelisted theme setting; throws ProbeFailure for values the product cannot store. */
     fun setTheme(value: String)
+
+    /** ACP configuration the open conversation reports; [AgentConfigAccess.Unsupported] when its Agent has none. */
+    suspend fun config(): AgentConfigAccess
+
+    /** Sets one configuration option through the same repository the Compose chat uses; throws when rejected. */
+    suspend fun setConfigOption(optionId: String, value: String): AgentConfigAccess
 }
