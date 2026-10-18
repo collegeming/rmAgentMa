@@ -70,8 +70,12 @@ class AgentHostAddressStore @Inject constructor(
             }
             val previous = rows.filter { it.first == hostId }.map { it.second }
             val newest = previous.maxOfOrNull { it.verifiedAtMillis } ?: 0L
+            // A later connection success only confirms the rediscovered address, so it must not downgrade that source.
+            val mergedSource = previous.firstOrNull { it.address == address && it.port == port }
+                ?.takeIf { it.source == AgentAddressSource.REDISCOVERED }
+                ?.source ?: source
             // A fresh record must outrank same-millisecond predecessors, or the per-host cap drops it as the oldest.
-            val fresh = HostAddressRecord(address, port, maxOf(System.currentTimeMillis(), newest + 1L), source)
+            val fresh = HostAddressRecord(address, port, maxOf(System.currentTimeMillis(), newest + 1L), mergedSource)
             val kept = (previous.filterNot { it.address == address && it.port == port } + fresh)
                 .sortedByDescending { it.verifiedAtMillis }
                 .take(MAX_PER_HOST)

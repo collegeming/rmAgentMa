@@ -94,6 +94,22 @@ class AgentHostAddressStoreTest {
     }
 
     @Test
+    fun aConnectionSuccessKeepsTheRediscoveredSourceWhileARediscoveryStillReplacesIt() = runTest {
+        val store = store(context(), testScheduler)
+        store.record(1, "10.0.0.7", 22, AgentAddressSource.REDISCOVERED)
+        val rediscovered = store.latest(1)!!
+        store.record(1, "10.0.0.7", 22, AgentAddressSource.CONNECTED)
+        val confirmed = store.latest(1)!!
+        assertThat(confirmed.source).isEqualTo(AgentAddressSource.REDISCOVERED)
+        assertThat(confirmed.verifiedAtMillis).isGreaterThan(rediscovered.verifiedAtMillis)
+        assertThat(store.candidates(1, 22)).hasSize(1)
+
+        store.record(1, "10.0.0.8", 22, AgentAddressSource.CONNECTED)
+        store.record(1, "10.0.0.8", 22, AgentAddressSource.REDISCOVERED)
+        assertThat(store.latest(1)!!.source).isEqualTo(AgentAddressSource.REDISCOVERED)
+    }
+
+    @Test
     fun damagedHistoryReportsOnceThenRebuildsFromTheNextVerifiedAddress() = runTest {
         val context = context()
         File(context.noBackupFilesDir, "agent-host-addresses-v1.json").writeText("broken-json")
