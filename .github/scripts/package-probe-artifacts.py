@@ -18,6 +18,14 @@ def run(*args, cwd=None):
     return subprocess.check_output(args, cwd=cwd, text=True).strip()
 
 
+def verify_renderer_assets(apk_path, expected):
+    with zipfile.ZipFile(apk_path) as apk:
+        actual = {name.removeprefix("assets/renderer/") for name in apk.namelist() if name.startswith("assets/renderer/") and not name.endswith("/")}
+        assert actual == expected, f"{apk_path.name} renderer file set differs from the verified renderer"
+        for name in sorted(expected):
+            assert apk.read("assets/renderer/" + name) == (renderer / name).read_bytes(), f"{apk_path.name} renderer differs: {name}"
+
+
 root = Path(os.environ["GITHUB_WORKSPACE"])
 temporary = Path(os.environ["RUNNER_TEMP"])
 renderer = temporary / "probe-renderer"
@@ -33,12 +41,10 @@ apks = {
     "rmAgentMa-host-probe-debug.apk": root / "android/host-probe/build/outputs/apk/debug/host-probe-debug.apk",
     "rmAgentMa-host-probe-tests.apk": root / "android/host-probe/build/outputs/apk/androidTest/debug/host-probe-debug-androidTest.apk",
 }
-with zipfile.ZipFile(apks["rmAgentMa-host-probe-debug.apk"]) as apk:
-    expected = {"asset-manifest.json", "renderer-build.json"} | {record["path"] for record in manifest["files"]}
-    actual = {name.removeprefix("assets/renderer/") for name in apk.namelist() if name.startswith("assets/renderer/") and not name.endswith("/")}
-    assert actual == expected, "APK renderer file set differs from the verified renderer"
-    for name in sorted(expected):
-        assert apk.read("assets/renderer/" + name) == (renderer / name).read_bytes(), f"APK renderer differs: {name}"
+expected = {"asset-manifest.json", "renderer-build.json"} | {record["path"] for record in manifest["files"]}
+verify_renderer_assets(apks["rmAgentMa-host-probe-debug.apk"], expected)
+product_apk = root / "android/app/build/outputs/apk/oss/debug/app-oss-debug.apk"
+verify_renderer_assets(product_apk, expected)
 
 sdk = Path(os.environ["ANDROID_HOME"])
 signers = sorted(sdk.glob("build-tools/*/apksigner"), key=lambda path: tuple(int(part) for part in path.parent.name.split(".")) if all(part.isdigit() for part in path.parent.name.split(".")) else (0,))
@@ -84,6 +90,11 @@ provenance = {
     "assetManifestSha256": digest(renderer / "asset-manifest.json"),
     "rendererBuildSha256": digest(renderer / "renderer-build.json"),
     "apks": apk_records,
+    "rendererHostAppApk": {
+        "path": product_apk.relative_to(root).as_posix(),
+        "sha256": digest(product_apk),
+        "rendererAssets": "assets/renderer/** verified byte-identical to renderer/",
+    },
     "signing": "runner-generated debug key; fingerprints archived, private key excluded",
     "deviceTests": "compiled and packaged only; not executed on a device",
     "dshIntegration": "not executed in CI; no Agent installation or provider requests",

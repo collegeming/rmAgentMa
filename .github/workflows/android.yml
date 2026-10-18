@@ -265,9 +265,11 @@ jobs:
         run: |
           mkdir -p ci-reports
           ./gradlew --no-daemon --no-configuration-cache --stacktrace --profile --continue \
+            -PciDebug=true \
             "-PRendererAssetsDir=$RUNNER_TEMP/probe-renderer" \
             :host-probe:lint :host-probe:check :host-probe:test \
             :host-probe:assembleDebug :host-probe:assembleDebugAndroidTest \
+            :app:assembleOssDebug \
             2>&1 | tee ci-reports/renderer-probe-gradle.txt
 
       - name: Verify APK assets and package source, hashes, licenses and certificate fingerprints

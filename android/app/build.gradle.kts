@@ -1,7 +1,10 @@
+import groovy.json.JsonSlurper
 import io.github.reactivecircus.appversioning.toSemVer
 import org.gradle.api.tasks.testing.Test
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.rmagentma.build.PrepareMoshArtifacts
+import java.nio.file.Files
+import java.security.MessageDigest
 
 plugins {
     alias(libs.plugins.android.application)
@@ -24,6 +27,19 @@ val prepareOssMoshArtifacts = tasks.register<PrepareMoshArtifacts>("prepareOssMo
     downloadDirectory.set(layout.buildDirectory.dir("mosh-downloads"))
     jniLibsDirectory.set(generatedOssMosh.map { it.dir("jniLibs") })
     assetsDirectory.set(generatedOssMosh.map { it.dir("assets") })
+}
+
+// The frozen AionUi renderer stays a debug-only build input: it is packaged only when the caller passes the
+// freshly verified directory, and any missing or changed asset fails the build instead of falling back.
+val rendererAssetsDir = providers.gradleProperty("RendererAssetsDir")
+val generatedRendererAssets = layout.buildDirectory.dir("generated/rendererAssets")
+
+abstract class PrepareRendererAssets : DefaultTask() {
+    @get:InputDirectory
+    abstract val sourceDirectory: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
 }
 
 appVersioning {
@@ -111,6 +127,8 @@ android {
 
     buildTypes {
         release {
+            // Release never packages renderer assets, so the renderer host entry point stays unreachable there.
+            buildConfigField("Boolean", "RENDERER_ASSETS", "false")
             manifestPlaceholders["memtagMode"] = "async"
             isShrinkResources = true
             isMinifyEnabled = true
@@ -124,6 +142,8 @@ android {
         }
 
         debug {
+            // Only a debug build that received the verified renderer directory offers the renderer entry point.
+            buildConfigField("Boolean", "RENDERER_ASSETS", rendererAssetsDir.isPresent.toString())
             manifestPlaceholders["memtagMode"] = "sync"
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard.cfg", "proguard-debug.cfg")
             testProguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard.cfg", "proguard-tests.cfg")
@@ -214,6 +234,65 @@ ksp {
 val sonarJavaBinaries = mutableListOf<Provider<String>>()
 val sonarJavaTestBinaries = mutableListOf<Provider<String>>()
 val sonarAndroidLintReportPaths = mutableListOf<Provider<String>>()
+
+if (rendererAssetsDir.isPresent) {
+    val rendererAssetsSource = file(rendererAssetsDir.get())
+    val prepareRendererAssets = tasks.register<PrepareRendererAssets>("prepareRendererAssets") {
+        sourceDirectory.set(rendererAssetsSource)
+        outputDirectory.set(generatedRendererAssets)
+        doLast {
+            val source = sourceDirectory.get().asFile.canonicalFile
+            require(source.isDirectory) { "RendererAssetsDir must name the freshly built renderer directory" }
+            fun digest(file: File): String = MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) }
+            val manifestFile = source.resolve("asset-manifest.json")
+            val metadataFile = source.resolve("renderer-build.json")
+            require(manifestFile.isFile && metadataFile.isFile) { "asset-manifest.json and renderer-build.json are required; no empty or stale renderer fallback" }
+            val manifest = JsonSlurper().parse(manifestFile) as Map<*, *>
+            val metadata = JsonSlurper().parse(metadataFile) as Map<*, *>
+            require(metadata["schemaVersion"] == 1 && metadata["nodeEngineCompatible"] == true && metadata["testOnly"] != true) { "Unapproved renderer build metadata" }
+            val upstream = metadata["upstream"] as? Map<*, *> ?: error("Missing upstream identity")
+            require(upstream["commit"] == "6744099b279b991c17e31c243f0920477bd31cb6" && upstream["repository"] == "https://github.com/iOfficeAI/AionUi") { "Unexpected renderer identity" }
+            require(upstream["packageSha256"] == "f437f7350dcf27a375c96658dc10a4ef405cc7750f509d7490cbe5f34d290039" && upstream["lockSha256"] == "e3f79c54c0d5b786e1a2689557aabac67696e602cd17e8d35cf236f999e98039") { "Unexpected renderer lock identity" }
+            require(manifest["schemaVersion"] == 1 && manifest["algorithm"] == "SHA-256" && manifest["entry"] == "index.html" && metadata["entry"] == "index.html") { "Unexpected renderer manifest" }
+            require(metadata["assetManifestSha256"] == digest(manifestFile)) { "Manifest hash mismatch" }
+            val records = manifest["files"] as? List<*> ?: error("Manifest files must be asset records")
+            val files = records.associate { record ->
+                val item = record as? Map<*, *> ?: error("Invalid asset record")
+                require(item["sha256"] is String && item["sha256"].toString().matches(Regex("[a-f0-9]{64}"))) { "Invalid asset hash" }
+                require(item["size"] is Int || item["size"] is Long) { "Invalid asset size type" }
+                require((item["size"] as Number).toLong() >= 0) { "Invalid asset size" }
+                item["path"] to item
+            }
+            require(metadata["files"] == records.size && files.size == records.size) { "Renderer file count mismatch" }
+            require(files.keys.containsAll(setOf("index.html", "licenses/index.html", "THIRD_PARTY_NOTICES.txt"))) { "Renderer entry or licenses are not inventoried" }
+            val root = source.toPath()
+            for ((name, record) in files) {
+                val item = record as Map<*, *>
+                val path = name as? String ?: error("Invalid asset path")
+                require(path.isNotBlank() && path.none { it.code < 32 || it == '\\' || it == '%' || it == '?' || it == '#' || it == ':' } && path.split('/').none { it.isEmpty() || it == "." || it == ".." }) { "Unsafe asset path" }
+                val asset = source.resolve(path).canonicalFile
+                require(asset.toPath().startsWith(root) && asset.isFile) { "Missing asset: $path" }
+                require(asset.length() == (item["size"] as Number).toLong()) { "Asset size mismatch: $path" }
+                var current: File = source
+                for (part in path.split('/')) {
+                    current = current.resolve(part)
+                    require(!Files.isSymbolicLink(current.toPath())) { "Symlink asset: $path" }
+                }
+                require(digest(asset) == item["sha256"]) { "Asset hash mismatch: $path" }
+            }
+            val actual = source.walkTopDown().filter { it.isFile }.map { it.relativeTo(source).invariantSeparatorsPath }.toSet()
+            require(actual == files.keys + setOf("asset-manifest.json", "renderer-build.json")) { "Uninventoried renderer asset" }
+            val destination = outputDirectory.get().asFile
+            require(destination.deleteRecursively()) { "Cannot clear the previous renderer asset output" }
+            source.copyRecursively(destination.resolve("renderer"))
+        }
+    }
+    androidComponents {
+        onVariants(selector().withBuildType("debug")) { variant ->
+            variant.sources.assets?.addGeneratedSourceDirectory(prepareRendererAssets, PrepareRendererAssets::outputDirectory)
+        }
+    }
+}
 
 androidComponents {
     onVariants(selector().withFlavor("license" to "oss")) { variant ->
@@ -479,6 +558,9 @@ dependencies {
 
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+
+    // The renderer host is a debug-only surface; release builds never link it.
+    debugImplementation(project(":renderer-host"))
 
     androidTestImplementation(composeBom)
     androidTestImplementation(libs.androidx.test.core)

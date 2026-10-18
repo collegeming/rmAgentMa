@@ -20,5 +20,9 @@
         <activity
             android:name=".HiltComponentActivity"
             android:exported="false" />
+        <activity
+            android:name=".renderer.RendererHostActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
     </application>
 </manifest>

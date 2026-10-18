@@ -18,6 +18,7 @@
 package org.connectbot.ui.screens.agents
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.BackHandler
@@ -79,6 +80,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import kotlinx.coroutines.launch
+import org.connectbot.BuildConfig
 import org.connectbot.R
 import org.connectbot.agent.AgentChallenge
 import org.connectbot.agent.AgentConversationState
@@ -88,6 +90,9 @@ import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.ShellCommands
+
+// Resolved by class name because the renderer host only exists in the debug source set.
+private const val RENDERER_HOST_ACTIVITY = "org.connectbot.renderer.RendererHostActivity"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -361,6 +366,14 @@ fun AgentScreen(
                                     stringResource(if (view == AgentSessionView.CHAT) R.string.agent_view_chat else R.string.agent_view_tui),
                                     style = if (view == sessionView) MaterialTheme.typography.titleSmall else MaterialTheme.typography.bodyMedium,
                                 )
+                            }
+                        }
+                        if (BuildConfig.RENDERER_ASSETS) {
+                            TextButton(
+                                onClick = { context.startActivity(Intent().setClassName(context, RENDERER_HOST_ACTIVITY)) },
+                                contentPadding = PaddingValues(0.dp),
+                            ) {
+                                Text(stringResource(R.string.agent_view_renderer), style = MaterialTheme.typography.bodyMedium)
                             }
                         }
                     }
