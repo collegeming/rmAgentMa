@@ -187,8 +187,12 @@ class AcpSessionHandle internal constructor(
     override var sessionId: String = initialSessionId
         private set
     override val events: Flow<AgentEvent> = connection.events
+
+    /** Latest session configuration snapshot from the lifecycle response, a notification, or a setter. */
+    val config: AgentSessionConfig get() = connection.config
     private val prompt = Mutex()
     private val loading = Mutex()
+    private val configWrite = Mutex()
 
     @Volatile
     private var ready = false
@@ -253,6 +257,28 @@ class AcpSessionHandle internal constructor(
                 withContext(NonCancellable) { kotlinx.coroutines.withTimeoutOrNull(1000) { runCatching { cancel() } } }
                 throw e
             }
+        }
+    }
+
+    /**
+     * Sets one config option through `session/set_config_option` and returns the Agent's updated
+     * complete snapshot. The Agent stays authoritative: a rejected request, or a reply without a
+     * snapshot, throws instead of reporting the sent value as applied. Values stay opaque, so only
+     * IDs the Agent advertised are meaningful here.
+     */
+    suspend fun setConfigOption(configId: String, value: String): AgentSessionConfig {
+        check(ready && !closed) { "Session is not ready" }
+        require(configId.isNotBlank()) { "Config option ID cannot be blank" }
+        return configWrite.withLock {
+            connection.request(
+                "session/set_config_option",
+                buildJsonObject {
+                    put("sessionId", sessionId)
+                    put("configId", configId)
+                    put("value", value)
+                },
+            )
+            connection.config
         }
     }
 

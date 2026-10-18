@@ -50,7 +50,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
-class AcpException(val code: Int) : IOException("ACP request failed (code $code)")
+class AcpException(val code: Int, val reason: String = "") : IOException("ACP request failed (code $code)" + if (reason.isEmpty()) "" else ": $reason")
 
 internal class AcpConnection(
     private val channel: ExecChannel,
@@ -76,6 +76,11 @@ internal class AcpConnection(
     val events = eventBuffer.events
 
     @Volatile var sessionId: String? = null
+
+    /** Latest configuration snapshot reported by the Agent, replaced in frame order by [receive]. */
+    @Volatile
+    var config = AgentSessionConfig()
+        private set
 
     init {
         scope.launch(ioDispatcher, start = CoroutineStart.UNDISPATCHED) {
@@ -265,7 +270,12 @@ internal class AcpConnection(
                     return
                 }
                 val update = params["update"] as? JsonObject
-                if (update == null) diagnostic("Skipped invalid session update") else emit(normalizeUpdate(update))
+                if (update == null) {
+                    diagnostic("Skipped invalid session update")
+                } else {
+                    config = config.applyUpdate(update)
+                    emit(normalizeUpdate(update))
+                }
             } else {
                 emit(AgentEvent("unknown", title = method, raw = params))
             }
@@ -280,7 +290,7 @@ internal class AcpConnection(
         val error = message["error"]
         if (error != null) {
             val code = ((error as? JsonObject)?.get("code") as? JsonPrimitive)?.longOrNull?.toInt()
-            entry.result.completeExceptionally(AcpException(code ?: -32603))
+            entry.result.completeExceptionally(AcpException(code ?: -32603, (error as? JsonObject)?.string("message").orEmpty()))
             diagnostic("ACP request failed (code ${code ?: -32603})")
             return
         }
@@ -293,8 +303,18 @@ internal class AcpConnection(
         if (entry.method == "session/prompt") emit(AgentEvent("complete", status = result.string("stopReason"), raw = result))
         if (entry.method in SESSION_ACTIVATION_METHODS) {
             trace("load_response")
+            config = config.applyLifecycle(result)
             eventBuffer.barrier()
             trace("barrier_done")
+        }
+        if (entry.method == "session/set_config_option") {
+            val options = parseConfigOptions(result["configOptions"])
+            if (options == null) {
+                entry.result.completeExceptionally(IOException("Agent did not report the updated configuration"))
+                diagnostic("Agent did not report the updated configuration")
+                return
+            }
+            config = config.copy(options = options)
         }
         entry.result.complete(result)
     }

@@ -4,3 +4,4 @@
 /ci-artifacts/
 /.device-test/
 node_modules/
+__pycache__/
