@@ -1,0 +1,321 @@
+/*
+ * rmAgentMa
+ * Copyright 2026 rmAgentMa contributors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.connectbot.renderer
+
+import kotlinx.serialization.json.JsonObject
+import org.connectbot.data.entity.Host
+import org.json.JSONArray
+import org.json.JSONObject
+import org.rmagentma.core.AgentAvailability
+import org.rmagentma.core.AgentEvent
+import org.rmagentma.core.AgentKind
+import org.rmagentma.rendererhost.array
+import org.rmagentma.rendererhost.json
+
+private const val STATUS_ONLINE = "online"
+private const val STATUS_MISSING = "missing"
+private const val STATUS_UNCHECKED = "unchecked"
+
+/**
+ * Renders product state into the payload shapes the packaged renderer reads. Everything here is a pure
+ * function of already-loaded product models: no disk, no network and no credential ever reaches it, so a
+ * payload can only carry the metadata the caller was handed.
+ */
+internal object RendererProjection {
+    /** Stable message identity: the persisted history key of the event row, never a per-response uuid. */
+    fun messageId(key: Long): String = "m$key"
+
+    /**
+     * Runtime summary of one conversation. The product runs at most one turn on the open conversation, so the
+     * state is derived from that fact instead of a copied AionUi state machine.
+     */
+    fun runtime(snapshot: RendererSnapshot, pending: AgentEvent?): JSONObject {
+        val running = snapshot.turnId != null
+        val state = when {
+            snapshot.cancelling -> "cancelling"
+            snapshot.loading -> "starting"
+            pending != null -> "waiting_confirmation"
+            running -> "running"
+            else -> "idle"
+        }
+        return json(
+            "state" to state,
+            "can_send_message" to (snapshot.active && !snapshot.cancelling && !running && pending == null),
+            "has_task" to (running || pending != null),
+            "is_processing" to (running || pending != null || snapshot.cancelling),
+            "pending_confirmations" to (if (pending == null) 0 else 1),
+            "task_status" to if (running || pending != null) "running" else "finished",
+            "turn_id" to snapshot.turnId,
+            "supports_midturn_delivery" to false,
+        )
+    }
+
+    /** One conversation: the open product session behind the bridge's fixed conversation id. */
+    fun conversation(snapshot: RendererSnapshot, pending: AgentEvent?, runtime: JSONObject): JSONObject {
+        val session = snapshot.session ?: throw IllegalStateException("Conversation projection needs a session")
+        val row = snapshot.indexed
+        val name = listOf(row?.title, session.title, session.preview, session.sessionId, session.cwd)
+            .firstOrNull { !it.isNullOrBlank() }
+        return json(
+            "id" to RENDERER_CONVERSATION,
+            "name" to name,
+            "type" to "acp",
+            "project_id" to projectId(session.hostId),
+            // The index carries the last observed times; a row it never timed keeps the session's own zero.
+            "created_at" to (row?.createdAt?.takeIf { it > 0 } ?: session.createdAt),
+            "modified_at" to (row?.updatedAt?.takeIf { it > 0 } ?: session.updatedAt),
+            "status" to if (snapshot.turnId != null || pending != null) "running" else "finished",
+            // This host never learned which model the conversation uses and refuses config options, so both
+            // stay blank instead of naming a model that is not in use.
+            "model" to json("provider_id" to "", "use_model" to "", "model" to ""),
+            "fork_capability" to json("at_turn" to false),
+            "prompt_capability" to json("image" to false, "audio" to false),
+            "extra" to json(
+                "workspace" to session.cwd,
+                "backend" to session.agent.wireName,
+                "agent_name" to session.agent.wireName,
+                "custom_workspace" to true,
+                "cached_config_options" to JSONArray(),
+            ),
+            "runtime" to runtime,
+        )
+    }
+
+    fun projectId(hostId: Long): String = "host-$hostId"
+
+    /** A saved host is one project: the product has no server-side project registry. */
+    fun project(host: Host): JSONObject = json(
+        "project_id" to projectId(host.id),
+        "name" to host.nickname.ifBlank { host.username.ifBlank { host.hostname } },
+        "explorer" to json("workspace_pe_id" to null, "entries" to JSONArray()),
+    )
+
+    fun projects(hosts: List<Host>): JSONArray = array(*hosts.map(::project).toTypedArray())
+
+    /** The latest message of one type, or null, exactly as `messages/latest` promises. */
+    fun latest(messages: List<JSONObject>, type: String?): JSONObject? = if (type.isNullOrEmpty()) {
+        messages.lastOrNull()
+    } else {
+        messages.lastOrNull { it.optString("type") == type }
+    }
+
+    /** Cursor page over the loaded window. Cursors are the same stable message ids the items carry. */
+    fun page(items: List<JSONObject>, limit: Int, before: String?, after: String?, hasEarlier: Boolean): JSONObject {
+        var start = 0
+        var end = items.size
+        if (!before.isNullOrEmpty()) {
+            end = items.indexOfFirst { it.optString("id") == before }
+        } else if (!after.isNullOrEmpty()) {
+            start = items.indexOfLast { it.optString("id") == after } + 1
+        }
+        val window = items.subList(start.coerceIn(0, items.size), end.coerceIn(start.coerceIn(0, items.size), items.size))
+        val bounded = window.takeLast(limit)
+        val page = JSONArray()
+        bounded.forEach { page.put(it) }
+        return json(
+            "items" to page,
+            "oldest_cursor" to bounded.firstOrNull()?.optString("id"),
+            "newest_cursor" to bounded.lastOrNull()?.optString("id"),
+            "has_more_before" to (hasEarlier || window.size > bounded.size),
+            "has_more_after" to (end < items.size),
+        )
+    }
+
+    /** Connectable agent catalogue: only kinds a completed probe found on some saved host. */
+    fun assistants(availability: List<AgentAvailability>): JSONArray = array(
+        *AgentKind.entries.filter { kind -> availability.any { it.kind == kind && it.available } }
+            .map { kind -> assistant(kind, availability) }
+            .toTypedArray(),
+    )
+
+    private fun assistant(kind: AgentKind, availability: List<AgentAvailability>): JSONObject = json(
+        "id" to kind.wireName,
+        "source" to "builtin",
+        "name" to kind.wireName,
+        "name_i18n" to JSONObject(),
+        "description_i18n" to JSONObject(),
+        "enabled" to true,
+        "sort_order" to kind.ordinal,
+        "agent_id" to kind.wireName,
+        "agent" to json("type" to "acp", "source" to "builtin", "acp_backend" to kind.wireName),
+        "enabled_skills" to JSONArray(),
+        "custom_skill_names" to JSONArray(),
+        "disabled_builtin_skills" to JSONArray(),
+        "context_i18n" to JSONObject(),
+        "prompts" to JSONArray(),
+        "prompts_i18n" to JSONObject(),
+        "models" to JSONArray(),
+        "agent_status" to (if (agentStatus(kind, availability) == STATUS_ONLINE) STATUS_ONLINE else "offline"),
+        "team_selectable" to false,
+        "deletable" to false,
+    )
+
+    /** Managed agent diagnostics rows; a kind counts as installed once any host probe found it. */
+    fun agents(availability: List<AgentAvailability>): JSONArray = array(
+        *AgentKind.entries.map { kind ->
+            val status = agentStatus(kind, availability)
+            json(
+                "id" to kind.wireName,
+                "name" to kind.wireName,
+                "backend" to kind.wireName,
+                "agent_type" to "acp",
+                "agent_source" to "builtin",
+                "enabled" to (status != STATUS_MISSING),
+                "installed" to (status == STATUS_ONLINE),
+                "status" to status,
+                "command" to kind.command,
+            )
+        }.toTypedArray(),
+    )
+
+    /** Static capability declaration: this host offers the agent kinds it probed, and installs no adapters. */
+    fun adapters(availability: List<AgentAvailability>): JSONArray = array(
+        *AgentKind.entries.filter { kind -> availability.any { it.kind == kind && it.available } }
+            .map { kind -> json("id" to kind.wireName, "name" to kind.wireName, "backend" to kind.wireName, "source" to "builtin") }
+            .toTypedArray(),
+    )
+
+    private fun agentStatus(kind: AgentKind, availability: List<AgentAvailability>): String {
+        val rows = availability.filter { it.kind == kind }
+        return when {
+            rows.any { it.available } -> STATUS_ONLINE
+            rows.isEmpty() -> STATUS_UNCHECKED
+            else -> STATUS_MISSING
+        }
+    }
+
+    /** Context usage of the newest usage report in the window; null when the agent never reported one. */
+    fun usage(event: AgentEvent?): JSONObject? {
+        val raw = event?.raw?.asObject() ?: return null
+        val report = raw.optJSONObject("usage") ?: raw
+        val used = intOrNull(report, "used") ?: return null
+        val size = intOrNull(report, "size") ?: return null
+        val result = json("used" to used, "size" to size)
+        val cost = report.optJSONObject("cost")
+        val amount = cost?.let { intOrNull(it, "amount") }
+        if (cost != null && amount != null) {
+            result.put("cost", json("amount" to amount, "currency" to cost.optString("currency")))
+        }
+        return result
+    }
+
+    /** The raw update is a kotlinx JSON tree; the renderer's payloads are built with org.json. */
+    private fun JsonObject.asObject(): JSONObject = JSONObject(toString())
+
+    private fun intOrNull(source: JSONObject, key: String): Int? = (source.opt(key) as? Number)?.toInt()
+
+    /**
+     * Messages of the loaded window, in window order. A row is skipped only when the renderer has nothing to
+     * draw for it, so an update it cannot show is never dressed up as chat history.
+     */
+    fun messages(events: List<AgentEvent>, epoch: String, turnId: String?): List<JSONObject> = events.mapNotNull { message(it, epoch, turnId) }
+
+    fun message(event: AgentEvent, epoch: String, turnId: String?): JSONObject? {
+        val id = messageId(event.historyKey)
+        // The history store keeps no per-row clock, so no frame claims a timestamp it cannot know; the
+        // renderer stamps arrival time itself.
+        val base = json(
+            "id" to id,
+            "msg_id" to id,
+            "conversation_id" to RENDERER_CONVERSATION,
+            "turn_id" to turnId,
+        )
+        when (event.type) {
+            "user" -> base.put("type", "text").put("position", "right").put("status", "finish")
+                .put("content", json("content" to event.text, "replace" to true))
+
+            "content" -> base.put("type", "text").put("position", "left").put("status", "finish")
+                .put("content", json("content" to event.text, "replace" to true))
+
+            "thinking" -> base.put("type", "thinking").put("position", "left")
+                .put("content", json("content" to event.text, "status" to if (turnId == null) "done" else "thinking"))
+
+            "tool", "tool_update" -> base.put("type", "acp_tool_call").put("position", "left")
+                .put("content", json("session_id" to RENDERER_CONVERSATION, "update" to toolUpdate(event)))
+
+            "plan" -> base.put("type", "plan").put("position", "left")
+                .put("content", json("session_id" to RENDERER_CONVERSATION, "entries" to (event.raw?.asObject()?.opt("entries") ?: JSONArray()), "turn_id" to turnId))
+
+            "permission" -> base.put("type", "acp_permission").put("position", "left")
+                .put("content", permission(event, epoch, turnId))
+
+            "error" -> base.put("type", "tips").put("position", "center")
+                .put("content", json("content" to event.text, "type" to "error"))
+
+            else -> return null
+        }
+        return base
+    }
+
+    private fun toolUpdate(event: AgentEvent): JSONObject {
+        val raw = event.raw?.asObject() ?: JSONObject()
+        val update = JSONObject(raw.toString())
+        val callId = raw.optString("toolCallId").ifEmpty { event.id }
+        update.remove("toolCallId")
+        update.put("tool_call_id", callId)
+        if (update.optString("sessionUpdate").isEmpty()) {
+            update.put("sessionUpdate", if (event.type == "tool_update") "tool_call_update" else "tool_call")
+        }
+        if (update.optString("title").isEmpty()) update.put("title", event.title)
+        if (update.optString("status").isEmpty()) update.put("status", event.status)
+        return update
+    }
+
+    /** Live approval card: identity plus the options the agent really offered, so the answer maps back. */
+    fun permission(event: AgentEvent, epoch: String, turnId: String?): JSONObject {
+        val options = JSONArray()
+        event.options.forEach { option ->
+            options.put(json("option_id" to option.id, "name" to option.label, "kind" to optionKind(option.id)))
+        }
+        return json(
+            "session_id" to RENDERER_CONVERSATION,
+            "conversation_id" to RENDERER_CONVERSATION,
+            // The opaque reference an answer must quote is this event's own request id.
+            "request_id" to event.id,
+            "epoch" to epoch,
+            "turn_id" to turnId,
+            "options" to options,
+            "tool_call" to permissionTool(event),
+            "title" to event.title,
+            "description" to event.text,
+            "live" to true,
+            "readonly" to false,
+            "state" to "waiting",
+        )
+    }
+
+    private fun permissionTool(event: AgentEvent): JSONObject {
+        val tool = event.raw?.asObject()?.optJSONObject("toolCall")
+        val callId = tool?.optString("toolCallId").orEmpty().ifEmpty { event.id }
+        return json(
+            "tool_call_id" to callId,
+            "title" to tool?.optString("title").orEmpty().ifEmpty { event.title },
+            "kind" to tool?.optString("kind").orEmpty(),
+            "status" to tool?.optString("status").orEmpty(),
+            "raw_input" to tool?.opt("rawInput"),
+            "content" to tool?.optJSONArray("content"),
+        )
+    }
+
+    private fun optionKind(id: String): String = when (id) {
+        "allow_once", "allow-once" -> "allow_once"
+        "reject_once", "reject-once" -> "reject_once"
+        "allow_always", "allow-always" -> "allow_always"
+        else -> id
+    }
+}

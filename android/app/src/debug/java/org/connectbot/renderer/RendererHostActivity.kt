@@ -18,7 +18,6 @@
 package org.connectbot.renderer
 
 import android.annotation.SuppressLint
-import android.app.Activity
 import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.Handler
@@ -32,34 +31,56 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.runBlocking
 import org.connectbot.R
+import org.json.JSONObject
 import org.rmagentma.rendererhost.ProbeAssets
 import org.rmagentma.rendererhost.ProbeBridge
-import org.rmagentma.rendererhost.ProbeFailure
+import org.rmagentma.rendererhost.ProbeResult
+import org.rmagentma.rendererhost.json
 import java.util.concurrent.Executors
+import javax.inject.Inject
 
-/** Debug-only host for the packaged renderer: it reuses the probe bridge and asset loader but keeps no synthetic data. */
-class RendererHostActivity : Activity() {
+/**
+ * Debug-only host for the packaged renderer. It reuses the probe's bridge, limits and asset loader, but answers
+ * every action from the product's own repositories instead of synthetic data: the conversation it serves is the
+ * session the Compose chat already has open, and actions the product cannot serve fail with a stable code.
+ */
+@AndroidEntryPoint
+class RendererHostActivity : ComponentActivity() {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
     private lateinit var container: LinearLayout
+
+    @Inject
+    lateinit var source: AgentRendererSource
+
+    private val actions by lazy { RendererActions(source) }
 
     @Volatile
     private var bridge = ProbeBridge()
 
     @Volatile
-    private var closed = false
+    private var subscribed = false
     private var web: WebView? = null
+    private var reply: JavaScriptReplyProxy? = null
+
+    @Volatile
+    private var closed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         container.fitsSystemWindows = true
         setContentView(container)
+        source.open(::publish)
         worker.execute {
             // The manifest read is disk I/O, so it stays off the main thread exactly as the probe does it.
             val assets = try {
@@ -108,6 +129,8 @@ class RendererHostActivity : Activity() {
                 // A fresh bridge per document, as the probe does: in-flight work for the previous document can then
                 // never answer the new one, and the new page always gets a clean handshake.
                 bridge = ProbeBridge()
+                reply = null
+                subscribed = false
                 if (!ProbeBridge.isEntry(url)) {
                     view.stopLoading()
                     status(R.string.renderer_navigation_blocked)
@@ -131,14 +154,13 @@ class RendererHostActivity : Activity() {
                 val expected = current.documentId
                 worker.execute {
                     if (current !== bridge || closed) return@execute
-                    val response = current.receive(origin.toString(), mainFrame, raw) { _, _ ->
-                        // Every renderer action fails until real agent data is wired up, so probe-style synthetic
-                        // emptiness can never pass for loaded product state.
-                        throw ProbeFailure(501, "ACTION_UNSUPPORTED")
-                    }
+                    // One worker thread per document serializes every action, so a send, a cancel and an approval
+                    // can never race each other or the Compose path into the same ACP session.
+                    val response = current.receive(origin.toString(), mainFrame, raw) { action, payload -> handle(action, payload) }
                     val document = response?.optString("documentId")
                     main.post {
                         if (closed || current !== bridge || sender !== web || response == null || document != bridge.documentId || (expected.isNotEmpty() && expected != bridge.documentId)) return@post
+                        reply = proxy
                         if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) proxy.postMessage(response.toString())
                     }
                 }
@@ -146,6 +168,35 @@ class RendererHostActivity : Activity() {
         }
         container.addView(view, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         view.loadUrl(ProbeBridge.ENTRY)
+    }
+
+    private fun handle(action: String, payload: JSONObject): ProbeResult = runBlocking {
+        when (action) {
+            "events.subscribe" -> {
+                subscribed = true
+                source.announce()
+                ProbeResult(body = json("subscribed" to true, "conversation_id" to RENDERER_CONVERSATION))
+            }
+
+            "events.unsubscribe" -> {
+                subscribed = false
+                ProbeResult(body = json("subscribed" to false))
+            }
+
+            else -> actions.handle(action, payload)
+        }
+    }
+
+    /** Forwards one conversation event to the live document; a stale or closed document never sees it. */
+    private fun publish(name: String, data: JSONObject, epoch: String, seq: Long) {
+        val current = bridge
+        val document = current.documentId
+        if (document.isEmpty()) return
+        val event = current.event(name, data, epoch, seq).toString()
+        main.post {
+            if (closed || !subscribed || current !== bridge || bridge.documentId != document) return@post
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) reply?.postMessage(event)
+        }
     }
 
     private fun dispose(view: WebView) {
@@ -168,7 +219,10 @@ class RendererHostActivity : Activity() {
 
     override fun onDestroy() {
         closed = true
+        subscribed = false
+        reply = null
         web?.let(::dispose)
+        source.close()
         worker.shutdown()
         main.removeCallbacksAndMessages(null)
         super.onDestroy()

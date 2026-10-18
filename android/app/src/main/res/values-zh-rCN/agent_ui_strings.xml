@@ -238,6 +238,8 @@
     <string name="agent_view_chat" tools:machine_translated="true">聊天</string>
     <!-- 会话视图切换：Agent 自带的交互式终端界面。 -->
     <string name="agent_view_tui" tools:machine_translated="true">TUI</string>
+    <!-- 打开随构建打包的渲染器宿主；只有带已验证渲染器资源的调试构建才显示。 -->
+    <string name="agent_view_renderer" tools:machine_translated="true">渲染器</string>
     <!-- 说明 TUI 会在终端中以独立的 SSH 会话运行。 -->
     <string name="agent_tui_notice" tools:machine_translated="true">TUI 会以独立的 SSH 会话在终端中打开，使用本会话的 Agent 与工作目录。</string>
     <!-- 提醒本对话的 ACP 进程可能保持同一会话打开。 -->
