@@ -44,10 +44,16 @@ internal class AgentReconnectPolicy {
     fun isBlocked(id: Long): Boolean = id in blocked
 
     @Synchronized
+    fun blockedHosts(): Set<Long> = blocked.toSet()
+
+    @Synchronized
     fun waiting(id: Long, now: Long): Long = ((failures[id]?.retryAt ?: now) - now).coerceAtLeast(0)
 
     @Synchronized
     fun hasFailure(id: Long): Boolean = id in failures
+
+    @Synchronized
+    fun attempts(id: Long): Int = failures[id]?.attempts ?: 0
 
     @Synchronized
     fun userRetry(id: Long) {

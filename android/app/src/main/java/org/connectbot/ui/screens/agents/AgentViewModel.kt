@@ -50,9 +50,13 @@ class AgentViewModel @Inject constructor(
     val hosts = repository.hosts.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val sessions = repository.sessions
     val availability = repository.availability
+    val refreshingHosts = repository.refreshingHosts
+    val linkRecords = repository.linkRecords
+    val liveLinkStates = repository.liveLinkStates
     val events = repository.events
     val busy = repository.busy
     val errors = repository.errors
+    val scannedSources = repository.scannedSources
     val challenge = repository.challenge
     val activeSession = repository.activeSession
     val selectedSession = repository.selectedSession

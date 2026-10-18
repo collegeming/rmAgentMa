@@ -61,6 +61,9 @@ import javax.inject.Singleton
 
 private const val ADDRESS_PROBE_TIMEOUT_MS = 5_000
 
+/** One host's link fact: a usable client, or the reconnect bookkeeping that explains why there is none. */
+data class AgentLinkStatus(val hostId: Long, val state: AgentLinkState, val attempts: Int)
+
 @Singleton
 class AgentSshPool @Inject constructor(
     private val hosts: HostRepository,
@@ -92,6 +95,23 @@ class AgentSshPool @Inject constructor(
     suspend fun needsUserRetry(id: Long): Boolean = mutex.withLock { reconnect.isBlocked(id) }
 
     suspend fun hasReconnectWork(): Boolean = mutex.withLock { reconnectHosts.any { !reconnect.isBlocked(it) } }
+
+    /**
+     * Live link facts for the hosts the pool can speak about: an authenticated client, a blocked host, or a host
+     * whose reconnect schedule is in backoff. A host it reports nothing for is unknown, not connected.
+     */
+    suspend fun linkStatus(): List<AgentLinkStatus> = mutex.withLock {
+        (entries.keys + reconnectHosts + reconnect.blockedHosts()).mapNotNull { id ->
+            val entry = entries[id]
+            val state = when {
+                entry?.client?.isConnected == true && entry.client.isAuthenticated -> AgentLinkState.CONNECTED
+                reconnect.isBlocked(id) -> AgentLinkState.NEEDS_USER
+                reconnect.hasFailure(id) -> AgentLinkState.RETRYING
+                else -> null
+            }
+            state?.let { AgentLinkStatus(id, it, if (it == AgentLinkState.RETRYING) reconnect.attempts(id) else 0) }
+        }
+    }
 
     suspend fun reconnectDisconnected(): List<Long> = withContext(io) {
         mutex.withLock {

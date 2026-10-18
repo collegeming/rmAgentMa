@@ -51,6 +51,7 @@ class AgentOpeningCancellationTest {
             mock(AgentSshPool::class.java),
             index,
             AgentChallenges(),
+            AgentLinkStateStore(mock(Context::class.java), dispatcher),
             CoroutineDispatchers(dispatcher, dispatcher, dispatcher),
         )
         fun field(name: String) = AgentRepository::class.java.getDeclaredField(name).apply { isAccessible = true }

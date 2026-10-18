@@ -17,6 +17,11 @@
 
 package org.connectbot.ui.screens.agents
 
+import org.connectbot.agent.AGENT_SESSION_PAGE_LIMIT
+import org.connectbot.agent.AgentLinkRecord
+import org.connectbot.agent.AgentLinkState
+import org.connectbot.agent.AgentProbeState
+import org.connectbot.agent.probeStateOf
 import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
@@ -31,6 +36,49 @@ internal fun agentAvailability(
 ): AgentAvailability? = availability.firstOrNull { it.hostId == hostId && it.kind == kind }
 
 internal fun canOpenAgent(availability: List<AgentAvailability>, hostId: Long?, kind: AgentKind): Boolean = agentAvailability(availability, hostId, kind)?.available != false
+
+internal data class AgentProbeStatus(val state: AgentProbeState, val availability: AgentAvailability?)
+
+/**
+ * Full probe status for one host and agent. A running refresh is reported as such even when no row exists yet,
+ * and the last row of a failed refresh stays readable next to it instead of being replaced by a blank state.
+ */
+internal fun agentProbeStatus(
+    availability: List<AgentAvailability>,
+    refreshingHosts: Set<Long>,
+    hostId: Long?,
+    kind: AgentKind,
+): AgentProbeStatus? {
+    val row = agentAvailability(availability, hostId, kind)
+    val refreshing = hostId != null && hostId in refreshingHosts
+    return when {
+        row != null -> AgentProbeStatus(probeStateOf(row, refreshing), row)
+        refreshing -> AgentProbeStatus(AgentProbeState.REFRESHING, null)
+        else -> null
+    }
+}
+
+internal data class AgentLinkPresentation(
+    val state: AgentLinkState,
+    val attempts: Int,
+    val sinceMillis: Long,
+    val live: Boolean,
+)
+
+/**
+ * Link state of one host: the pool's live fact wins; without one, the last recorded row is history. Callers must
+ * treat [live] false as "not connected now", so a stored CONNECTED can never be rendered as a running link.
+ */
+internal fun agentLinkPresentation(
+    live: Map<Long, AgentLinkState>,
+    records: List<AgentLinkRecord>,
+    hostId: Long?,
+): AgentLinkPresentation? {
+    val id = hostId ?: return null
+    live[id]?.let { return AgentLinkPresentation(it, 0, 0, live = true) }
+    val record = records.firstOrNull { it.hostId == id && it.agent == null } ?: return null
+    return AgentLinkPresentation(record.state, record.attempts, record.updatedAtMillis, live = false)
+}
 
 fun validAgentCwd(cwd: String): Boolean = cwd.startsWith('/') && cwd.none { it.code < 32 || it.code == 127 }
 
@@ -47,6 +95,12 @@ fun filterAgentSessions(
             (search.isEmpty() || listOf(it.title, it.preview, it.cwd).any { value -> value.contains(search, ignoreCase = true) })
     }.sortedByDescending { it.updatedAt }
 }
+
+/**
+ * A host/agent pair holding as many sessions as one scan page can carry may have more history behind it, so search
+ * must treat the page as unloaded instead of a complete history.
+ */
+internal fun agentHistoryMayBeTruncated(sessions: List<AgentSession>): Boolean = sessions.groupBy { it.hostId to it.agent }.values.any { it.size >= AGENT_SESSION_PAGE_LIMIT }
 
 internal data class AgentWorkspaceKey(val hostId: Long, val cwd: String)
 

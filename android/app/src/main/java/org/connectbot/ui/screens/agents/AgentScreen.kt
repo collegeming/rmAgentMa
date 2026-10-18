@@ -103,10 +103,14 @@ fun AgentScreen(
     val hosts by viewModel.hosts.collectAsState()
     val sessions by viewModel.sessions.collectAsState()
     val availability by viewModel.availability.collectAsState()
+    val refreshingHosts by viewModel.refreshingHosts.collectAsState()
+    val linkRecords by viewModel.linkRecords.collectAsState()
+    val liveLinkStates by viewModel.liveLinkStates.collectAsState()
     val events by viewModel.events.collectAsState()
     val busy by viewModel.busy.collectAsState()
     val working by viewModel.working.collectAsState()
     val errors by viewModel.errors.collectAsState()
+    val scannedSources by viewModel.scannedSources.collectAsState()
     val operationError by viewModel.operationError.collectAsState()
     val responding by viewModel.responding.collectAsState()
     val challenge by viewModel.challenge.collectAsState()
@@ -189,6 +193,9 @@ fun AgentScreen(
                     hosts = hosts,
                     sessions = sessions,
                     availability = availability,
+                    refreshingHosts = refreshingHosts,
+                    remoteSources = scannedSources,
+                    failedSources = errors,
                     active = selectedSession,
                     selectedHostId = hostId,
                     selectedAgent = agent,
@@ -265,7 +272,8 @@ fun AgentScreen(
                         modifier = Modifier.weight(1f),
                     )
                 }
-                AgentAvailabilityContent(agentAvailability(availability, hostId, agent), Modifier.padding(horizontal = 12.dp))
+                AgentAvailabilityContent(agentProbeStatus(availability, refreshingHosts, hostId, agent), Modifier.padding(horizontal = 12.dp))
+                AgentLinkStatusContent(agentLinkPresentation(liveLinkStates, linkRecords, hostId), Modifier.padding(horizontal = 12.dp))
                 if (busy || working) LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (denied) {
                     Text(stringResource(R.string.agent_network_denied), color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp))
@@ -313,8 +321,8 @@ fun AgentScreen(
                                 Text(item.title.ifBlank { stringResource(R.string.agent_untitled) }, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(item.cwd, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 if (item.preview.isNotBlank()) Text(item.preview.take(240), maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                val status = agentAvailability(availability, item.hostId, item.agent)
-                                if (status?.available == false) AgentAvailabilityContent(status)
+                                val status = agentProbeStatus(availability, refreshingHosts, item.hostId, item.agent)
+                                if (status?.availability?.available == false) AgentAvailabilityContent(status)
                                 TextButton(
                                     onClick = { withNetworkPermission { viewModel.open(item) } },
                                     enabled = canOpenAgent(availability, item.hostId, item.agent),
@@ -416,6 +424,7 @@ fun AgentScreen(
             hosts = hosts,
             sessions = sessions,
             availability = availability,
+            refreshingHosts = refreshingHosts,
             active = active,
             initialHostId = initialHost,
             initialAgent = agent,
@@ -598,6 +607,7 @@ private fun NewAgentSessionDialog(
     hosts: List<Host>,
     sessions: List<AgentSession>,
     availability: List<AgentAvailability>,
+    refreshingHosts: Set<Long>,
     active: AgentSession?,
     initialHostId: Long?,
     initialAgent: AgentKind,
@@ -630,7 +640,7 @@ private fun NewAgentSessionDialog(
                     options = AgentKind.entries.map { it to agentName(it) },
                     onSelect = { kind = it },
                 )
-                AgentAvailabilityContent(agentAvailability(availability, selectedHostId, kind))
+                AgentAvailabilityContent(agentProbeStatus(availability, refreshingHosts, selectedHostId, kind))
                 OutlinedTextField(
                     value = cwd,
                     onValueChange = { cwd = it },

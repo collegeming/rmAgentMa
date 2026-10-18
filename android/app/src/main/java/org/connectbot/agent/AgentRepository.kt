@@ -59,6 +59,9 @@ import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/** Sessions one remote scan reads per agent, and the same ceiling the index snapshot keeps per host and agent. */
+internal const val AGENT_SESSION_PAGE_LIMIT = 200
+
 enum class AgentConversationState {
     Loading,
     Ready,
@@ -73,6 +76,7 @@ class AgentRepository @Inject constructor(
     private val pool: AgentSshPool,
     private val index: AgentIndexStore,
     private val challenges: AgentChallenges,
+    private val linkStates: AgentLinkStateStore,
     private val dispatchers: CoroutineDispatchers,
 ) {
     val hosts: Flow<List<Host>> = hostRepository.observeSshHosts()
@@ -85,6 +89,10 @@ class AgentRepository @Inject constructor(
     val busy: StateFlow<Boolean> = mutableBusy.asStateFlow()
     private val mutableErrors = MutableStateFlow<List<String>>(emptyList())
     val errors: StateFlow<List<String>> = mutableErrors.asStateFlow()
+
+    /** Host/agent pairs whose current rows came from a successful remote read; every other row is cache-only. */
+    private val mutableScannedSources = MutableStateFlow<Set<Pair<Long, AgentKind>>>(emptySet())
+    val scannedSources: StateFlow<Set<Pair<Long, AgentKind>>> = mutableScannedSources.asStateFlow()
     val challenge: StateFlow<AgentChallenge?> = challenges.challenge
     private val mutableActive = MutableStateFlow<AgentSession?>(null)
     val activeSession: StateFlow<AgentSession?> = mutableActive.asStateFlow()
@@ -98,6 +106,12 @@ class AgentRepository @Inject constructor(
     val hasLatest: StateFlow<Boolean> = mutableHasLatest.asStateFlow()
     private val mutableAvailability = MutableStateFlow<List<AgentAvailability>>(emptyList())
     val availability: StateFlow<List<AgentAvailability>> = mutableAvailability.asStateFlow()
+    private val mutableRefreshingHosts = MutableStateFlow<Set<Long>>(emptySet())
+    val refreshingHosts: StateFlow<Set<Long>> = mutableRefreshingHosts.asStateFlow()
+    private val mutableLinkRecords = MutableStateFlow<List<AgentLinkRecord>>(emptyList())
+    val linkRecords: StateFlow<List<AgentLinkRecord>> = mutableLinkRecords.asStateFlow()
+    private val mutableLiveLinkStates = MutableStateFlow<Map<Long, AgentLinkState>>(emptyMap())
+    val liveLinkStates: StateFlow<Map<Long, AgentLinkState>> = mutableLiveLinkStates.asStateFlow()
     private val probeMutex = Mutex()
 
     private val scope = CoroutineScope(SupervisorJob() + dispatchers.io)
@@ -134,12 +148,21 @@ class AgentRepository @Inject constructor(
             } catch (e: Exception) {
                 report(e)
             }
+            try {
+                mutableLinkRecords.value = linkStates.all()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // An unreadable snapshot holds no state, so every host stays unknown until the pool reports a fact.
+                Timber.w(e, "Agent link state is unreadable")
+            }
             hosts.collect { currentHosts ->
                 try {
                     val ids = currentHosts.map { it.id }.toSet()
                     refreshMutex.withLock { mutableSessions.value = index.retainHosts(ids) }
                     probeMutex.withLock { mutableAvailability.update { rows -> rows.filter { it.hostId in ids } } }
                     pool.retainHosts(ids)
+                    forgetRemovedHostLinkStates(ids)
                     if (selectedSession.value?.hostId?.let { it !in ids } == true) closeConversation()
                 } catch (e: CancellationException) {
                     throw e
@@ -193,30 +216,41 @@ class AgentRepository @Inject constructor(
         val selected = if (hostId == null) allHosts else allHosts.filter { it.id == hostId }
         for (host in selected) {
             if (interactive) pool.allowUserRetry(host.id)
-            val available = probeHost(host.id, interactive, force = true)
-            for (agent in AgentKind.entries) {
-                currentCoroutineContext().ensureActive()
-                try {
-                    val remote = pool.hostSession(host.id, interactive)
-                    val found = if (agent == AgentKind.OMP) {
-                        val runtime = available.single { it.kind == agent }
-                        if (!runtime.available) continue
-                        AcpDriver(agent, scope, dispatchers.io, runtime.executable.takeIf { it.isNotBlank() }).listSessions(remote)
-                    } else {
-                        val scan = RemoteScanner(dispatchers.io).scan(remote, setOf(agent), 200)
-                        if (scan.errors.isNotEmpty()) {
-                            mutableErrors.update { (it + scan.errors.map { error -> "${host.nickname} / ${agent.wireName}: $error" }).takeLast(100) }
-                            continue
+            // Refreshing is a real state: it holds until this host's probe and scan finished, also when they fail.
+            mutableRefreshingHosts.update { it + host.id }
+            try {
+                val available = probeHost(host.id, interactive, force = true)
+                for (agent in AgentKind.entries) {
+                    currentCoroutineContext().ensureActive()
+                    // Only a completed read promotes this pair to remote-loaded; any path out of the try leaves the
+                    // rows on screen as cache-only, so a failed scan can never be reported as fresh remote data.
+                    val source = host.id to agent
+                    mutableScannedSources.update { it - source }
+                    try {
+                        val remote = pool.hostSession(host.id, interactive)
+                        val found = if (agent == AgentKind.OMP) {
+                            val runtime = available.single { it.kind == agent }
+                            if (!runtime.available) continue
+                            AcpDriver(agent, scope, dispatchers.io, runtime.executable.takeIf { it.isNotBlank() }).listSessions(remote)
+                        } else {
+                            val scan = RemoteScanner(dispatchers.io).scan(remote, setOf(agent), AGENT_SESSION_PAGE_LIMIT)
+                            if (scan.errors.isNotEmpty()) {
+                                mutableErrors.update { (it + scan.errors.map { error -> "${host.nickname} / ${agent.wireName}: $error" }).takeLast(100) }
+                                continue
+                            }
+                            scan.sessions
                         }
-                        scan.sessions
+                        mutableSessions.value = index.replace(host.id, agent, found)
+                        mutableScannedSources.update { it + source }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        report(e, "${host.nickname} / ${agent.wireName}")
+                        if (pool.needsUserRetry(host.id)) break
                     }
-                    mutableSessions.value = index.replace(host.id, agent, found)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    report(e, "${host.nickname} / ${agent.wireName}")
-                    if (pool.needsUserRetry(host.id)) break
                 }
+            } finally {
+                mutableRefreshingHosts.update { it - host.id }
             }
         }
     }
@@ -546,6 +580,7 @@ class AgentRepository @Inject constructor(
         stopOperations()
         scope.async {
             pool.disconnectAll()
+            markHostsDisconnected()
             closeConversation()
             context.stopService(Intent(context, AgentConnectionService::class.java))
         }.await()
@@ -555,6 +590,7 @@ class AgentRepository @Inject constructor(
         stopOperations()
         scope.launch {
             pool.disconnectAll()
+            markHostsDisconnected()
             closeConversation()
         }
     }
@@ -584,7 +620,57 @@ class AgentRepository @Inject constructor(
                 } catch (e: Exception) {
                     report(e)
                 }
+                try {
+                    persistLinkStates()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    report(e)
+                }
             }
+        }
+    }
+
+    /**
+     * Mirrors the pool's live link facts into durable state: an authenticated client is CONNECTED, a blocked host
+     * needs the user, and a reconnect schedule in backoff is RETRYING with its attempt count. A row is rewritten
+     * only when that fact changes, and a host the pool cannot speak about keeps its last row, which is what makes
+     * the next process start report an unknown link instead of a connection that no longer exists.
+     */
+    internal suspend fun persistLinkStates() {
+        val live = pool.linkStatus()
+        mutableLiveLinkStates.value = live.associate { it.hostId to it.state }
+        var records = mutableLinkRecords.value
+        val now = System.currentTimeMillis()
+        for (status in live) {
+            val previous = records.firstOrNull { it.hostId == status.hostId && it.agent == null }
+            if (previous?.state == status.state && previous.attempts == status.attempts) continue
+            val record = AgentLinkRecord(status.hostId, null, status.state, status.attempts, now)
+            linkStates.record(record)
+            records = records.filterNot { it.hostId == record.hostId && it.agent == null } + record
+        }
+        mutableLinkRecords.value = records
+    }
+
+    /** A deleted host must not lend its last link state to whichever host reuses its row id. */
+    private suspend fun forgetRemovedHostLinkStates(ids: Set<Long>) {
+        val removed = mutableLinkRecords.value.map { it.hostId }.toSet() - ids
+        if (removed.isEmpty()) return
+        removed.forEach { linkStates.forget(it) }
+        mutableLinkRecords.value = mutableLinkRecords.value.filterNot { it.hostId in removed }
+    }
+
+    /** An explicit teardown ends every connection, so no CONNECTED row may survive it. */
+    private suspend fun markHostsDisconnected() {
+        mutableLiveLinkStates.value = emptyMap()
+        val connected = mutableLinkRecords.value.filter { it.agent == null && it.state == AgentLinkState.CONNECTED }
+        if (connected.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val rows = connected.map { AgentLinkRecord(it.hostId, null, AgentLinkState.DISCONNECTED, it.attempts, now) }
+        rows.forEach { linkStates.record(it) }
+        val byHost = rows.associateBy { it.hostId }
+        mutableLinkRecords.value = mutableLinkRecords.value.map { record ->
+            (if (record.agent == null) byHost[record.hostId] else null) ?: record
         }
     }
 

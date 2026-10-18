@@ -17,9 +17,14 @@
 
 package org.connectbot.ui.screens.agents
 
+import org.connectbot.agent.AGENT_SESSION_PAGE_LIMIT
+import org.connectbot.agent.AgentLinkRecord
+import org.connectbot.agent.AgentLinkState
+import org.connectbot.agent.AgentProbeState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.rmagentma.core.AgentAvailability
@@ -195,4 +200,72 @@ class AgentPresentationTest {
             assertFalse(isCurrentAgentInteraction(AgentInteractionKey(session, event), session, listOf(event)))
         }
     }
+
+    @Test
+    fun probeStatusNamesEveryDistinctOutcomeOfTheSelectedPair() {
+        listOf(
+            "executable_missing" to AgentProbeState.NOT_INSTALLED,
+            "initialize_timeout" to AgentProbeState.START_FAILED,
+            "initialize_rejected" to AgentProbeState.NO_PROTOCOL_CAPABILITY,
+            "probe_transport_failed" to AgentProbeState.CONNECT_FAILED,
+            "future_probe_code" to AgentProbeState.UNKNOWN_FAILURE,
+        ).forEach { (code, state) ->
+            val rows = listOf(availability(error = code))
+            val status = agentProbeStatus(rows, emptySet(), 1L, AgentKind.DSH)
+            assertEquals(state, status?.state)
+            assertEquals(rows.single(), status?.availability)
+        }
+        assertEquals(AgentProbeState.AVAILABLE, agentProbeStatus(listOf(availability(available = true)), emptySet(), 1L, AgentKind.DSH)?.state)
+    }
+
+    @Test
+    fun refreshingOutranksAStaleRowAndAppearsWithoutOne() {
+        val row = availability(available = true)
+        assertEquals(AgentProbeState.REFRESHING, agentProbeStatus(listOf(row), setOf(1L), 1L, AgentKind.DSH)?.state)
+        assertEquals(row, agentProbeStatus(listOf(row), setOf(1L), 1L, AgentKind.DSH)?.availability)
+        assertEquals(AgentProbeState.REFRESHING, agentProbeStatus(emptyList(), setOf(1L), 1L, AgentKind.DSH)?.state)
+        assertNull(agentProbeStatus(emptyList(), emptySet(), 1L, AgentKind.DSH))
+        assertNull(agentProbeStatus(emptyList(), setOf(1L), null, AgentKind.DSH))
+        assertEquals(AgentProbeState.AVAILABLE, agentProbeStatus(listOf(row), setOf(2L), 1L, AgentKind.DSH)?.state)
+    }
+
+    @Test
+    fun aLiveLinkFactWinsOverThePersistedRow() {
+        val records = listOf(AgentLinkRecord(1L, null, AgentLinkState.CONNECTED, 0, 1_000))
+        val live = agentLinkPresentation(mapOf(1L to AgentLinkState.RETRYING), records, 1L)
+        assertEquals(AgentLinkState.RETRYING, live?.state)
+        assertTrue(live!!.live)
+        assertNull(agentLinkPresentation(mapOf(1L to AgentLinkState.CONNECTED), records, null))
+    }
+
+    @Test
+    fun aPersistedConnectedRowIsHistoryAndNeverALiveConnection() {
+        val records = listOf(AgentLinkRecord(1L, null, AgentLinkState.CONNECTED, 0, 1_700_000_000_000))
+        val link = agentLinkPresentation(emptyMap(), records, 1L)
+        assertEquals(AgentLinkState.CONNECTED, link?.state)
+        assertFalse(link!!.live)
+        assertEquals(1_700_000_000_000, link.sinceMillis)
+        assertNull(agentLinkPresentation(emptyMap(), records, 2L))
+        assertNull(agentLinkPresentation(emptyMap(), listOf(AgentLinkRecord(1L, "kimi", AgentLinkState.NEEDS_USER, 2, 500)), 1L))
+    }
+
+    @Test
+    fun aFullScanPageLeavesOlderHistoryUnloaded() {
+        val page = (1..AGENT_SESSION_PAGE_LIMIT).map { session(it.toLong()) }
+        assertTrue(agentHistoryMayBeTruncated(page))
+        assertFalse(agentHistoryMayBeTruncated(page.drop(1)))
+        assertFalse(agentHistoryMayBeTruncated(emptyList()))
+    }
+
+    @Test
+    fun thePageLimitIsCountedPerHostAndAgent() {
+        val short = (1..AGENT_SESSION_PAGE_LIMIT - 1).map { session(it.toLong(), hostId = 1L) }
+        val otherHost = (1..2).map { session(it.toLong(), hostId = 2L) }
+        assertFalse(agentHistoryMayBeTruncated(short + otherHost))
+        assertTrue(agentHistoryMayBeTruncated(short + (1..AGENT_SESSION_PAGE_LIMIT).map { session(it.toLong(), hostId = 2L) }))
+    }
+
+    private fun session(id: Long, hostId: Long = 1L, agent: AgentKind = AgentKind.KIMI) = AgentSession(hostId, agent, "s$id", "/work", title = "session $id")
+
+    private fun availability(hostId: Long = 1L, available: Boolean = false, error: String = "") = AgentAvailability(hostId, AgentKind.DSH, "/bin/dsh", available, error, "", null)
 }

@@ -28,6 +28,26 @@
     <string name="agent_no_devices">请先在主机列表中添加 SSH 主机。</string>
     <!-- Empty or filtered session list. -->
     <string name="agent_no_sessions">没有匹配的会话。刷新以读取远端历史，或新建会话。</string>
+    <!-- Search range of one pass: rows re-read from the remote and rows known only from the cached index. -->
+    <string name="agent_search_scope">范围：远端已加载 %1$d 条，仅缓存 %2$d 条</string>
+    <!-- A search could not cover every source; the argument carries the concrete reasons. -->
+    <string name="agent_search_incomplete">结果可能不完整：%1$s</string>
+    <!-- Reason for an incomplete search: a host/agent list filled one scan page, so older history may be missing. -->
+    <string name="agent_search_unloaded_pages">该 Agent 的会话列表已达到单次扫描上限（%1$d 条），可能还有未加载的历史。</string>
+    <!-- Reason for an incomplete search: these host/agent sources failed, so their rows stay cache-only. -->
+    <string name="agent_search_failed_sources">这些来源本轮未读取成功：%1$s</string>
+    <!-- Retry keeps the existing entry point, the top-bar refresh; the drawer adds no second loading entry. -->
+    <string name="agent_search_retry_hint">已保留已得结果；可用顶部的“刷新”重试。</string>
+    <!-- A hit matched the title of the session. -->
+    <string name="agent_search_field_title">命中：标题</string>
+    <!-- A hit matched the message preview shown for the session. -->
+    <string name="agent_search_field_preview">命中：内容</string>
+    <!-- A hit matched the working directory of the session. -->
+    <string name="agent_search_field_cwd">命中：目录</string>
+    <!-- The hit was re-read from the remote host in the last pass. -->
+    <string name="agent_search_source_remote">远端</string>
+    <!-- The hit is known only from the cached index, not from a remote read in this run. -->
+    <string name="agent_search_source_cached">仅缓存</string>
     <!-- Historical sessions remain visible when disconnected. -->
     <string name="agent_cache_hint">历史记录可能来自缓存。刷新需要连接；出现错误并不表示缓存中的会话在线可用。</string>
     <!-- Native driver support is distinct from availability on a particular host. -->
@@ -228,4 +248,32 @@
     <string name="agent_tui_no_host">此会话所属主机不可用，无法打开终端。</string>
     <!-- Explains that the working directory cannot be used as a terminal argument. -->
     <string name="agent_tui_bad_cwd">此会话的工作目录不可用，拒绝拼接终端命令。</string>
+    <!-- Probe is still running: the previous verdict is not shown until the new one arrives. -->
+    <string name="agent_probe_refreshing">正在探测…</string>
+    <!-- Probe verdict: the host holds no installation of this Agent. -->
+    <string name="agent_probe_not_installed">未安装：主机上找不到该 Agent 的运行文件。</string>
+    <!-- Probe verdict: the Agent exists but never completed a usable handshake. -->
+    <string name="agent_probe_start_failed">启动失败：Agent 未能完成可用的握手。</string>
+    <!-- Probe verdict: the Agent answered without declaring the protocol capabilities this app requires. -->
+    <string name="agent_probe_no_protocol_capability">无协议能力：Agent 已应答，但未声明本应用需要的协议能力。</string>
+    <!-- Probe verdict: the probe itself never reached the host or produced a result. -->
+    <string name="agent_probe_connect_failed">连接失败：探测未连上主机或未取得探测结果。</string>
+    <!-- Probe verdict: the failure is outside the known categories; the raw error is shown separately. -->
+    <string name="agent_probe_unknown_failure">探测失败：原因无法识别。</string>
+    <!-- A failed probe keeps the session list; the top bar refresh remains the existing retry entry. -->
+    <string name="agent_probe_retry_hint">已保留原有会话列表；可用顶部的“刷新”重试。</string>
+    <!-- The SSH link of this host is up right now. -->
+    <string name="agent_link_connected">已连接</string>
+    <!-- The link dropped and the backoff reconnect is running. -->
+    <string name="agent_link_retrying">连接中断，正在自动重连…</string>
+    <!-- Host key or credentials need the user before reconnecting. -->
+    <string name="agent_link_needs_user">需要你处理：请重新连接并确认主机密钥或凭据。</string>
+    <!-- After a process restart there is no live link, so only the last successful connect time is known. -->
+    <string name="agent_link_unknown_since">状态未知：上次连接于 %1$s。</string>
+    <!-- The link was torn down explicitly; the argument is the teardown time. -->
+    <string name="agent_link_disconnected_since">已断开：%1$s。</string>
+    <!-- The last run ended while reconnecting without success; arguments are the attempt count and the time. -->
+    <string name="agent_link_retrying_last">状态未知：上次断开后自动重连未成功（已重试 %1$d 次，%2$s）。</string>
+    <!-- The last run ended waiting for the user; the argument is the time. -->
+    <string name="agent_link_needs_user_last">上次需要你处理：%1$s。</string>
 </resources>

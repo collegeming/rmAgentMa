@@ -28,6 +28,26 @@
     <string name="agent_no_devices" tools:machine_translated="true">请先在主机列表中添加 SSH 主机。</string>
     <!-- 会话列表为空或筛选无结果。 -->
     <string name="agent_no_sessions" tools:machine_translated="true">没有匹配的会话。刷新以读取远端历史，或新建会话。</string>
+    <!-- 单次搜索的范围：本轮从远端重新读取的条数与仅来自缓存索引的条数。 -->
+    <string name="agent_search_scope" tools:machine_translated="true">范围：远端已加载 %1$d 条，仅缓存 %2$d 条</string>
+    <!-- 本次搜索未能覆盖全部来源；参数中给出具体原因。 -->
+    <string name="agent_search_incomplete" tools:machine_translated="true">结果可能不完整：%1$s</string>
+    <!-- 结果可能不完整的原因：某主机与 Agent 的列表填满了一页扫描结果，可能还有更早的历史未加载。 -->
+    <string name="agent_search_unloaded_pages" tools:machine_translated="true">该 Agent 的会话列表已达到单次扫描上限（%1$d 条），可能还有未加载的历史。</string>
+    <!-- 结果可能不完整的原因：列出的主机与 Agent 来源本轮未读取成功，其会话只能算作缓存。 -->
+    <string name="agent_search_failed_sources" tools:machine_translated="true">这些来源本轮未读取成功：%1$s</string>
+    <!-- 重试沿用既有入口：顶部的“刷新”；抽屉不再新增加载入口。 -->
+    <string name="agent_search_retry_hint" tools:machine_translated="true">已保留已得结果；可用顶部的“刷新”重试。</string>
+    <!-- 命中字段：会话标题。 -->
+    <string name="agent_search_field_title" tools:machine_translated="true">命中：标题</string>
+    <!-- 命中字段：会话显示的消息片段。 -->
+    <string name="agent_search_field_preview" tools:machine_translated="true">命中：内容</string>
+    <!-- 命中字段：会话的工作目录。 -->
+    <string name="agent_search_field_cwd" tools:machine_translated="true">命中：目录</string>
+    <!-- 该命中来自上一轮从远端主机重新读取的会话。 -->
+    <string name="agent_search_source_remote" tools:machine_translated="true">远端</string>
+    <!-- 该命中仅来自缓存索引，本次运行并未从远端读取。 -->
+    <string name="agent_search_source_cached" tools:machine_translated="true">仅缓存</string>
     <!-- 断开连接后历史会话仍然可见。 -->
     <string name="agent_cache_hint" tools:machine_translated="true">历史记录可能来自缓存。刷新需要连接；出现错误并不表示缓存中的会话在线可用。</string>
     <!-- 原生驱动支持与某台主机上的可用性相互独立。 -->
@@ -228,4 +248,32 @@
     <string name="agent_tui_no_host" tools:machine_translated="true">此会话所属主机不可用，无法打开终端。</string>
     <!-- 说明该工作目录无法用作终端参数。 -->
     <string name="agent_tui_bad_cwd" tools:machine_translated="true">此会话的工作目录不可用，拒绝拼接终端命令。</string>
+    <!-- 探测仍在进行：新结论返回前不显示上一次的结论。 -->
+    <string name="agent_probe_refreshing" tools:machine_translated="true">正在探测…</string>
+    <!-- 探测结论：主机上没有该 Agent 的安装。 -->
+    <string name="agent_probe_not_installed" tools:machine_translated="true">未安装：主机上找不到该 Agent 的运行文件。</string>
+    <!-- 探测结论：找到了 Agent，但它未能完成可用的握手。 -->
+    <string name="agent_probe_start_failed" tools:machine_translated="true">启动失败：Agent 未能完成可用的握手。</string>
+    <!-- 探测结论：Agent 应答了，但没有声明本应用需要的协议能力。 -->
+    <string name="agent_probe_no_protocol_capability" tools:machine_translated="true">无协议能力：Agent 已应答，但未声明本应用需要的协议能力。</string>
+    <!-- 探测结论：探测本身没有连上主机或没有拿到结果。 -->
+    <string name="agent_probe_connect_failed" tools:machine_translated="true">连接失败：探测未连上主机或未取得探测结果。</string>
+    <!-- 探测结论：失败原因不在已知分类内，原始错误另行显示。 -->
+    <string name="agent_probe_unknown_failure" tools:machine_translated="true">探测失败：原因无法识别。</string>
+    <!-- 探测失败时列表保持原样，顶栏“刷新”是既有重试入口。 -->
+    <string name="agent_probe_retry_hint" tools:machine_translated="true">已保留原有会话列表；可用顶部的“刷新”重试。</string>
+    <!-- 该主机的 SSH 连接当前可用。 -->
+    <string name="agent_link_connected" tools:machine_translated="true">已连接</string>
+    <!-- 连接中断，退避重连正在进行。 -->
+    <string name="agent_link_retrying" tools:machine_translated="true">连接中断，正在自动重连…</string>
+    <!-- 需要用户先处理主机密钥或凭据才能重连。 -->
+    <string name="agent_link_needs_user" tools:machine_translated="true">需要你处理：请重新连接并确认主机密钥或凭据。</string>
+    <!-- 进程重启后没有实时连接，只能说明上次连接成功的时刻。 -->
+    <string name="agent_link_unknown_since" tools:machine_translated="true">状态未知：上次连接于 %1$s。</string>
+    <!-- 已明确断开，参数为断开时刻。 -->
+    <string name="agent_link_disconnected_since" tools:machine_translated="true">已断开：%1$s。</string>
+    <!-- 上次运行结束时正在自动重连但未成功；参数为次数与时刻。 -->
+    <string name="agent_link_retrying_last" tools:machine_translated="true">状态未知：上次断开后自动重连未成功（已重试 %1$d 次，%2$s）。</string>
+    <!-- 上次运行结束时需要用户处理；参数为时刻。 -->
+    <string name="agent_link_needs_user_last" tools:machine_translated="true">上次需要你处理：%1$s。</string>
 </resources>

@@ -238,7 +238,15 @@ class AgentDeviceConversationTest {
             } finally {
                 savedKey.privateKey?.fill(0)
             }
-            val real = AgentRepository(context, hosts, realPool, AgentIndexStore(context, dispatchers.io), challenges, dispatchers)
+            val real = AgentRepository(
+                context,
+                hosts,
+                realPool,
+                AgentIndexStore(context, dispatchers.io),
+                challenges,
+                AgentLinkStateStore(context, dispatchers.io),
+                dispatchers,
+            )
             realRepository = real
             repository = real
             pool = realPool

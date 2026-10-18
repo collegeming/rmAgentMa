@@ -28,6 +28,26 @@
     <string name="agent_no_devices" tools:machine_translated="true">請先在主機清單中新增 SSH 主機。</string>
     <!-- 會話清單為空或篩選沒有結果。 -->
     <string name="agent_no_sessions" tools:machine_translated="true">沒有相符的會話。請重新整理以讀取遠端記錄，或新增會話。</string>
+    <!-- 單次搜尋的範圍：本輪從遠端重新讀取的條數與僅來自快取索引的條數。 -->
+    <string name="agent_search_scope" tools:machine_translated="true">範圍：遠端已載入 %1$d 條，僅快取 %2$d 條</string>
+    <!-- 本次搜尋未能涵蓋全部來源；參數中給出具體原因。 -->
+    <string name="agent_search_incomplete" tools:machine_translated="true">結果可能不完整：%1$s</string>
+    <!-- 結果可能不完整的原因：某部主機與 Agent 的清單填滿了一頁掃描結果，可能還有更早的記錄未載入。 -->
+    <string name="agent_search_unloaded_pages" tools:machine_translated="true">該 Agent 的會話清單已達到單次掃描上限（%1$d 條），可能還有未載入的記錄。</string>
+    <!-- 結果可能不完整的原因：列出的主機與 Agent 來源本輪未讀取成功，其會話只能算作快取。 -->
+    <string name="agent_search_failed_sources" tools:machine_translated="true">這些來源本輪未讀取成功：%1$s</string>
+    <!-- 重試沿用既有入口：頂部的「重新整理」；抽屜不再新增載入入口。 -->
+    <string name="agent_search_retry_hint" tools:machine_translated="true">已保留已得結果；可用頂部的「重新整理」重試。</string>
+    <!-- 命中欄位：會話標題。 -->
+    <string name="agent_search_field_title" tools:machine_translated="true">命中：標題</string>
+    <!-- 命中欄位：會話顯示的訊息片段。 -->
+    <string name="agent_search_field_preview" tools:machine_translated="true">命中：內容</string>
+    <!-- 命中欄位：會話的工作目錄。 -->
+    <string name="agent_search_field_cwd" tools:machine_translated="true">命中：目錄</string>
+    <!-- 該命中來自上一輪從遠端主機重新讀取的會話。 -->
+    <string name="agent_search_source_remote" tools:machine_translated="true">遠端</string>
+    <!-- 該命中僅來自快取索引，本次執行並未從遠端讀取。 -->
+    <string name="agent_search_source_cached" tools:machine_translated="true">僅快取</string>
     <!-- 中斷連線後歷史會話仍然可見。 -->
     <string name="agent_cache_hint" tools:machine_translated="true">記錄可能來自快取。重新整理需要連線；出現錯誤並不代表快取中的會話可於線上使用。</string>
     <!-- 原生驅動支援與某部主機上的可用性互相獨立。 -->
@@ -228,4 +248,32 @@
     <string name="agent_tui_no_host" tools:machine_translated="true">此會話所屬主機無法使用，無法開啟終端機。</string>
     <!-- 說明該工作目錄無法用作終端機參數。 -->
     <string name="agent_tui_bad_cwd" tools:machine_translated="true">此會話的工作目錄無法使用，拒絕拼接終端機指令。</string>
+    <!-- 探測仍在進行：新結論傳回前不顯示上一次的結論。 -->
+    <string name="agent_probe_refreshing" tools:machine_translated="true">正在探測…</string>
+    <!-- 探測結論：主機上沒有該 Agent 的安裝。 -->
+    <string name="agent_probe_not_installed" tools:machine_translated="true">未安裝：主機上找不到該 Agent 的執行檔。</string>
+    <!-- 探測結論：找到了 Agent，但它未能完成可用的握手。 -->
+    <string name="agent_probe_start_failed" tools:machine_translated="true">啟動失敗：Agent 未能完成可用的握手。</string>
+    <!-- 探測結論：Agent 已回應，但沒有宣告本應用程式需要的協定能力。 -->
+    <string name="agent_probe_no_protocol_capability" tools:machine_translated="true">無協定能力：Agent 已回應，但未宣告本應用程式需要的協定能力。</string>
+    <!-- 探測結論：探測本身沒有連上主機或沒有取得結果。 -->
+    <string name="agent_probe_connect_failed" tools:machine_translated="true">連線失敗：探測未連上主機或未取得探測結果。</string>
+    <!-- 探測結論：失敗原因不在已知分類內，原始錯誤另行顯示。 -->
+    <string name="agent_probe_unknown_failure" tools:machine_translated="true">探測失敗：原因無法辨識。</string>
+    <!-- 探測失敗時清單保持原樣，頂部的「重新整理」是既有重試入口。 -->
+    <string name="agent_probe_retry_hint" tools:machine_translated="true">已保留原有會話清單；可用頂部的「重新整理」重試。</string>
+    <!-- 該主機的 SSH 連線目前可用。 -->
+    <string name="agent_link_connected" tools:machine_translated="true">已連線</string>
+    <!-- 連線中斷，退避重連正在進行。 -->
+    <string name="agent_link_retrying" tools:machine_translated="true">連線中斷，正在自動重新連線…</string>
+    <!-- 需要使用者先處理主機金鑰或憑證才能重連。 -->
+    <string name="agent_link_needs_user" tools:machine_translated="true">需要你處理：請重新連線並確認主機金鑰或憑證。</string>
+    <!-- 程序重新啟動後沒有即時連線，只能說明上次連線成功的時刻。 -->
+    <string name="agent_link_unknown_since" tools:machine_translated="true">狀態未知：上次連線於 %1$s。</string>
+    <!-- 已明確斷線，參數為斷線時刻。 -->
+    <string name="agent_link_disconnected_since" tools:machine_translated="true">已斷線：%1$s。</string>
+    <!-- 上次執行結束時正在自動重連但未成功；參數為次數與時刻。 -->
+    <string name="agent_link_retrying_last" tools:machine_translated="true">狀態未知：上次斷線後自動重連未成功（已重試 %1$d 次，%2$s）。</string>
+    <!-- 上次執行結束時需要使用者處理；參數為時刻。 -->
+    <string name="agent_link_needs_user_last" tools:machine_translated="true">上次需要你處理：%1$s。</string>
 </resources>
