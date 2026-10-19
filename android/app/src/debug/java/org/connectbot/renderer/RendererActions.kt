@@ -328,6 +328,7 @@ internal class RendererActions(private val source: RendererSource) {
     }
 
     private suspend fun readProject(params: JSONObject): ProbeResult {
+        // The renderer requests the conversation's `project_id`, which this host maps to the saved host behind it.
         val id = params.optString("projectId")
         val host = source.snapshot().hosts.firstOrNull { RendererProjection.projectId(it.id) == id }
         return if (host == null) fail(404, "PROJECT_NOT_FOUND", "没有这个项目。") else success(RendererProjection.project(host))

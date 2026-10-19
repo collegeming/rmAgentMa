@@ -37,6 +37,9 @@ import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentOption
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.AgentSessionConfig
+import org.rmagentma.rendererhost.ProbeBridge
+import org.rmagentma.rendererhost.ProbeResult
+import org.rmagentma.rendererhost.json
 
 @RunWith(AndroidJUnit4::class)
 class RendererActionsTest {
@@ -232,6 +235,49 @@ class RendererActionsTest {
     }
 
     @Test
+    fun projectReadMapsTheConversationProjectIdToItsSavedHost() = runTest {
+        val source = FakeSource().apply { hosts = listOf(this@RendererActionsTest.host) }
+        val actions = RendererActions(source)
+
+        val listed = (actions.handle("projects.list", payload()).body as JSONObject).getJSONArray("data")
+        assertThat(listed.length()).isEqualTo(1)
+        assertThat(listed.getJSONObject(0).getString("project_id")).isEqualTo("host-7")
+
+        val read = actions.handle("project.read", payload(params = mapOf("projectId" to "host-7")))
+        assertThat(read.status).isEqualTo(200)
+        val project = (read.body as JSONObject).getJSONObject("data")
+        assertThat(project.getString("project_id")).isEqualTo("host-7")
+        assertThat(project.getString("name")).isEqualTo("工作机")
+        assertThat(project.getJSONObject("explorer").isNull("workspace_pe_id")).isTrue()
+        assertThat(project.getJSONObject("explorer").getJSONArray("entries").length()).isZero()
+
+        val missing = actions.handle("project.read", payload(params = mapOf("projectId" to "host-99")))
+        assertThat(missing.status).isEqualTo(404)
+        assertThat((missing.body as JSONObject).getString("code")).isEqualTo("PROJECT_NOT_FOUND")
+    }
+
+    @Test
+    fun productBridgeForwardsHostProjectIdsInsteadOfPinningTheProbeProject() {
+        val bridge = ProbeBridge(projectId = null)
+        bridge.commit(ProbeBridge.ENTRY)
+        var requested: String? = null
+        val execute = { _: String, body: JSONObject ->
+            requested = body.getJSONObject("params").optString("projectId")
+            ProbeResult(body = json("success" to true))
+        }
+        val handshake = bridge.receive(ProbeBridge.ORIGIN, true, bridgeRequest("host.handshake", "", "renderer-1", JSONObject()), execute)!!
+        val document = handshake.getJSONObject("body").getString("documentId")
+        val read = bridge.receive(
+            ProbeBridge.ORIGIN,
+            true,
+            bridgeRequest("project.read", document, "renderer-2", JSONObject().put("projectId", "host-7")),
+            execute,
+        )!!
+        assertThat(read.getInt("status")).isEqualTo(200)
+        assertThat(requested).isEqualTo("host-7")
+    }
+
+    @Test
     fun configReadPublishesTheAgentsOwnCatalogueUnderTheDataEnvelope() = runTest {
         val source = openSource().apply {
             configAccess = AgentConfigAccess.Available(
@@ -422,6 +468,13 @@ class RendererActionsTest {
     private fun jsonOf(vararg fields: Pair<String, Any?>): JSONObject = JSONObject().apply {
         fields.forEach { (key, value) -> put(key, value) }
     }
+
+    private fun bridgeRequest(action: String, document: String, id: String, params: JSONObject): String = jsonOf(
+        "requestId" to id,
+        "documentId" to document,
+        "action" to action,
+        "payload" to jsonOf("params" to params, "query" to JSONObject(), "body" to JSONObject.NULL),
+    ).toString()
 
     /** The open conversation the renderer is bound to, with whatever configuration access a test hands it. */
     private fun openSource(): FakeSource = FakeSource().apply {

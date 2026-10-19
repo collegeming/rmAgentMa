@@ -21,7 +21,11 @@ import org.json.JSONObject
 import java.net.URI
 import java.util.UUID
 
-class ProbeBridge {
+/**
+ * [projectId] pins the single project a synthetic host serves; the product host passes null because its
+ * projects are saved hosts and its action layer resolves or refuses each id.
+ */
+class ProbeBridge(private val projectId: String? = PROJECT) {
     @Volatile
     var documentId: String = ""
         private set
@@ -116,7 +120,7 @@ class ProbeBridge {
                 val conversation = params.opt("conversationId")
                 requireProbe(conversation == CONVERSATION || (action in DEFAULT_CONVERSATION_ACTIONS && conversation == null), 404, "CONVERSATION_NOT_FOUND")
             }
-            if (action == "project.read") requireProbe(params.opt("projectId") == PROJECT, 404, "PROJECT_NOT_FOUND")
+            if (action == "project.read" && projectId != null) requireProbe(params.opt("projectId") == projectId, 404, "PROJECT_NOT_FOUND")
             val sequence = requestSequence(requestId)
             val fingerprint = java.security.MessageDigest.getInstance("SHA-256").digest(raw.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
             val previous = receipts[sequence]

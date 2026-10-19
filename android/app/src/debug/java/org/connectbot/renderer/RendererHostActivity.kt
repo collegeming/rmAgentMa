@@ -64,8 +64,9 @@ class RendererHostActivity : ComponentActivity() {
 
     private val actions by lazy { RendererActions(source) }
 
+    // Product projects are saved hosts (`host-<id>`), so the bridge must not pin the probe's synthetic project id.
     @Volatile
-    private var bridge = ProbeBridge()
+    private var bridge = ProbeBridge(projectId = null)
 
     @Volatile
     private var subscribed = false
@@ -128,7 +129,7 @@ class RendererHostActivity : ComponentActivity() {
                 if (view !== web || closed) return
                 // A fresh bridge per document, as the probe does: in-flight work for the previous document can then
                 // never answer the new one, and the new page always gets a clean handshake.
-                bridge = ProbeBridge()
+                bridge = ProbeBridge(projectId = null)
                 reply = null
                 subscribed = false
                 if (!ProbeBridge.isEntry(url)) {
