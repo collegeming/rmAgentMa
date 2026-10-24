@@ -36,6 +36,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import net.schmizz.keepalive.KeepAliveProvider
+import net.schmizz.keepalive.KeepAliveRunner
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.DirectConnection
@@ -60,6 +61,16 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val ADDRESS_PROBE_TIMEOUT_MS = 5_000
+
+/**
+ * The only detector that sees a link whose TCP socket stays ESTABLISHED (adbd reverse forwarding, half-open link):
+ * sshj's `KeepAliveRunner` drops the transport once [KEEP_ALIVE_MAX_UNANSWERED] `keepalive@openssh.com` requests go
+ * unanswered, and it checks that count one interval apart, so the link is declared dead at
+ * ([KEEP_ALIVE_MAX_UNANSWERED] + 1) x [KEEP_ALIVE_INTERVAL_SECONDS] = 60 s. sshj's own default (5 unanswered
+ * requests) would take 180 s at the interval actually used.
+ */
+internal const val KEEP_ALIVE_INTERVAL_SECONDS = 15
+internal const val KEEP_ALIVE_MAX_UNANSWERED = 3
 
 /** One host's link fact: a usable client, or the reconnect bookkeeping that explains why there is none. */
 data class AgentLinkStatus(val hostId: Long, val state: AgentLinkState, val attempts: Int)
@@ -276,7 +287,7 @@ class AgentSshPool @Inject constructor(
         try {
             client.connectTimeout = 20_000
             client.timeout = 30_000
-            client.connection.keepAlive.keepAliveInterval = 30
+            armKeepAlive(client)
             client.transport.setDisconnectListener { _, _ ->
                 mutableCount.value = entries.values.count { it.client !== client && it.client.isConnected && it.client.isAuthenticated }
             }
@@ -460,6 +471,18 @@ class AgentSshPool @Inject constructor(
         } catch (_: IOException) { }
         mutableCount.value = entries.values.count { it.client.isConnected && it.client.isAuthenticated }
     }
+}
+
+/**
+ * Arms sshj's reply-counted keep-alive, the only dead-peer detector this pool has: a peer that dies without
+ * resetting the socket (stale adb reverse chain) leaves `Socket.isConnected()` true, so `SSHClient.isConnected()`
+ * only turns false once `KeepAliveRunner` gives up on the unanswered requests. Must run before `connect()`, because
+ * `SSHClient.onConnect()` starts the thread only when the interval is already positive.
+ */
+internal fun armKeepAlive(client: SSHClient) {
+    val keepAlive = client.connection.keepAlive
+    keepAlive.keepAliveInterval = KEEP_ALIVE_INTERVAL_SECONDS
+    (keepAlive as? KeepAliveRunner)?.maxAliveCount = KEEP_ALIVE_MAX_UNANSWERED
 }
 
 /** Accepts a key only when it matches a pinned known-host record; every other outcome fails the handshake. */
