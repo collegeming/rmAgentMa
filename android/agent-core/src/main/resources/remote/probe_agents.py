@@ -14,9 +14,43 @@ import time
 LIMIT = 64 * 1024
 TIMEOUT = 8
 
+# The app starts every agent by running one command string through a POSIX shell, so readiness can
+# only be claimed from that same launch: the probe repeats the app's command instead of starting the
+# binary itself. A failure that lives in the shell layer (an unusable HOME, an unreachable working
+# directory, a missing runtime file the launcher points at) then fails the probe as it fails a
+# conversation. The paths below mirror ZcodeLaunchConfig; keep them in step with it.
+ZCODE_BUILTIN_PROVIDER_CONFIG = "~/.zcode/v2/runtime/provider/bundled/zcode-builtin.json"
+ZCODE_PERSONAL_PROVIDER_CONFIG = "~/.zcode/v2/provider_config.json"
+
 
 def emit(value):
     print(json.dumps(value, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+
+def quote(value):
+    # Same POSIX single-quoting as ShellCommands.quote, so the probed command is the app's command.
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def home_path(value):
+    # Home-relative paths stay "$HOME"-relative, exactly as ZcodeLaunchConfig.path writes them, so a
+    # channel whose HOME is unset or unusable fails the probe and the app's launch in the same place.
+    return '"$HOME"/' + quote(value[2:]) if value.startswith("~/") else quote(value)
+
+
+def zcode_launch(executable, cwd):
+    return "exec env ZCODE_BUILTIN_PROVIDER_CONFIG_FILE={} ZCODE_PERSONAL_PROVIDER_CONFIG_FILE={} " \
+           "{} app-server --cwd {} --mode build".format(
+               home_path(ZCODE_BUILTIN_PROVIDER_CONFIG), home_path(ZCODE_PERSONAL_PROVIDER_CONFIG),
+               home_path(executable), quote(cwd))
+
+
+def acp_launch(executable, cwd, dsh=False):
+    return "cd -- {} && exec {} {}".format(quote(cwd), quote(executable), "--profile acp" if dsh else "acp")
+
+
+def shell(payload):
+    return ["/bin/sh", "-c", payload]
 
 
 def stop(process):
@@ -85,18 +119,22 @@ def read_output(process, response=False, zcode=False):
     raise ValueError("zcode_ready_timeout" if zcode else "initialize_timeout" if response else "version_timeout")
 
 
-def run(executable, arguments, initialize=False, zcode=False, environment=None):
-    process = subprocess.Popen([executable, *arguments], stdin=subprocess.PIPE,
+def run(command, initialize=False, zcode=False):
+    process = subprocess.Popen(command, stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               start_new_session=True, env=environment)
+                               start_new_session=True)
     try:
         if initialize or zcode:
             request = ({"id": 1, "method": "runtime/capabilities", "params": {}} if zcode else
                        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
                            "protocolVersion": 1, "clientCapabilities": {},
                            "clientInfo": {"name": "rmAgentMa-probe", "version": "1"}}})
-            process.stdin.write((json.dumps(request) + "\n").encode())
-            process.stdin.flush()
+            try:
+                process.stdin.write((json.dumps(request) + "\n").encode())
+                process.stdin.flush()
+            except OSError:
+                # The agent exited before it read the request: a startup failure, not a slow answer.
+                raise ValueError("zcode_no_response" if zcode else "initialize_no_response")
         else:
             process.stdin.close()
             process.stdin = None
@@ -108,7 +146,7 @@ def run(executable, arguments, initialize=False, zcode=False, environment=None):
         stop(process)
 
 
-def zcode_environment(executable):
+def require_zcode_layout(executable):
     from pathlib import Path
     home = Path.home()
     expected = home / ".zcode/server/agents/glm/zcode-agent"
@@ -121,11 +159,6 @@ def zcode_environment(executable):
         raise ValueError("zcode_runtime_files_missing")
     if not os.access(runtime / "node", os.X_OK):
         raise ValueError("zcode_runtime_files_missing")
-    environment = os.environ.copy()
-    environment.update(ZCODE_SERVER_RUNTIME_ROOT=str(runtime),
-                       ZCODE_BUILTIN_PROVIDER_CONFIG_FILE=str(bundled),
-                       ZCODE_PERSONAL_PROVIDER_CONFIG_FILE=str(personal))
-    return environment
 
 
 def probe(kind, custom=""):
@@ -138,17 +171,15 @@ def probe(kind, custom=""):
         result["error"] = "executable_missing"
         return result
     try:
-        version = run(executable, ["--version"]).decode("utf-8", errors="strict").strip()
+        version = run([executable, "--version"]).decode("utf-8", errors="strict").strip()
         result["version"] = version[:1024]
     except Exception:
         result["error"] = "version_unverified"
+    cwd = os.path.expanduser("~")
     if kind == "zcode":
         try:
-            environment = zcode_environment(executable)
-            if not result["version"]:
-                raise ValueError("version_unverified")
-            capabilities = run(executable, ["app-server", "--cwd", os.path.expanduser("~")],
-                               zcode=True, environment=environment)
+            require_zcode_layout(executable)
+            capabilities = run(shell(zcode_launch(executable, cwd)), zcode=True)
             result["capabilities"] = {"acp": False, "zcodeProtocol": True, "startupReady": True,
                                       "independentPlanState": capabilities["independentPlanState"]}
             result["available"] = True
@@ -160,7 +191,7 @@ def probe(kind, custom=""):
             result["error"] = str(exc) if str(exc) in known else "zcode_probe_failed"
         return result
     try:
-        response = run(executable, ["--profile", "acp"] if kind == "dsh" else ["acp"], True)
+        response = run(shell(acp_launch(executable, cwd, kind == "dsh")), True)
         if response.get("protocolVersion") != 1:
             raise ValueError("unsupported_protocol_version")
         capabilities = response.get("agentCapabilities")
