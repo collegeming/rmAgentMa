@@ -18,6 +18,7 @@
 package org.connectbot.renderer
 
 import org.connectbot.agent.AgentConfigAccess
+import org.connectbot.agent.AgentConfigBusyException
 import org.json.JSONArray
 import org.json.JSONObject
 import org.rmagentma.rendererhost.ProbeFailure
@@ -298,7 +299,13 @@ internal class RendererActions(private val source: RendererSource) {
         if (choices.length() > 0 && (0 until choices.length()).none { choices.getJSONObject(it).optString("value") == value }) {
             return fail(422, "INVALID_CONFIG", "该配置选项不接受这个值。")
         }
-        return when (val result = source.setConfigOption(optionId, value)) {
+        val result = try {
+            source.setConfigOption(optionId, value)
+        } catch (busy: AgentConfigBusyException) {
+            // A busy Agent refused the write; retrying is the only honest answer, not a generic failure.
+            return fail(409, "CONFIG_BUSY", "Agent 正在处理其它更新，配置尚未生效，请稍后重试。")
+        }
+        return when (result) {
             is AgentConfigAccess.Available -> {
                 val updated = RendererProjection.configOptions(result.config)
                 success(json("confirmation" to confirmation(updated, optionId, value), "config_options" to updated))

@@ -53,6 +53,7 @@ import org.rmagentma.core.AgentSessionConfig
 import org.rmagentma.core.AgentSessionHandle
 import org.rmagentma.core.RemoteAgentProbe
 import org.rmagentma.core.RemoteScanner
+import org.rmagentma.core.ZcodeBusyException
 import org.rmagentma.core.ZcodeDriver
 import org.rmagentma.core.ZcodeLaunchConfig
 import org.rmagentma.core.ZcodeSessionHandle
@@ -70,7 +71,7 @@ enum class AgentConversationState {
     Closed,
 }
 
-/** What the open conversation can say about its ACP configuration options. */
+/** What the open conversation can say about its Agent configuration options. */
 sealed interface AgentConfigAccess {
     /** The Agent's own snapshot of the open conversation, as it reports it now. */
     data class Available(val config: AgentSessionConfig) : AgentConfigAccess
@@ -81,12 +82,15 @@ sealed interface AgentConfigAccess {
      */
     data class Unconfirmed(val config: AgentSessionConfig?) : AgentConfigAccess
 
-    /** The conversation is open on a backend that has no ACP configuration surface. */
+    /** The conversation is open on a backend that has no configuration surface this product can read. */
     data object Unsupported : AgentConfigAccess
 
     /** No conversation is open, or the one this call was made for stopped being open. */
     data object Closed : AgentConfigAccess
 }
+
+/** A configuration write the Agent refused because another update was still in flight; it can be retried. */
+class AgentConfigBusyException(val code: Int, message: String) : java.io.IOException(message)
 
 // shortcut: agent-core reports a delivered write that came back without a snapshot as exactly this IOException, so
 // the message is the only signal that separates it from a rejection or a broken channel; upgrade to a typed result
@@ -535,40 +539,69 @@ class AgentRepository @Inject constructor(
     }
 
     /**
-     * The open conversation's ACP configuration as its Agent reports it now, read under the same state lock every
+     * The open conversation's Agent configuration as its Agent reports it now, read under the same state lock every
      * other conversation call uses, so the answer can only describe the conversation that is open at this moment.
      */
     suspend fun config(): AgentConfigAccess = withContext(dispatchers.io) {
         synchronized(stateLock) {
-            val open = handle ?: return@synchronized AgentConfigAccess.Closed
-            (open as? AcpSessionHandle)?.let { AgentConfigAccess.Available(it.config) } ?: AgentConfigAccess.Unsupported
+            when (val open = handle) {
+                null -> AgentConfigAccess.Closed
+
+                is AcpSessionHandle -> AgentConfigAccess.Available(open.config)
+
+                // ZCode reports its own settings model; it is published in the same option shape ACP uses.
+                is ZcodeSessionHandle -> AgentConfigAccess.Available(AgentZcodeConfig.project(open.config))
+
+                else -> AgentConfigAccess.Unsupported
+            }
         }
     }
 
     /**
-     * Sets one ACP configuration option and reports what the Agent did with it. A value the Agent rejects throws;
-     * a change it accepted without reporting a snapshot is [AgentConfigAccess.Unconfirmed] and never a success. A
-     * result is only handed back for the conversation it was made for, so a session switch cannot inherit it.
+     * Sets one configuration option and reports what the Agent did with it. A value the Agent rejects throws;
+     * a change it accepted without reporting a snapshot is [AgentConfigAccess.Unconfirmed] and never a success.
+     * A result is only handed back for the conversation it was made for, so a session switch cannot inherit it.
      */
     suspend fun setConfigOption(optionId: String, value: String): AgentConfigAccess = operation {
         require(optionId.isNotBlank())
         val (open, token) = synchronized(stateLock) {
             val current = handle ?: return@operation AgentConfigAccess.Closed
-            (current as? AcpSessionHandle)?.let { it to generation } ?: return@operation AgentConfigAccess.Unsupported
+            current to generation
         }
-        try {
-            val updated = open.setConfigOption(optionId, value)
-            if (stillOpen(open, token)) AgentConfigAccess.Available(updated) else AgentConfigAccess.Closed
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: java.io.IOException) {
-            if (e.message != UNREPORTED_CONFIG_WRITE) throw e
-            // The Agent answered the write, so it was delivered; without a snapshot nothing confirms the value.
-            AgentConfigAccess.Unconfirmed(if (stillOpen(open, token)) open.config else null)
+        when (open) {
+            is AcpSessionHandle -> setAcpConfigOption(open, token, optionId, value)
+            is ZcodeSessionHandle -> setZcodeConfigOption(open, token, optionId, value)
+            else -> AgentConfigAccess.Unsupported
         }
     }
 
-    private fun stillOpen(open: AcpSessionHandle, token: Long): Boolean = synchronized(stateLock) { generation == token && handle === open }
+    private suspend fun setAcpConfigOption(open: AcpSessionHandle, token: Long, optionId: String, value: String): AgentConfigAccess = try {
+        val updated = open.setConfigOption(optionId, value)
+        if (stillOpen(open, token)) AgentConfigAccess.Available(updated) else AgentConfigAccess.Closed
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: java.io.IOException) {
+        if (e.message != UNREPORTED_CONFIG_WRITE) throw e
+        // The Agent answered the write, so it was delivered; without a snapshot nothing confirms the value.
+        AgentConfigAccess.Unconfirmed(if (stillOpen(open, token)) open.config else null)
+    }
+
+    private suspend fun setZcodeConfigOption(open: ZcodeSessionHandle, token: Long, optionId: String, value: String): AgentConfigAccess {
+        val change = try {
+            AgentZcodeConfig.set(
+                open.config,
+                optionId,
+                value,
+                setModel = { providerId, modelId, level -> open.setModel(providerId, modelId, level) },
+                setThoughtLevel = { level -> open.setThoughtLevel(level) },
+            )
+        } catch (e: ZcodeBusyException) {
+            throw AgentZcodeConfig.busy(e)
+        }
+        return if (stillOpen(open, token)) AgentZcodeConfig.receipt(change) else AgentConfigAccess.Closed
+    }
+
+    private fun stillOpen(open: AgentSessionHandle, token: Long): Boolean = synchronized(stateLock) { generation == token && handle === open }
 
     suspend fun respondPermission(expectedSession: AgentSession, expectedEvent: AgentEvent, id: String, option: String) = respondInteraction(expectedSession, expectedEvent, id, "permission") { current -> current.respondPermission(id, option) }
 

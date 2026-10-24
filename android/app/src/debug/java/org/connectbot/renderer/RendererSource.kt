@@ -80,7 +80,7 @@ interface RendererSource {
     /** Persists the whitelisted theme setting; throws ProbeFailure for values the product cannot store. */
     fun setTheme(value: String)
 
-    /** ACP configuration the open conversation reports; [AgentConfigAccess.Unsupported] when its Agent has none. */
+    /** Agent configuration the open conversation reports; [AgentConfigAccess.Unsupported] when its Agent has none. */
     suspend fun config(): AgentConfigAccess
 
     /** Sets one configuration option through the same repository the Compose chat uses; throws when rejected. */

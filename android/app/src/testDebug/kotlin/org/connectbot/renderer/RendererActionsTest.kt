@@ -19,11 +19,15 @@ package org.connectbot.renderer
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.assertj.core.api.Assertions.assertThat
 import org.connectbot.agent.AgentConfigAccess
+import org.connectbot.agent.AgentConfigBusyException
+import org.connectbot.agent.AgentZcodeConfig
+import org.connectbot.agent.ZCODE_MODEL_OPTION
 import org.connectbot.data.entity.Host
 import org.json.JSONArray
 import org.json.JSONObject
@@ -37,6 +41,11 @@ import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentOption
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.AgentSessionConfig
+import org.rmagentma.core.ZcodeConfigChange
+import org.rmagentma.core.ZcodeConfigStatus
+import org.rmagentma.core.ZcodeModelOption
+import org.rmagentma.core.ZcodeModelSelection
+import org.rmagentma.core.ZcodeSessionConfig
 import org.rmagentma.rendererhost.ProbeBridge
 import org.rmagentma.rendererhost.ProbeResult
 import org.rmagentma.rendererhost.json
@@ -456,6 +465,80 @@ class RendererActionsTest {
     }
 
     @Test
+    fun zcodeConfigurationKeepsTheAcpOptionShapeAndItsReadOnlyDiagnostics() = runTest {
+        val source = openSource().apply {
+            configAccess = AgentConfigAccess.Available(AgentZcodeConfig.project(zcodeSnapshot("m2")))
+        }
+        val options = configOptions(source)
+        val model = optionById(options, ZCODE_MODEL_OPTION)
+        assertThat(model.getString("category")).isEqualTo("model")
+        assertThat(model.getString("type")).isEqualTo("select")
+        assertThat(model.getString("current_value")).isEqualTo("p/m2")
+        assertThat(model.getJSONArray("options").length()).isEqualTo(2)
+        assertThat(model.getJSONArray("options").getJSONObject(1).getString("value")).isEqualTo("p/m2")
+        val mode = optionById(options, "mode")
+        assertThat(mode.getString("type")).isEqualTo("readonly")
+        assertThat(mode.getString("current_value")).isEqualTo("build")
+
+        val unset = openSource().apply {
+            configAccess = AgentConfigAccess.Available(AgentZcodeConfig.project(zcodeSnapshot(null)))
+        }
+        assertThat(optionById(configOptions(unset), ZCODE_MODEL_OPTION).isNull("current_value")).isTrue()
+    }
+
+    @Test
+    fun zcodeReceiptsMapToObservedNextTurnAndCommandAck() = runTest {
+        val before = zcodeSnapshot("m1")
+        val after = zcodeSnapshot("m2")
+
+        fun sourceFor(status: ZcodeConfigStatus, config: ZcodeSessionConfig, applied: String?): FakeSource = openSource().apply {
+            configAccess = AgentConfigAccess.Available(AgentZcodeConfig.project(before))
+            setter = { _, _ ->
+                AgentZcodeConfig.receipt(
+                    ZcodeConfigChange(status, requested = "p/m2", applied = applied, revision = 2, busy = false, config = config, raw = JsonObject(emptyMap())),
+                )
+            }
+        }
+
+        suspend fun select(actions: RendererActions) = actions.handle(
+            "config.set",
+            payload(conversation = true, params = mapOf("optionId" to ZCODE_MODEL_OPTION), body = mapOf("value" to "p/m2")),
+        )
+
+        val confirmed = (select(RendererActions(sourceFor(ZcodeConfigStatus.CONFIRMED, after, "p/m2"))).body as JSONObject).getJSONObject("data")
+        assertThat(confirmed.getString("confirmation")).isEqualTo("observed")
+
+        val adjustedResult = select(RendererActions(sourceFor(ZcodeConfigStatus.ADJUSTED, before, "p/m1")))
+        assertThat(adjustedResult.status).isEqualTo(200)
+        val adjusted = (adjustedResult.body as JSONObject).getJSONObject("data")
+        assertThat(adjusted.getString("confirmation")).isEqualTo("pending_next_turn")
+        assertThat(optionById(adjusted.getJSONArray("config_options"), ZCODE_MODEL_OPTION).getString("current_value")).isEqualTo("p/m1")
+
+        val ackedResult = select(RendererActions(sourceFor(ZcodeConfigStatus.DELIVERED_PENDING, before, null)))
+        assertThat(ackedResult.status).isEqualTo(200)
+        val acked = (ackedResult.body as JSONObject).getJSONObject("data")
+        assertThat(acked.getString("confirmation")).isEqualTo("command_ack")
+        assertThat(optionById(acked.getJSONArray("config_options"), ZCODE_MODEL_OPTION).getString("current_value")).isEqualTo("p/m1")
+    }
+
+    @Test
+    fun aBusyAgentKeepsItsOwnRefusalCodeInsteadOfAGenericFailure() = runTest {
+        val source = openSource().apply {
+            configAccess = AgentConfigAccess.Available(AgentZcodeConfig.project(zcodeSnapshot("m1")))
+            setter = { _, _ -> throw AgentConfigBusyException(-32603, "Permission update is busy; retry mode change") }
+        }
+        val result = RendererActions(source).handle(
+            "config.set",
+            payload(conversation = true, params = mapOf("optionId" to ZCODE_MODEL_OPTION), body = mapOf("value" to "p/m2")),
+        )
+        assertThat(result.status).isEqualTo(409)
+        val body = result.body as JSONObject
+        assertThat(body.getBoolean("success")).isFalse()
+        assertThat(body.getString("code")).isEqualTo("CONFIG_BUSY")
+        assertThat(body.getString("error")).contains("稍后重试")
+    }
+
+    @Test
     fun draftRoundTripsForTheOpenConversationUnderItsOwnSessionKey() = runTest {
         val source = openSource()
         val actions = RendererActions(source)
@@ -565,6 +648,16 @@ class RendererActionsTest {
         session = this@RendererActionsTest.session
         active = true
     }
+
+    /** One ZCode settings snapshot with a real-looking catalogue; the mode is read-only because the driver has no mode list. */
+    private fun zcodeSnapshot(current: String?): ZcodeSessionConfig = ZcodeSessionConfig(
+        catalog = listOf(
+            ZcodeModelOption(ZcodeModelSelection("p", "m1"), "Model One"),
+            ZcodeModelOption(ZcodeModelSelection("p", "m2"), "Model Two"),
+        ),
+        currentModel = current?.let { ZcodeModelSelection("p", it) },
+        currentMode = "build",
+    )
 
     private fun selectOption(id: String, category: String, current: String?, vararg values: String): AgentConfigOption = AgentConfigOption(
         id = id,
