@@ -196,7 +196,7 @@ class SearchTranscriptsTest(unittest.TestCase):
                              json.loads(result.stdout))
         code, rows = self.run_search("hello", [self.scope(self.root, file)], timeout=0)
         self.assertEqual(0, code)
-        self.assertEqual(["search"], [row["record"] for row in rows])
+        self.assertEqual(["match", "search"], [row["record"] for row in rows])
         self.assertEqual(1, rows[-1]["matches"])
         self.assertFalse(rows[-1]["timedOut"])
 
