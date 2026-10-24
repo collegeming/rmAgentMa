@@ -304,6 +304,9 @@ internal class AcpConnection(
         if (entry.method in SESSION_ACTIVATION_METHODS) {
             trace("load_response")
             config = config.applyLifecycle(result)
+            // Take the id here, before the pending request resumes: the reader keeps consuming frames and must
+            // already be able to reject updates that belong to another session.
+            result.string("sessionId").takeIf { it.isNotBlank() }?.let { sessionId = it }
             eventBuffer.barrier()
             trace("barrier_done")
         }
