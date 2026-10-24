@@ -44,7 +44,16 @@ data class AgentAvailability(
 )
 
 class RemoteAgentProbe(private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO) {
-    suspend fun probe(host: HostSession, zcodeExecutable: String? = null): List<AgentAvailability> {
+    suspend fun probe(
+        host: HostSession,
+        zcodeExecutable: String? = null,
+        target: RemoteTarget = RemoteTarget.Posix,
+    ): List<AgentAvailability> {
+        // A target the app cannot enter has no installation to report, and its verdict is that fact rather than
+        // an unreachable host. The same target refuses the launch, so no session opens from this answer.
+        if (!target.supported) {
+            return AgentKind.entries.map { AgentAvailability(host.hostId, it, "", false, WINDOWS_NATIVE_UNSUPPORTED) }
+        }
         zcodeExecutable?.let {
             require(it.startsWith('/')) { "Executable must be an absolute path" }
             requireRemoteArgument(it)

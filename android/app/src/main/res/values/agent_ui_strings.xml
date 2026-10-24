@@ -26,6 +26,10 @@
     <string name="agent_search">搜索标题、消息或目录</string>
     <!-- Explain absence of saved SSH devices. -->
     <string name="agent_no_devices">请先在主机列表中添加 SSH 主机。</string>
+    <!-- The new-session Agent picker before a host is chosen: an Agent is only offered on a host that holds it. -->
+    <string name="agent_pick_host_first">请先选择远程主机</string>
+    <!-- Marks an Agent option the selected host's probe did not find; selecting it shows the probe verdict. -->
+    <string name="agent_choice_not_detected">（未检测到）</string>
     <!-- Empty or filtered session list. -->
     <string name="agent_no_sessions">没有匹配的会话。刷新以读取远端历史，或新建会话。</string>
     <!-- Search range of one pass: rows re-read from the remote and rows known only from the cached index. -->
@@ -264,6 +268,10 @@
     <string name="agent_probe_connect_failed">连接失败：探测未连上主机或未取得探测结果。</string>
     <!-- Probe verdict: the failure is outside the known categories; the raw error is shown separately. -->
     <string name="agent_probe_unknown_failure">探测失败：原因无法识别。</string>
+    <!-- Probe verdict: this host target has no entry in the app, so nothing ran and no session can open on it. -->
+    <string name="agent_probe_target_unsupported">不支持的目标：Windows 本机目标尚未实现，请在该主机上选择 WSL 发行版。</string>
+    <!-- Probes this host again from where the detected installation and version are shown. -->
+    <string name="agent_probe_refresh">重新探测</string>
     <!-- A failed probe keeps the session list; the top bar refresh remains the existing retry entry. -->
     <string name="agent_probe_retry_hint">已保留原有会话列表；可用顶部的“刷新”重试。</string>
     <!-- The SSH link of this host is up right now. -->
@@ -332,4 +340,110 @@
     <string name="agent_config_write_unsupported">该 Agent 不支持切换</string>
     <!-- The panel is waiting for the Agent's answer to the selected value. -->
     <string name="agent_config_writing">正在切换…</string>
+    <!-- Action: search the content of remote conversation transcripts, beyond the local title/preview filter. -->
+    <string name="agent_transcript_search">搜索对话内容</string>
+    <!-- Progress line while the remote transcript search reads the selected conversations. -->
+    <string name="agent_transcript_searching">正在检索远端对话内容…</string>
+    <!-- Coverage of one remote transcript search: how many conversations it read. -->
+    <string name="agent_transcript_scope">检索范围：已读取远端会话 %1$d 个</string>
+    <!-- The directories a remote transcript search actually read. -->
+    <string name="agent_transcript_roots">读取的目录：%1$s</string>
+    <!-- How many remote transcript hits this search returned. -->
+    <string name="agent_transcript_hits">远端命中 %1$d 条</string>
+    <!-- A search whose limits, clock or unreadable files left part of the history unread. -->
+    <string name="agent_transcript_truncated">结果被截断：命中已达上限，或部分记录未读完。</string>
+    <!-- No hit in a range the search really read; never shown as the answer to a failed or partial search. -->
+    <string name="agent_transcript_no_hits">该范围内没有命中。</string>
+    <!-- Conversations a remote transcript search did not read, with the reason for each. -->
+    <string name="agent_transcript_skips">未检索的会话：%1$s</string>
+    <!-- Hosts a remote transcript search could not read at all, with each host's own error. -->
+    <string name="agent_transcript_failures">未读取成功的主机：%1$s</string>
+    <!-- One name and its reason inside a coverage line. -->
+    <string name="agent_transcript_item">%1$s：%2$s</string>
+    <!-- Which file and line of the transcript a hit sits at. -->
+    <string name="agent_transcript_hit_anchor">记录：%1$s</string>
+    <!-- A hit whose conversation is no longer in the loaded list; it cannot be opened from here. -->
+    <string name="agent_transcript_hit_missing">该会话已不在当前列表中</string>
+    <!-- Leave the remote content search and return to the browsable conversation list. -->
+    <string name="agent_transcript_clear">退出内容检索</string>
+    <!-- Search refused: no query text was given. -->
+    <string name="agent_transcript_problem_query_empty">请输入要检索的内容。</string>
+    <!-- Search refused: the query holds characters no remote argument can carry, or is too long. -->
+    <string name="agent_transcript_problem_query_invalid">检索内容包含无法发送的字符，或长度超出上限。</string>
+    <!-- Search refused: nothing in the current selection can be searched. -->
+    <string name="agent_transcript_problem_scope">没有可检索的会话范围。</string>
+    <!-- The host has no python3 or base64, so no remote search can run there at all. -->
+    <string name="agent_transcript_problem_tool">该主机缺少 python3 或 base64，无法执行远端检索。</string>
+    <!-- The remote search hit its own clock; the hits that arrived are real but not the whole answer. -->
+    <string name="agent_transcript_problem_timeout">检索超时；已返回的命中仍然有效，但可能不完整。</string>
+    <!-- The host answered with something this build cannot read as a search. -->
+    <string name="agent_transcript_problem_failed">主机返回了无法解析的检索结果。</string>
+    <!-- The host stopped short of its closing summary, so nothing proves the search finished. -->
+    <string name="agent_transcript_problem_incomplete">主机未返回检索结束标志，结果可能不完整。</string>
+    <!-- Skip reason: this Agent keeps its history in a database, not in files a remote search may name. -->
+    <string name="agent_transcript_skip_history">该 Agent 的对话记录不在可检索的文件中</string>
+    <!-- Skip reason: no transcript root was found near the conversation's working directory. -->
+    <string name="agent_transcript_skip_root">未找到会话记录根目录</string>
+    <!-- Skip reason: the transcript root holds no directory named after this session id. -->
+    <string name="agent_transcript_skip_directory">根目录下没有该会话的目录</string>
+    <!-- Skip reason: the session directory holds no transcript file this search may read. -->
+    <string name="agent_transcript_skip_file">会话目录中没有可读取的记录文件</string>
+    <!-- Skip reason: the selection held more conversations than one search reads. -->
+    <string name="agent_transcript_skip_limit">超出一次检索的会话上限</string>
+    <!-- Action: hand a message to another conversation, on this host or another. -->
+    <string name="agent_message_send">发消息到其它会话</string>
+    <!-- Picker label for the conversation a message is addressed to. -->
+    <string name="agent_message_target">目标会话</string>
+    <!-- Shown when no other conversation can be addressed. -->
+    <string name="agent_message_no_targets">当前没有其它会话可投递。</string>
+    <!-- Picker label for what the message asks of its target. -->
+    <string name="agent_message_kind">投递方式</string>
+    <!-- Hand-off that asks the target conversation to act. -->
+    <string name="agent_message_kind_request">请求处理</string>
+    <!-- Hand-off that only tells the target conversation something. -->
+    <string name="agent_message_kind_notify">仅通知</string>
+    <!-- What a request does: it is sent automatically the next time the target conversation is opened. -->
+    <string name="agent_message_kind_request_hint">下次打开目标会话时自动发送该消息。</string>
+    <!-- What a notice does: it is shown as a hint the next time the target conversation is opened. -->
+    <string name="agent_message_kind_notify_hint">下次打开目标会话时作为提示展示，不发送给 Agent。</string>
+    <!-- Label of the message body field. -->
+    <string name="agent_message_text">消息内容</string>
+    <!-- Confirmation that a request was queued. -->
+    <string name="agent_message_queued_request">已入队：打开目标会话时会自动发送该消息。</string>
+    <!-- Confirmation that a notice was queued. -->
+    <string name="agent_message_queued_notify">已入队：打开目标会话时只作为提示展示。</string>
+    <!-- The queue refused the message instead of reporting a hand-off that did not happen. -->
+    <string name="agent_message_refused">消息未入队：内容为空、过长或目标无效。</string>
+    <!-- How many messages still wait for the open conversation. -->
+    <string name="agent_message_pending">该会话还有 %1$d 条排队消息。</string>
+    <!-- Retry handing the queued messages to the open conversation. -->
+    <string name="agent_message_retry">重试投递</string>
+    <!-- Delivering queued messages failed; nothing was lost. -->
+    <string name="agent_message_delivery_failed">投递未完成，消息仍保留在队列：%1$s</string>
+    <!-- How many queued requests were sent when the conversation was opened. -->
+    <string name="agent_message_delivered_request">已自动发送 %1$d 条排队消息。</string>
+    <!-- A hint another conversation left here; it is shown, never sent to an Agent. -->
+    <string name="agent_message_notice">其它会话的提示：%1$s</string>
+    <!-- Dismiss a collaboration notice. -->
+    <string name="agent_message_dismiss">忽略</string>
+    <!-- Action: quote the open conversation's messages into a new conversation's input box. -->
+    <string name="agent_quote_to_new">引用到新会话</string>
+    <!-- The quoted text is only prefilled; the user sends it. -->
+    <string name="agent_quote_prefilled">已把引用内容填入输入框，请确认后自行发送。</string>
+    <!-- The quoted pack dropped messages or cut characters to stay within its budget. -->
+    <string name="agent_quote_trimmed">引用内容已按预算裁剪，发送前请检查。</string>
+    <!-- The open conversation held no message text to quote. -->
+    <string name="agent_quote_empty">当前会话没有可引用的消息。</string>
+    <!-- Title of the read-only attention inbox at the top of the drawer. -->
+    <string name="agent_inbox">待办</string>
+    <!-- Attention reason: the conversation waits for an approval response. -->
+    <string name="agent_inbox_approval">待审批 %1$d</string>
+    <!-- Attention reason: the conversation waits for an answer to its question. -->
+    <string name="agent_inbox_question">待回答 %1$d</string>
+    <!-- Attention reason: the conversation has a recorded failure. -->
+    <string name="agent_inbox_failure">失败：%1$s</string>
+    <!-- Attention reason: the conversation is running a turn. -->
+    <string name="agent_inbox_busy">正在运行</string>
+    <!-- Return to the conversation an inbox row belongs to. -->
+    <string name="agent_inbox_open">回到该会话</string>
 </resources>

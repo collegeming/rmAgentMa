@@ -459,6 +459,17 @@
   <string name="ipversion_auto">自动</string>
   <string name="ipversion_ipv4">仅支持 IPv4</string>
   <string name="ipversion_ipv6">仅支持 IPv6</string>
+  <string name="hostpref_os_type_title" tools:machine_translated="true">主机操作系统</string>
+  <string name="hostpref_os_type_summary" tools:machine_translated="true">Windows 主机通过独立的目标连接其 Agent。</string>
+  <string name="hostpref_os_type_linux" tools:machine_translated="true">Linux</string>
+  <string name="hostpref_os_type_windows" tools:machine_translated="true">Windows</string>
+  <string name="hostpref_agent_target_title" tools:machine_translated="true">Agent 目标</string>
+  <string name="hostpref_agent_target_native" tools:machine_translated="true">Windows 本机</string>
+  <string name="hostpref_agent_target_wsl" tools:machine_translated="true">WSL 发行版</string>
+  <string name="hostpref_wsl_distribution_title" tools:machine_translated="true">WSL 发行版名称</string>
+  <string name="hostpref_wsl_distribution_summary" tools:machine_translated="true">填写 WSL 报告的发行版名称，例如 Ubuntu-22.04。</string>
+  <string name="hostpref_wsl_distribution_error" tools:machine_translated="true">请使用 WSL 报告的发行版名称：仅限字母、数字、空格、点、短横线和下划线。</string>
+
   <string name="hostpref_jumphost_title">跳板主机（ProxyJump）</string>
   <string name="hostpref_jumphost_summary">通过另一个 SSH 主机连接</string>
   <string name="list_jumphost_none">无（直接连接）</string>

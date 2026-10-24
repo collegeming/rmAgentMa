@@ -43,6 +43,11 @@ import org.connectbot.di.CoroutineDispatchers
 import org.connectbot.transport.Transport
 import org.connectbot.util.InstallMosh
 import org.connectbot.util.SecurePasswordStorage
+import org.rmagentma.core.AGENT_TARGET_NATIVE
+import org.rmagentma.core.AGENT_TARGET_WSL_PREFIX
+import org.rmagentma.core.HOST_OS_LINUX
+import org.rmagentma.core.HOST_OS_WINDOWS
+import org.rmagentma.core.validWslDistribution
 import java.io.IOException
 import javax.inject.Inject
 
@@ -67,6 +72,8 @@ data class HostEditorUiState(
     val jumpHostId: Long? = null,
     val availableJumpHosts: List<Host> = emptyList(),
     val ipVersion: String = "IPV4_AND_IPV6",
+    val osType: String = HOST_OS_LINUX,
+    val agentTarget: String = AGENT_TARGET_NATIVE,
     val password: String = "",
     val hasExistingPassword: Boolean = false,
     val hasUnsavedChanges: Boolean = false,
@@ -84,6 +91,12 @@ data class HostEditorUiState(
     val isMoshNetworkTimeoutValid: Boolean
         get() = moshNetworkTimeout.isBlank() ||
             (moshNetworkTimeout.all { it in '0'..'9' } && moshNetworkTimeout.toIntOrNull() != null)
+
+    /** A Windows target is either the host itself or a WSL distribution whose name survives quoting. */
+    val hasInvalidAgentTarget: Boolean
+        get() = osType == HOST_OS_WINDOWS &&
+            agentTarget.startsWith(AGENT_TARGET_WSL_PREFIX) &&
+            !validWslDistribution(agentTarget.removePrefix(AGENT_TARGET_WSL_PREFIX))
 }
 
 @HiltViewModel
@@ -189,6 +202,8 @@ class HostEditorViewModel @Inject constructor(
                             quickDisconnect = host.quickDisconnect,
                             jumpHostId = host.jumpHostId,
                             ipVersion = host.ipVersion,
+                            osType = host.osType,
+                            agentTarget = host.agentTarget,
                             hasExistingPassword = hasPassword,
                             hasUnsavedChanges = false,
                             // Mosh-specific fields
@@ -363,6 +378,16 @@ class HostEditorViewModel @Inject constructor(
         _uiState.update { it.copy(ipVersion = value, hasUnsavedChanges = true) }
     }
 
+    /** A host that is not Windows has no Agent target to choose, and keeps the target it already had. */
+    fun updateOsType(value: String) {
+        _uiState.update { it.copy(osType = value, hasUnsavedChanges = true) }
+    }
+
+    /** The stored form of the target: "native", or "wsl:<distribution>" for the name the user typed. */
+    fun updateAgentTarget(value: String) {
+        _uiState.update { it.copy(agentTarget = value, hasUnsavedChanges = true) }
+    }
+
     fun updatePassword(value: String) {
         _uiState.update { it.copy(password = value, hasUnsavedChanges = true) }
     }
@@ -392,6 +417,7 @@ class HostEditorViewModel @Inject constructor(
     suspend fun saveHost(): Boolean {
         if (_uiState.value.isSaving) return false
         if (_uiState.value.protocol == "mosh" && !_uiState.value.isMoshNetworkTimeoutValid) return false
+        if (_uiState.value.hasInvalidAgentTarget) return false
         _uiState.update { it.copy(isSaving = true, error = null) }
         try {
             val state = _uiState.value
@@ -427,6 +453,8 @@ class HostEditorViewModel @Inject constructor(
                 useCtrlAltAsMetaKey = existingHost?.useCtrlAltAsMetaKey ?: false,
                 jumpHostId = jumpHostId,
                 ipVersion = state.ipVersion,
+                osType = state.osType,
+                agentTarget = state.agentTarget,
                 moshPort = state.moshPort.toIntOrNull() ?: 0,
                 moshServer = state.moshServer.ifBlank { null },
                 moshNetworkTimeout = state.moshNetworkTimeout.toIntOrNull(),

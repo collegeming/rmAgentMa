@@ -90,6 +90,7 @@ import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.ShellCommands
+import org.rmagentma.core.remoteTargetOf
 
 // Resolved by class name because the renderer host only exists in the debug source set.
 private const val RENDERER_HOST_ACTIVITY = "org.connectbot.renderer.RendererHostActivity"
@@ -133,7 +134,14 @@ fun AgentScreen(
     val configWriting by viewModel.configWriting.collectAsState()
     val configNotice by viewModel.configNotice.collectAsState()
     val pendingSelection by viewModel.pendingSelection.collectAsState()
+    val inbox by viewModel.inbox.collectAsState()
+    val queued by viewModel.queuedMessages.collectAsState()
+    val queueStatus by viewModel.queueStatus.collectAsState()
+    val quote by viewModel.quote.collectAsState()
+    val transcript by viewModel.transcriptSearch.collectAsState()
+    val transcriptSearching by viewModel.transcriptSearching.collectAsState()
     var showNew by remember { mutableStateOf(false) }
+    var showSendMessage by remember { mutableStateOf(false) }
     var newWorkspace by remember { mutableStateOf<AgentWorkspaceKey?>(null) }
     var showDisconnect by remember { mutableStateOf(false) }
     var showDebugTerminal by remember { mutableStateOf(false) }
@@ -164,6 +172,7 @@ fun AgentScreen(
         }
     }
     val closeDrawer: () -> Unit = { scope.launch { drawerState.close() } }
+    var quoteNotice by remember { mutableStateOf<AgentQuoteState.Pending?>(null) }
     val newConversation: (AgentWorkspaceKey?) -> Unit = { workspace ->
         newWorkspace = workspace
         showNew = true
@@ -183,8 +192,15 @@ fun AgentScreen(
             withNetworkPermission { viewModel.refresh(viewModel.selectedHost.value) }
         }
     }
-    val terminalCommand: (Host, AgentKind, String, String?) -> String? = { _, kind, cwd, id ->
-        if (validAgentCwd(cwd)) ShellCommands.start(kind, cwd, id?.takeIf { it.isNotBlank() }) else null
+    // The terminal runs the command on the selected host, so it enters the host's Agent target exactly as the
+    // session launch does; a target the app cannot enter yields no command instead of a POSIX line it cannot run.
+    val terminalCommand: (Host, AgentKind, String, String?) -> String? = { host, kind, cwd, id ->
+        if (validAgentCwd(cwd)) {
+            remoteTargetOf(host.osType, host.agentTarget)
+                .shellCommand(ShellCommands.start(kind, cwd, id?.takeIf { it.isNotBlank() }))
+        } else {
+            null
+        }
     }
     val terminal: (Host, AgentKind, String, String?) -> Unit = { host, kind, cwd, id ->
         terminalCommand(host, kind, cwd, id)?.let { command ->
@@ -196,6 +212,30 @@ fun AgentScreen(
     }
     LaunchedEffect(session) {
         showConfig = false
+    }
+    // A queued message is handed over when its conversation is open and idle, so a request becomes a real turn
+    // instead of being dropped: a busy conversation waits, and the next idle moment delivers it.
+    val deliveryTarget = active ?: session
+    LaunchedEffect(deliveryTarget?.hostId, deliveryTarget?.agent, deliveryTarget?.sessionId, conversationState, busy) {
+        if (deliveryTarget != null && conversationState == AgentConversationState.Ready && !busy) {
+            viewModel.deliverQueued(deliveryTarget)
+        }
+    }
+    LaunchedEffect(deliveryTarget?.hostId, deliveryTarget?.agent, deliveryTarget?.sessionId) {
+        viewModel.dismissQueueStatus()
+    }
+    LaunchedEffect(drawerState.isOpen) {
+        if (drawerState.isOpen) viewModel.refreshQueue()
+    }
+    // A quoted pack is only a prefill: it reaches the input box of the conversation the user picked next, and
+    // sending it stays the user's own action. The source conversation keeps its own input box untouched.
+    LaunchedEffect(quote, session?.hostId, session?.agent, session?.sessionId) {
+        val pending = quote as? AgentQuoteState.Pending ?: return@LaunchedEffect
+        val opened = session ?: return@LaunchedEffect
+        if (sameAgentSession(opened, pending.source)) return@LaunchedEffect
+        prompt = pending.text
+        quoteNotice = pending
+        viewModel.consumeQuote()
     }
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -212,11 +252,23 @@ fun AgentScreen(
                     selectedHostId = hostId,
                     selectedAgent = agent,
                     drawerOpen = drawerState.isOpen,
+                    inbox = inbox,
+                    queued = queued,
+                    transcript = transcript,
+                    transcriptSearching = transcriptSearching,
                     onOpen = { session ->
                         closeDrawer()
                         withNetworkPermission { viewModel.open(session) }
                     },
                     onNew = newConversation,
+                    onInboxOpen = { session ->
+                        closeDrawer()
+                        withNetworkPermission { viewModel.open(session) }
+                    },
+                    onTranscriptSearch = { query, allWorkspaces ->
+                        withNetworkPermission { viewModel.searchTranscripts(query, allWorkspaces) }
+                    },
+                    onTranscriptClear = viewModel::clearTranscriptSearch,
                     onSettings = {
                         closeDrawer()
                         onSettings()
@@ -284,7 +336,11 @@ fun AgentScreen(
                         modifier = Modifier.weight(1f),
                     )
                 }
-                AgentAvailabilityContent(agentProbeStatus(availability, refreshingHosts, hostId, agent), Modifier.padding(horizontal = 12.dp))
+                AgentAvailabilityContent(
+                    agentProbeStatus(availability, refreshingHosts, hostId, agent),
+                    onRefresh = { withNetworkPermission { viewModel.refresh(hostId) } },
+                    modifier = Modifier.padding(horizontal = 12.dp),
+                )
                 AgentLinkStatusContent(agentLinkPresentation(liveLinkStates, linkRecords, hostId), Modifier.padding(horizontal = 12.dp))
                 if (busy || working) LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (denied) {
@@ -385,6 +441,48 @@ fun AgentScreen(
                             }
                         }
                     }
+                    Row(Modifier.padding(horizontal = 12.dp)) {
+                        TextButton(
+                            onClick = { showSendMessage = true },
+                            enabled = !working && sessions.any { !sameAgentSession(it, session) },
+                        ) { Text(stringResource(R.string.agent_message_send)) }
+                        TextButton(
+                            onClick = {
+                                viewModel.quoteToNewSession()
+                                if (viewModel.quote.value is AgentQuoteState.Pending) {
+                                    newWorkspace = null
+                                    showNew = true
+                                }
+                            },
+                            enabled = !working,
+                        ) { Text(stringResource(R.string.agent_quote_to_new)) }
+                    }
+                    queueStatus?.let { status ->
+                        AgentQueueStatusContent(
+                            status = status,
+                            sessions = sessions,
+                            hosts = hosts,
+                            onRetry = { viewModel.deliverQueued(active ?: session) },
+                            onDismiss = viewModel::dismissQueueStatus,
+                        )
+                    }
+                    if (quote is AgentQuoteState.Empty) {
+                        Row(Modifier.padding(horizontal = 12.dp)) {
+                            Text(stringResource(R.string.agent_quote_empty), modifier = Modifier.weight(1f))
+                            TextButton(onClick = viewModel::consumeQuote) { Text(stringResource(R.string.agent_message_dismiss)) }
+                        }
+                    }
+                    quoteNotice?.let { pending ->
+                        Row(Modifier.padding(horizontal = 12.dp)) {
+                            Text(
+                                stringResource(
+                                    if (pending.trimmed) R.string.agent_quote_trimmed else R.string.agent_quote_prefilled,
+                                ),
+                                modifier = Modifier.weight(1f),
+                            )
+                            TextButton(onClick = { quoteNotice = null }) { Text(stringResource(R.string.agent_message_dismiss)) }
+                        }
+                    }
                     if (sessionView == AgentSessionView.TUI) {
                         AgentTuiPane(
                             command = hosts.firstOrNull { it.id == session.hostId }
@@ -450,10 +548,32 @@ fun AgentScreen(
             initialHostId = initialHost,
             initialAgent = agent,
             initialCwd = newWorkspace?.cwd ?: defaultAgentCwd(initialHost, active, sessions),
-            onDismiss = { showNew = false },
+            onDismiss = {
+                showNew = false
+                // A quote the user did not continue with is dropped here, so no later open pastes a stale pack.
+                viewModel.consumeQuote()
+            },
+            onAddHost = {
+                showNew = false
+                onHosts()
+            },
             onCreate = { host, kind, cwd ->
                 showNew = false
                 withNetworkPermission { viewModel.newSession(host.id, kind, cwd) }
+            },
+        )
+    }
+    if (showSendMessage) {
+        AgentSendMessageDialog(
+            sessions = sessions,
+            hosts = hosts,
+            current = active ?: session,
+            availability = availability,
+            initialText = prompt,
+            onDismiss = { showSendMessage = false },
+            onQueue = { target, kind, text ->
+                showSendMessage = false
+                viewModel.queueMessage(target, kind, text)
             },
         )
     }
@@ -644,31 +764,43 @@ private fun NewAgentSessionDialog(
     initialAgent: AgentKind,
     initialCwd: String,
     onDismiss: () -> Unit,
+    onAddHost: () -> Unit,
     onCreate: (Host, AgentKind, String) -> Unit,
 ) {
     var selectedHostId by remember { mutableStateOf(initialHostId) }
-    var kind by remember { mutableStateOf(initialAgent) }
+    // The Agent belongs to the host, so the dialog opens on one this host holds rather than on the previous choice.
+    var kind by remember { mutableStateOf(preferredAgentForHost(availability, initialHostId, initialAgent)) }
     var cwd by remember { mutableStateOf(initialCwd) }
     val host = hosts.firstOrNull { it.id == selectedHostId }
+    val notDetected = stringResource(R.string.agent_choice_not_detected)
+    val agentOptions = mutableListOf<Pair<AgentKind, String>>()
+    for (choice in agentHostChoices(availability, selectedHostId)) {
+        val name = agentName(choice.kind)
+        agentOptions += choice.kind to (if (choice.state == AgentHostState.NOT_INSTALLED) name + notDetected else name)
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.agent_new)) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (hosts.isEmpty()) Text(stringResource(R.string.agent_no_devices))
+                if (hosts.isEmpty()) {
+                    Text(stringResource(R.string.agent_no_devices))
+                    TextButton(onClick = onAddHost) { Text(stringResource(R.string.agent_hosts)) }
+                }
                 AgentChoice(
                     label = stringResource(R.string.agent_device),
                     value = host?.nickname ?: stringResource(R.string.agent_select_host),
                     options = hosts.map { it.id to it.nickname },
                     onSelect = {
                         selectedHostId = it
+                        kind = preferredAgentForHost(availability, it, kind)
                         cwd = defaultAgentCwd(it, active, sessions)
                     },
                 )
                 AgentChoice(
                     label = stringResource(R.string.agent_kind),
-                    value = agentName(kind),
-                    options = AgentKind.entries.map { it to agentName(it) },
+                    value = if (selectedHostId == null) stringResource(R.string.agent_pick_host_first) else agentName(kind),
+                    options = agentOptions,
                     onSelect = { kind = it },
                 )
                 AgentAvailabilityContent(agentProbeStatus(availability, refreshingHosts, selectedHostId, kind))
@@ -755,7 +887,7 @@ private fun AgentChallengeDialog(challenge: AgentChallenge, onRespond: (String, 
 }
 
 @Composable
-private fun <T> AgentChoice(
+internal fun <T> AgentChoice(
     label: String,
     value: String,
     options: List<Pair<T, String>>,

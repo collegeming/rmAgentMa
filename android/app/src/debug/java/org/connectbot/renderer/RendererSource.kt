@@ -22,6 +22,7 @@ import org.connectbot.data.entity.Host
 import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentSession
+import org.rmagentma.core.DirectoryListing
 import org.rmagentma.rendererhost.ProbeBridge
 
 /**
@@ -100,4 +101,11 @@ interface RendererSource {
 
     /** Stores [text] as the draft of the conversation behind [key]. */
     suspend fun saveDraft(key: String, text: String)
+
+    /**
+     * Lists [directory] on [hostId] read-only through one bounded remote command. An answer from the host is a
+     * verdict about that directory; a host this app cannot reach throws, keeping its own error instead of taking a
+     * verdict about a directory nobody read.
+     */
+    suspend fun listWorkspace(hostId: Long, directory: String): DirectoryListing
 }

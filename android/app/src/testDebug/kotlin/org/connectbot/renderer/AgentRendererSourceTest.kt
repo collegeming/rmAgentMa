@@ -31,6 +31,7 @@ import org.connectbot.agent.AgentConversationState
 import org.connectbot.agent.AgentDraftStore
 import org.connectbot.agent.AgentIndexStore
 import org.connectbot.agent.AgentRepository
+import org.connectbot.agent.AgentSshPool
 import org.connectbot.data.HostRepository
 import org.connectbot.di.CoroutineDispatchers
 import org.junit.After
@@ -42,6 +43,11 @@ import org.mockito.Mockito.`when`
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
+import org.rmagentma.core.DirectoryListing
+import org.rmagentma.core.ExecChannel
+import org.rmagentma.core.HostSession
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 
 /** The published runtime generation of the live source: a switch must start a new one, not continue the old. */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -52,6 +58,7 @@ class AgentRendererSourceTest {
     private val active = MutableStateFlow<AgentSession?>(null)
     private val selected = MutableStateFlow<AgentSession?>(null)
     private lateinit var repository: AgentRepository
+    private lateinit var pool: AgentSshPool
     private lateinit var source: AgentRendererSource
 
     @Before
@@ -72,7 +79,8 @@ class AgentRendererSourceTest {
         `when`(index.read()).thenReturn(emptyList())
         val drafts = mock(AgentDraftStore::class.java)
         val preferences = mock(SharedPreferences::class.java)
-        source = AgentRendererSource(repository, hosts, index, drafts, preferences, dispatchers)
+        pool = mock(AgentSshPool::class.java)
+        source = AgentRendererSource(repository, hosts, index, pool, drafts, preferences, dispatchers)
     }
 
     @After
@@ -100,5 +108,34 @@ class AgentRendererSourceTest {
         // Reading the same session again keeps one generation; only a real switch starts another.
         active.value = b
         assertThat(source.snapshot().epoch).isEqualTo(switched.epoch)
+    }
+
+    @Test
+    fun workspaceListingReadsTheHostSessionWithoutAskingTheUserForCredentials() = runTest {
+        val answer = """{"level":"info","directory":"/work","entries":[{"name":"a.kt","kind":"file","size":3}],"count":1,"truncated":false}"""
+        var sentCommand: String? = null
+        `when`(pool.hostSession(7L, false)).thenReturn(
+            object : HostSession {
+                override val hostId = 7L
+                override suspend fun exec(command: String): ExecChannel {
+                    sentCommand = command
+                    return object : ExecChannel {
+                        override val stdout = ByteArrayInputStream(answer.toByteArray())
+                        override val stdin = ByteArrayOutputStream()
+                        override val stderr = ByteArrayInputStream(byteArrayOf())
+                        override fun close() = Unit
+                    }
+                }
+            },
+        )
+        val listing = source.listWorkspace(7L, "/work")
+        val listed = listing as DirectoryListing.Listed
+        assertThat(listed.entries.single().name).isEqualTo("a.kt")
+        assertThat(listed.entries.single().size).isEqualTo(3L)
+        val sent = sentCommand.orEmpty()
+        assertThat(sent).startsWith("/bin/sh -c ")
+        assertThat(sent).contains("| base64 -d | python3 - ")
+        assertThat(sent).contains("'--directory' '/work'")
+        assertThat(sent).contains("'--limit' '200'")
     }
 }

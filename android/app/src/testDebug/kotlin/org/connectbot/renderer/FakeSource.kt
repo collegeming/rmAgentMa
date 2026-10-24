@@ -22,6 +22,7 @@ import org.connectbot.data.entity.Host
 import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentSession
+import org.rmagentma.core.DirectoryListing
 
 /** In-memory stand-in for [RendererSource]; every fact a test needs is set explicitly. */
 internal class FakeSource : RendererSource {
@@ -58,6 +59,13 @@ internal class FakeSource : RendererSource {
     val storedDrafts = mutableMapOf<String, String>()
     var cancelCount = 0
     var cancelledSession: AgentSession? = null
+
+    /** The listing [listWorkspace] answers with, and the failure it throws instead once one is set. */
+    var workspace: DirectoryListing = DirectoryListing.Listed(emptyList(), truncated = false)
+    var workspaceFailure: Exception? = null
+
+    /** Every (host, directory) pair a project read asked to list, so a test can prove the listing really ran. */
+    val workspaceCalls = mutableListOf<Pair<Long, String>>()
 
     override suspend fun snapshot(): RendererSnapshot = RendererSnapshot(
         session = session,
@@ -126,5 +134,11 @@ internal class FakeSource : RendererSource {
     override suspend fun saveDraft(key: String, text: String) {
         draftKeys += key
         storedDrafts[key] = text
+    }
+
+    override suspend fun listWorkspace(hostId: Long, directory: String): DirectoryListing {
+        workspaceCalls += hostId to directory
+        workspaceFailure?.let { throw it }
+        return workspace
     }
 }

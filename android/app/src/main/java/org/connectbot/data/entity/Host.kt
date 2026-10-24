@@ -130,6 +130,20 @@ data class Host(
      */
     @ColumnInfo(name = "locale", defaultValue = "en_US.UTF-8")
     val locale: String = "en_US.UTF-8",
+
+    /**
+     * Operating system of the remote host.
+     * Values: "linux" (default, a POSIX shell of its own), "windows".
+     */
+    @ColumnInfo(name = "os_type", defaultValue = "linux")
+    val osType: String = "linux",
+
+    /**
+     * Where on this host its Agent runs, used while [osType] is "windows".
+     * Values: "native" (the Windows host itself), "wsl:<distribution>" (one WSL distribution).
+     */
+    @ColumnInfo(name = "agent_target", defaultValue = "native")
+    val agentTarget: String = "native",
 ) {
     /**
      * Check if this host is temporary (not saved to database).

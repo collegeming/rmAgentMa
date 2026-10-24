@@ -23,6 +23,7 @@ import org.assertj.core.api.Assertions.assertThat
 import org.junit.Test
 import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentKind
+import org.rmagentma.core.WINDOWS_NATIVE_UNSUPPORTED
 
 class AgentProbeStateTest {
     @Test
@@ -55,6 +56,14 @@ class AgentProbeStateTest {
         expected.forEach { (code, state) ->
             assertThat(probeStateOf(availability(error = code), refreshing = false)).describedAs(code).isEqualTo(state)
         }
+    }
+
+    @Test
+    fun anUnsupportedHostTargetKeepsItsOwnVerdictInsteadOfAFailure() {
+        val row = availability(error = WINDOWS_NATIVE_UNSUPPORTED)
+        assertThat(probeStateOf(row, refreshing = false)).isEqualTo(AgentProbeState.TARGET_UNSUPPORTED)
+        // A running refresh is still reported as such, so no stale verdict reads as the new one.
+        assertThat(probeStateOf(row, refreshing = true)).isEqualTo(AgentProbeState.REFRESHING)
     }
 
     @Test

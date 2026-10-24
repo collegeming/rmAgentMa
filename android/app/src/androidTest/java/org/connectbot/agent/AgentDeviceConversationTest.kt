@@ -245,6 +245,7 @@ class AgentDeviceConversationTest {
                 AgentIndexStore(context, dispatchers.io),
                 challenges,
                 AgentLinkStateStore(context, dispatchers.io),
+                AgentDetectionStore(context, dispatchers.io),
                 dispatchers,
             )
             realRepository = real

@@ -29,12 +29,22 @@ import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.AgentSessionConfig
+import org.rmagentma.core.DirectoryListing
+import org.rmagentma.core.DirectoryListingProblem
 import org.rmagentma.rendererhost.array
 import org.rmagentma.rendererhost.json
 
 private const val STATUS_ONLINE = "online"
 private const val STATUS_MISSING = "missing"
 private const val STATUS_UNCHECKED = "unchecked"
+
+/** The explorer's own role and status vocabulary for one project root. */
+private const val WORKSPACE_ROLE = "workspace"
+private const val WORKSPACE_AVAILABLE = "available"
+private const val WORKSPACE_DISCONNECTED = "disconnected"
+
+/** Reason code of a workspace whose host could not be reached at all, so no directory was ever read. */
+private const val WORKSPACE_UNREACHABLE = "host_unreachable"
 
 /**
  * Renders product state into the payload shapes the packaged renderer reads. Everything here is a pure
@@ -115,14 +125,67 @@ internal object RendererProjection {
      */
     fun draft(text: String, conversationId: String): JSONObject = json("text" to text, "files" to JSONArray(), "conversation_id" to conversationId)
 
-    /** A saved host is one project: the product has no server-side project registry. */
-    fun project(host: Host): JSONObject = json(
-        "project_id" to projectId(host.id),
-        "name" to host.nickname.ifBlank { host.username.ifBlank { host.hostname } },
-        "explorer" to json("workspace_pe_id" to null, "entries" to JSONArray()),
-    )
+    /**
+     * A saved host is one project: the product has no server-side project registry. These rows carry no explorer
+     * state — only `project.read` names a workspace, and only once the host answered for it — so the list can
+     * never be mistaken for a directory that was read and found empty.
+     */
+    fun project(host: Host, workspace: WorkspaceRoot? = null): JSONObject {
+        val entries = JSONArray()
+        workspace?.let { root ->
+            val entry = json(
+                "pe_id" to workspacePeId(host.id),
+                "role" to WORKSPACE_ROLE,
+                "display_name" to workspaceName(root.directory),
+                "display_path" to root.directory,
+                "order_index" to 0,
+                "runtime_status" to root.status,
+            )
+            // Only a root that is not available carries the reason, so a flagged row names its own cause.
+            root.problem?.let { entry.put("runtime_problem", it) }
+            entries.put(entry)
+        }
+        return json(
+            "project_id" to projectId(host.id),
+            "name" to host.nickname.ifBlank { host.username.ifBlank { host.hostname } },
+            "explorer" to json("workspace_pe_id" to workspace?.let { workspacePeId(host.id) }, "entries" to entries),
+        )
+    }
 
-    fun projects(hosts: List<Host>): JSONArray = array(*hosts.map(::project).toTypedArray())
+    fun projects(hosts: List<Host>): JSONArray = array(*hosts.map { project(it) }.toTypedArray())
+
+    /**
+     * Stable identity of one host's workspace root, derived from the host id it belongs to, so a later directory
+     * request can be resolved back to that host without a registry of its own.
+     */
+    fun workspacePeId(hostId: Long): String = "pe-${projectId(hostId)}"
+
+    /**
+     * One project's workspace root: the directory the conversation's Agent really runs in, with the availability
+     * the host observed. [problem] names the exact reason behind a status that is not `available`, so a row the
+     * panel flags can never be mistaken for a directory that is simply empty.
+     */
+    data class WorkspaceRoot(val directory: String, val status: String, val problem: String? = null)
+
+    /**
+     * The availability the renderer's explorer draws for a workspace root. A directory that is gone or unreadable
+     * is reported as itself, and a host that answered nothing at all is `disconnected` — never an empty listing,
+     * which would claim the directory was read and found empty.
+     */
+    fun workspaceRoot(directory: String, listing: DirectoryListing?): WorkspaceRoot = when (listing) {
+        is DirectoryListing.Listed -> WorkspaceRoot(directory, WORKSPACE_AVAILABLE)
+        is DirectoryListing.Unavailable -> WorkspaceRoot(directory, workspaceStatus(listing.problem), listing.problem.code)
+        null -> WorkspaceRoot(directory, WORKSPACE_DISCONNECTED, WORKSPACE_UNREACHABLE)
+    }
+
+    private fun workspaceStatus(problem: DirectoryListingProblem): String = when (problem) {
+        DirectoryListingProblem.MISSING, DirectoryListingProblem.NOT_A_DIRECTORY -> "missing"
+        DirectoryListingProblem.NOT_READABLE -> "permission_denied"
+        else -> WORKSPACE_DISCONNECTED
+    }
+
+    /** Basename of a workspace path, which is the label its tree row shows; a path without one stays itself. */
+    private fun workspaceName(directory: String): String = directory.trimEnd('/').substringAfterLast('/').ifBlank { directory }
 
     /** The latest message of one type, or null, exactly as `messages/latest` promises. */
     fun latest(messages: List<JSONObject>, type: String?): JSONObject? = if (type.isNullOrEmpty()) {

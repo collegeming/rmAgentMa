@@ -73,6 +73,7 @@ class AgentRepositoryWorkingDirectoryTest {
                 index,
                 AgentChallenges(),
                 AgentLinkStateStore(context, Dispatchers.IO),
+                AgentDetectionStore(context, Dispatchers.IO),
                 CoroutineDispatchers(Dispatchers.IO, Dispatchers.IO, Dispatchers.IO),
             )
             seedAvailability(repository, hostId)

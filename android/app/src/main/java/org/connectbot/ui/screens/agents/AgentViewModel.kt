@@ -34,8 +34,16 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.contentOrNull
 import org.connectbot.agent.AgentConversationState
+import org.connectbot.agent.AgentMessageKind
+import org.connectbot.agent.AgentMessageQueue
+import org.connectbot.agent.AgentMessageState
+import org.connectbot.agent.AgentQueuedMessage
 import org.connectbot.agent.AgentRepository
+import org.connectbot.agent.AgentSessionReference
+import org.connectbot.agent.AgentTranscriptOutcome
 import org.connectbot.agent.HostAddressChange
+import org.connectbot.agent.agentSessionContextPack
+import org.connectbot.agent.projectAgentAttentionInbox
 import org.connectbot.di.CoroutineDispatchers
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
@@ -46,6 +54,7 @@ import javax.inject.Inject
 @HiltViewModel
 class AgentViewModel @Inject constructor(
     private val repository: AgentRepository,
+    private val messageQueue: AgentMessageQueue,
     private val dispatchers: CoroutineDispatchers,
     savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
@@ -93,11 +102,40 @@ class AgentViewModel @Inject constructor(
     val selectedAgent = mutableSelectedAgent.asStateFlow()
     private val mutablePendingSelection = MutableStateFlow<AgentSelection?>(null)
     internal val pendingSelection = mutablePendingSelection.asStateFlow()
+    private val mutableTranscriptSearch = MutableStateFlow<AgentTranscriptOutcome?>(null)
+    val transcriptSearch = mutableTranscriptSearch.asStateFlow()
+    private val mutableTranscriptSearching = MutableStateFlow(false)
+    val transcriptSearching = mutableTranscriptSearching.asStateFlow()
+    private val transcriptSearchToken = AtomicLong()
+    private val mutableQueueStatus = MutableStateFlow<AgentQueueStatus?>(null)
+    val queueStatus = mutableQueueStatus.asStateFlow()
+    private val mutableQueuedMessages = MutableStateFlow<List<AgentQueuedMessage>>(emptyList())
+    val queuedMessages = mutableQueuedMessages.asStateFlow()
+    private var deliveryJob: Job? = null
+    private val mutableQuote = MutableStateFlow<AgentQuoteState?>(null)
+    val quote = mutableQuote.asStateFlow()
     private var operationJob: Job? = null
     private var switching = false
     val visibleSession = combine(selectedSession, selectedHost, selectedAgent) { session, hostId, agent ->
         session?.takeIf { it.hostId == hostId && it.agent == agent }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), selectedSession.value)
+
+    /**
+     * Conversations that wait for the user, most urgent first. Only the loaded conversation of this screen is live,
+     * so it is the only one the app can honestly report on: the entry aggregates what it holds and never guesses
+     * another conversation's approvals, which only opening it could show.
+     */
+    val inbox = combine(selectedSession, events, busy, conversationState, hasEarlier) { session, currentEvents, running, state, earlier ->
+        projectAgentAttentionInbox(
+            agentAttentionSignals(
+                session = session,
+                events = currentEvents,
+                busy = running,
+                conversationActive = state == AgentConversationState.Loading || state == AgentConversationState.Ready,
+                hasEarlier = earlier,
+            ),
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     init {
         // A conversation opened behind this ViewModel's back (the renderer switches through the repository alone)
@@ -457,4 +495,157 @@ class AgentViewModel @Inject constructor(
     fun respondChallenge(id: String, response: String?) = execute { repository.respondChallenge(id, response) }
     fun closeConversation() = requestSelection(AgentSelection.Close)
     fun disconnectAll() = execute { repository.disconnectAll() }
+
+    /**
+     * Searches the content of the selected conversations' remote transcripts, read-only and bounded: the range is
+     * the drawer's own scope, and an older answer never replaces a newer one. Every part of the range the search
+     * could not read comes back inside the outcome, so a caller can word it instead of showing "no results".
+     */
+    fun searchTranscripts(query: String, allWorkspaces: Boolean) {
+        val text = query.trim()
+        val hostId = if (allWorkspaces) null else mutableSelectedHost.value
+        val kind = if (allWorkspaces) null else mutableSelectedAgent.value
+        val inRange = filterAgentSessions(sessions.value, hostId, kind, "")
+        val request = transcriptSearchToken.incrementAndGet()
+        mutableTranscriptSearching.value = true
+        execute {
+            try {
+                val outcome = repository.searchTranscripts(text, inRange)
+                if (transcriptSearchToken.get() == request) mutableTranscriptSearch.value = outcome
+            } finally {
+                mutableTranscriptSearching.value = false
+            }
+        }
+    }
+
+    fun clearTranscriptSearch() {
+        transcriptSearchToken.incrementAndGet()
+        mutableTranscriptSearch.value = null
+    }
+
+    /** Reads what is queued for every conversation, so the drawer can label each target with its own count. */
+    fun refreshQueue() {
+        execute { mutableQueuedMessages.value = messageQueue.pending() }
+    }
+
+    /**
+     * Queues one message for [target], which is another conversation. Nothing is sent now: a request is sent the
+     * next time that conversation is opened, and a notice is only shown there as a hint. A queue that refused the
+     * message says so instead of reporting a hand-off that did not happen.
+     */
+    fun queueMessage(target: AgentSession, kind: AgentMessageKind, text: String) {
+        if (text.isBlank()) {
+            mutableQueueStatus.value = AgentQueueStatus(refused = true)
+            return
+        }
+        execute {
+            val now = System.currentTimeMillis()
+            val id = messageQueue.enqueue(target.hostId, target.agent.wireName, target.sessionId, kind, text, now)
+            mutableQueueStatus.value = if (id == null) {
+                AgentQueueStatus(refused = true)
+            } else {
+                AgentQueueStatus(
+                    queued = AgentQueuedMessage(
+                        id = id,
+                        hostId = target.hostId,
+                        agent = target.agent.wireName,
+                        sessionId = target.sessionId,
+                        kind = kind,
+                        text = text,
+                        createdAtMillis = now,
+                        state = AgentMessageState.PENDING,
+                    ),
+                )
+            }
+            mutableQueuedMessages.value = messageQueue.pending()
+        }
+    }
+
+    /**
+     * Hands the messages waiting for [session] to it, in queue order: a notice becomes a hint this screen shows, a
+     * request becomes its own turn, and a message the conversation did not take stays queued, so the next idle
+     * moment or the next open delivers it instead of losing it.
+     */
+    fun deliverQueued(session: AgentSession) {
+        if (deliveryJob?.isActive == true) return
+        deliveryJob = viewModelScope.launch(dispatchers.io) {
+            val notices = mutableListOf<AgentQueuedMessage>()
+            var delivered = 0
+            var failure: String? = null
+            try {
+                while (true) {
+                    val waiting = messageQueue.pendingFor(session.hostId, session.agent.wireName, session.sessionId)
+                    when (val step = nextAgentDelivery(waiting, busy.value)) {
+                        AgentDeliveryStep.Empty, AgentDeliveryStep.Waiting -> break
+                        is AgentDeliveryStep.Notify -> {
+                            if (!messageQueue.delivered(step.message.id)) break
+                            notices += step.message
+                        }
+
+                        is AgentDeliveryStep.Request -> {
+                            // The prompt is only handed over once the conversation really took it, so a refused
+                            // write leaves the message queued rather than reporting it as delivered.
+                            if (!repository.sendPrompt(step.message.text, session) || !messageQueue.delivered(step.message.id)) break
+                            delivered++
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failure = e.localizedMessage ?: e.javaClass.simpleName
+            }
+            val pending = try {
+                messageQueue.pending()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failure = failure ?: (e.localizedMessage ?: e.javaClass.simpleName)
+                emptyList()
+            }
+            mutableQueuedMessages.value = pending
+            // A delivery that moved nothing leaves the last report alone, so a queued confirmation or a hint already
+            // shown is not wiped by an idle moment that had nothing to hand over.
+            val waiting = queuedFor(session, pending).size
+            if (failure != null || notices.isNotEmpty() || delivered > 0 || waiting > 0) {
+                mutableQueueStatus.value = AgentQueueStatus(
+                    deliveryFailure = failure,
+                    notices = notices,
+                    deliveredRequests = delivered,
+                    pending = waiting,
+                )
+            }
+        }
+    }
+
+    fun dismissQueueStatus() {
+        mutableQueueStatus.value = null
+    }
+
+    /**
+     * Quotes the loaded window of the open conversation for a conversation the user picks next. Nothing is sent:
+     * the text only reaches the input box, and the user decides whether to send it.
+     */
+    fun quoteToNewSession() {
+        val session = selectedSession.value ?: return
+        val source = AgentSessionReference(
+            hostId = session.hostId,
+            agent = session.agent,
+            sessionId = session.sessionId,
+            cwd = session.cwd,
+            hostLabel = hosts.value.firstOrNull { it.id == session.hostId }?.nickname.orEmpty(),
+        )
+        val pack = agentSessionContextPack(source, events.value)
+        val text = agentQuotePrefill(pack)
+        mutableQuote.value = if (text == null) {
+            AgentQuoteState.Empty
+        } else {
+            AgentQuoteState.Pending(text = text, trimmed = agentQuoteTrimmed(pack), source = session)
+        }
+    }
+
+    /** Reports that the input box took the quoted text, so the same pack is never pasted twice. */
+    fun consumeQuote() {
+        mutableQuote.value = null
+    }
 }

@@ -159,6 +159,35 @@ class AgentPresentationTest {
     }
 
     @Test
+    fun anAgentIsOfferedOnlyOnTheHostTheUserChoseFirst() {
+        assertTrue(agentHostChoices(listOf(availability(available = true)), null).isEmpty())
+
+        val rows = listOf(
+            availability(hostId = 1, available = true).copy(kind = AgentKind.ZCODE),
+            availability(hostId = 1, available = false, error = "executable_missing").copy(kind = AgentKind.DSH),
+            availability(hostId = 2, available = true).copy(kind = AgentKind.KIMI),
+        )
+        val choices = agentHostChoices(rows, 1)
+        assertEquals(AgentKind.entries.size, choices.size)
+        // The Agent this host's probe found comes first, and another host's rows say nothing about this one.
+        assertEquals(AgentKind.ZCODE, choices.first().kind)
+        assertEquals(AgentHostState.INSTALLED, choices.first().state)
+        assertEquals(AgentHostState.NOT_INSTALLED, choices.single { it.kind == AgentKind.DSH }.state)
+        assertEquals(AgentHostState.UNPROBED, choices.single { it.kind == AgentKind.KIMI }.state)
+    }
+
+    @Test
+    fun aHostSwitchLandsOnAnAgentThatHostHolds() {
+        val rows = listOf(availability(hostId = 1, available = true).copy(kind = AgentKind.ZCODE))
+        // The current choice stays while the new host holds it; otherwise the host's own found Agent wins.
+        assertEquals(AgentKind.ZCODE, preferredAgentForHost(rows, 1, AgentKind.ZCODE))
+        assertEquals(AgentKind.ZCODE, preferredAgentForHost(rows, 1, AgentKind.DSH))
+        // A host holding nothing installed keeps the user's choice, so its probe verdict stays readable.
+        assertEquals(AgentKind.DSH, preferredAgentForHost(rows, 2, AgentKind.DSH))
+        assertEquals(AgentKind.KIMI, preferredAgentForHost(rows, null, AgentKind.KIMI))
+    }
+
+    @Test
     fun workspaceTreeNestsAgentsBelowEachDirectory() {
         val kimi = AgentSession(1, AgentKind.KIMI, "k", "/work", updatedAt = 20)
         val omp = kimi.copy(agent = AgentKind.OMP, sessionId = "o", updatedAt = 30)

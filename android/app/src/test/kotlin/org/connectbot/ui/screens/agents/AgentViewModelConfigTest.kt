@@ -32,6 +32,7 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.serialization.json.JsonPrimitive
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConversationState
+import org.connectbot.agent.AgentMessageQueue
 import org.connectbot.agent.AgentRepository
 import org.connectbot.di.CoroutineDispatchers
 import org.junit.After
@@ -59,6 +60,7 @@ class AgentViewModelConfigTest {
     private val selected = MutableStateFlow<AgentSession?>(null)
     private val conversation = MutableStateFlow(AgentConversationState.Closed)
     private lateinit var repository: AgentRepository
+    private val messageQueue: AgentMessageQueue = mock(AgentMessageQueue::class.java)
     private lateinit var viewModel: AgentViewModel
 
     @Before
@@ -82,7 +84,7 @@ class AgentViewModelConfigTest {
         `when`(repository.refreshingHosts).thenReturn(MutableStateFlow(emptySet()))
         `when`(repository.linkRecords).thenReturn(MutableStateFlow(emptyList()))
         `when`(repository.liveLinkStates).thenReturn(MutableStateFlow(emptyMap()))
-        viewModel = AgentViewModel(repository, dispatchers, SavedStateHandle())
+        viewModel = AgentViewModel(repository, messageQueue, dispatchers, SavedStateHandle())
         advanceUntilIdle()
     }
 

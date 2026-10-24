@@ -44,6 +44,7 @@ import org.mockito.Mockito.verifyNoInteractions
 import org.mockito.Mockito.verifyNoMoreInteractions
 import org.mockito.Mockito.`when`
 import org.mockito.Mockito.withSettings
+import org.rmagentma.core.HOST_OS_WINDOWS
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowSystemClock
@@ -58,7 +59,16 @@ import java.time.Duration
 @Config(sdk = [28])
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class AgentSshPoolRedialTest {
-    private val host = Host(id = 1, nickname = "lan-host", protocol = "ssh", hostname = "192.0.2.1", port = 22)
+    // A Windows host whose Agent runs inside one WSL distribution: discovery may rewrite its address, never this.
+    private val host = Host(
+        id = 1,
+        nickname = "lan-host",
+        protocol = "ssh",
+        hostname = "192.0.2.1",
+        port = 22,
+        osType = HOST_OS_WINDOWS,
+        agentTarget = "wsl:Ubuntu-22.04",
+    )
 
     @Test
     fun probeWithoutPinnedKeyNeverDials() = runTest {
@@ -138,6 +148,7 @@ class AgentSshPoolRedialTest {
             }
         }
         runCurrent()
+        // The adopted row carries the address alone: the host identity and the Agent target it holds are untouched.
         verify(hosts).saveHost(host.copy(hostname = "192.0.2.9"))
         verify(addressStore).record(host.id, "192.0.2.9", host.port, AgentAddressSource.REDISCOVERED)
         assertThat(changes).containsExactly(HostAddressChange(host.id, "192.0.2.1", "192.0.2.9"))

@@ -21,6 +21,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import org.rmagentma.core.AgentAvailability
+import org.rmagentma.core.WINDOWS_NATIVE_UNSUPPORTED
 
 enum class AgentProbeState {
     REFRESHING,
@@ -30,6 +31,9 @@ enum class AgentProbeState {
     NO_PROTOCOL_CAPABILITY,
     CONNECT_FAILED,
     UNKNOWN_FAILURE,
+
+    /** The host's Agent target has no entry in this app, so nothing ran and nothing can be launched there. */
+    TARGET_UNSUPPORTED,
 }
 
 // Nothing ran because the host holds no supported installation.
@@ -76,6 +80,7 @@ fun probeStateOf(availability: AgentAvailability, refreshing: Boolean): AgentPro
     refreshing -> AgentProbeState.REFRESHING
     availability.available && availability.capabilities.declaresNoCapability() -> AgentProbeState.NO_PROTOCOL_CAPABILITY
     availability.available -> AgentProbeState.AVAILABLE
+    availability.error == WINDOWS_NATIVE_UNSUPPORTED -> AgentProbeState.TARGET_UNSUPPORTED
     availability.error in probeNotInstalledCodes -> AgentProbeState.NOT_INSTALLED
     availability.error in probeStartFailedCodes -> AgentProbeState.START_FAILED
     availability.error in probeNoCapabilityCodes -> AgentProbeState.NO_PROTOCOL_CAPABILITY

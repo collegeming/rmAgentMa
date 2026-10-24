@@ -36,8 +36,12 @@ import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * One Agent's availability on the selected host: the detected installation, its version and the probe verdict.
+ * [onRefresh] is the entry that probes this host again, for the screen that can ask the repository to.
+ */
 @Composable
-internal fun AgentAvailabilityContent(status: AgentProbeStatus?, modifier: Modifier = Modifier) {
+internal fun AgentAvailabilityContent(status: AgentProbeStatus?, onRefresh: (() -> Unit)? = null, modifier: Modifier = Modifier) {
     SelectionContainer(modifier) {
         Column {
             val row = status?.availability
@@ -57,18 +61,24 @@ internal fun AgentAvailabilityContent(status: AgentProbeStatus?, modifier: Modif
                     if (row.version.isNotBlank()) {
                         Text(stringResource(R.string.agent_available_version, row.version), style = MaterialTheme.typography.bodySmall, maxLines = 2)
                     }
+                    // The detected path is the connection's own configuration, so it reads without opening details.
+                    if (row.executable.isNotBlank()) {
+                        Text(stringResource(R.string.agent_available_executable, row.executable), style = MaterialTheme.typography.bodySmall, maxLines = 2)
+                    }
                     if (failed) {
                         Text(row.error.ifBlank { stringResource(R.string.agent_unavailable_no_reason) }, style = MaterialTheme.typography.bodySmall, maxLines = 4)
                     }
                     var expanded by remember(row.hostId, row.kind) { mutableStateOf(false) }
                     TextButton(onClick = { expanded = !expanded }) { Text(stringResource(R.string.agent_connection_details)) }
                     if (expanded) {
-                        if (row.executable.isNotBlank()) {
-                            Text(stringResource(R.string.agent_available_executable, row.executable), style = MaterialTheme.typography.bodySmall, maxLines = 2)
-                        }
                         row.capabilities?.let {
                             Text(stringResource(R.string.agent_available_capabilities, it.toString().take(2_000)), style = MaterialTheme.typography.bodySmall, maxLines = 4)
                         }
+                    }
+                }
+                onRefresh?.let { refresh ->
+                    TextButton(onClick = refresh, enabled = status.state != AgentProbeState.REFRESHING) {
+                        Text(stringResource(R.string.agent_probe_refresh))
                     }
                 }
             }
@@ -85,6 +95,7 @@ internal fun probeStateText(state: AgentProbeState): Int = when (state) {
     AgentProbeState.NO_PROTOCOL_CAPABILITY -> R.string.agent_probe_no_protocol_capability
     AgentProbeState.CONNECT_FAILED -> R.string.agent_probe_connect_failed
     AgentProbeState.UNKNOWN_FAILURE -> R.string.agent_probe_unknown_failure
+    AgentProbeState.TARGET_UNSUPPORTED -> R.string.agent_probe_target_unsupported
 }
 
 /** Link state of the selected host: a live fact while it lasts, otherwise the last recorded outcome as history. */

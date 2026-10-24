@@ -43,10 +43,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import org.connectbot.R
 import org.connectbot.agent.AGENT_SESSION_PAGE_LIMIT
+import org.connectbot.agent.AgentAttentionItem
+import org.connectbot.agent.AgentQueuedMessage
 import org.connectbot.agent.AgentSearchField
 import org.connectbot.agent.AgentSearchHit
 import org.connectbot.agent.AgentSearchScope
 import org.connectbot.agent.AgentSearchSource
+import org.connectbot.agent.AgentTranscriptHit
+import org.connectbot.agent.AgentTranscriptOutcome
+import org.connectbot.agent.queuedFor
 import org.connectbot.agent.searchAgentSessions
 import org.connectbot.data.entity.Host
 import org.rmagentma.core.AgentAvailability
@@ -55,6 +60,9 @@ import org.rmagentma.core.AgentSession
 
 /** Sessions rendered per agent group; the rest stay reachable through the drawer search. */
 private const val DRAWER_SESSION_LIMIT = 20
+
+/** Sessions or hosts one coverage line names, so an unread range stays readable instead of filling the drawer. */
+private const val TRANSCRIPT_RANGE_LIMIT = 20
 
 @Composable
 internal fun AgentWorkspaceDrawer(
@@ -68,8 +76,15 @@ internal fun AgentWorkspaceDrawer(
     selectedHostId: Long?,
     selectedAgent: AgentKind,
     drawerOpen: Boolean,
+    inbox: List<AgentAttentionItem>,
+    queued: List<AgentQueuedMessage>,
+    transcript: AgentTranscriptOutcome?,
+    transcriptSearching: Boolean,
     onOpen: (AgentSession) -> Unit,
     onNew: (AgentWorkspaceKey?) -> Unit,
+    onInboxOpen: (AgentSession) -> Unit,
+    onTranscriptSearch: (String, Boolean) -> Unit,
+    onTranscriptClear: () -> Unit,
     onSettings: () -> Unit,
     onKeys: () -> Unit,
     onHosts: () -> Unit,
@@ -110,6 +125,7 @@ internal fun AgentWorkspaceDrawer(
     }
     Column(modifier.padding(12.dp)) {
         Text(stringResource(R.string.agent_workspaces), style = MaterialTheme.typography.titleLarge)
+        AgentInboxContent(rows = agentInboxRows(inbox, sessions, hosts), onOpen = onInboxOpen)
         TextButton(onClick = { showAll = !showAll }) {
             Text(stringResource(if (showAll) R.string.agent_current_scope else R.string.agent_all_workspaces))
         }
@@ -131,6 +147,9 @@ internal fun AgentWorkspaceDrawer(
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
+        TextButton(onClick = { onTranscriptSearch(query, showAll) }, enabled = !transcriptSearching) {
+            Text(stringResource(R.string.agent_transcript_search))
+        }
         TextButton(onClick = { onNew(null) }, enabled = canOpenAgent(availability, selectedHostId, selectedAgent)) {
             Text(stringResource(R.string.agent_new))
         }
@@ -139,6 +158,20 @@ internal fun AgentWorkspaceDrawer(
             contentPadding = PaddingValues(vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            if (transcript != null) {
+                // A remote content search lists the conversations and files it read, never only what it found.
+                item(key = "transcript-range") {
+                    AgentTranscriptRange(transcript, transcriptSearching, hosts, onTranscriptClear)
+                }
+                if (transcript.hits.isEmpty() && !transcriptSearching && !transcript.incomplete) {
+                    item(key = "transcript-empty") { Text(stringResource(R.string.agent_transcript_no_hits)) }
+                }
+                items(
+                    transcript.hits,
+                    key = { "transcript:${it.hostId}:${it.hit.agent.wireName}:${it.hit.sessionId}:${it.hit.anchor}" },
+                ) { hit -> AgentTranscriptHitRow(hit, sessions, hosts, active, onOpen) }
+                return@LazyColumn
+            }
             if (query.isNotBlank()) {
                 // A search lists its hits with the matched field and snippet instead of the browsable tree.
                 item(key = "search-range") { AgentSearchRange(search.scope, Modifier.padding(horizontal = 12.dp)) }
@@ -217,6 +250,13 @@ internal fun AgentWorkspaceDrawer(
                                         Text(session.preview.take(240), maxLines = 2, overflow = TextOverflow.Ellipsis)
                                     }
                                     AgentUnavailableNote(availability, refreshingHosts, session.hostId, session.agent)
+                                    val waiting = queuedFor(session, queued).size
+                                    if (waiting > 0) {
+                                        Text(
+                                            stringResource(R.string.agent_message_pending, waiting),
+                                            style = MaterialTheme.typography.labelSmall,
+                                        )
+                                    }
                                     TextButton(
                                         onClick = { onOpen(session) },
                                         enabled = canOpenAgent(availability, session.hostId, session.agent),
@@ -247,6 +287,128 @@ internal fun AgentWorkspaceDrawer(
             TextButton(onClick = onDisconnect) { Text(stringResource(R.string.agent_disconnect)) }
         }
     }
+}
+
+/**
+ * Coverage of one remote content search: how many conversations and directories were read, what a limit or the
+ * clock cut off, which conversations and hosts stayed unread, and why nothing here can read as "no results".
+ */
+@Composable
+private fun AgentTranscriptRange(
+    outcome: AgentTranscriptOutcome,
+    searching: Boolean,
+    hosts: List<Host>,
+    onClear: () -> Unit,
+) {
+    Column(Modifier.padding(horizontal = 12.dp)) {
+        Text(stringResource(R.string.agent_transcript_scope, outcome.searchedSessions), style = MaterialTheme.typography.labelSmall)
+        if (outcome.roots.isNotEmpty()) {
+            Text(
+                stringResource(R.string.agent_transcript_roots, outcome.roots.joinToString("；").take(400)),
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (outcome.hits.isNotEmpty()) {
+            Text(stringResource(R.string.agent_transcript_hits, outcome.hits.size), style = MaterialTheme.typography.labelSmall)
+        }
+        if (outcome.truncated) {
+            Text(
+                stringResource(R.string.agent_transcript_truncated),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        outcome.problems.forEach { problem ->
+            Text(
+                stringResource(agentTranscriptProblemText(problem)),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (outcome.failures.isNotEmpty()) {
+            val names = buildList {
+                outcome.failures.take(TRANSCRIPT_RANGE_LIMIT).forEach { failure ->
+                    val host = hosts.firstOrNull { it.id == failure.hostId }?.nickname ?: "#${failure.hostId}"
+                    add(stringResource(R.string.agent_transcript_item, host, failure.reason))
+                }
+            }.joinToString("；").take(400)
+            Text(
+                stringResource(R.string.agent_transcript_failures, names),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        if (outcome.skips.isNotEmpty()) {
+            val names = buildList {
+                outcome.skips.take(TRANSCRIPT_RANGE_LIMIT).forEach { skip ->
+                    add(
+                        stringResource(
+                            R.string.agent_transcript_item,
+                            skip.session.title.ifBlank { skip.session.sessionId },
+                            stringResource(agentTranscriptSkipText(skip.reason)),
+                        ),
+                    )
+                }
+            }.joinToString("；").take(400)
+            Text(stringResource(R.string.agent_transcript_skips, names), style = MaterialTheme.typography.labelSmall)
+        }
+        if (searching) Text(stringResource(R.string.agent_transcript_searching), style = MaterialTheme.typography.labelSmall)
+        TextButton(onClick = onClear) { Text(stringResource(R.string.agent_transcript_clear)) }
+    }
+}
+
+/** One hit keeps its host, Agent, directory, anchor and snippet, and opens the conversation it was found in. */
+@Composable
+private fun AgentTranscriptHitRow(
+    hit: AgentTranscriptHit,
+    sessions: List<AgentSession>,
+    hosts: List<Host>,
+    active: AgentSession?,
+    onOpen: (AgentSession) -> Unit,
+) {
+    val session = transcriptHitSession(hit, sessions)
+    val host = hosts.firstOrNull { it.id == hit.hostId }?.nickname ?: "#${hit.hostId}"
+    NavigationDrawerItem(
+        selected = session != null && sameAgentSession(active, session),
+        onClick = { session?.let(onOpen) },
+        label = {
+            Column {
+                Text(
+                    session?.title?.takeIf { it.isNotBlank() } ?: hit.hit.sessionId,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    stringResource(R.string.agent_choice_value, host, agentName(hit.hit.agent)),
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    stringResource(R.string.agent_search_hit_cwd, hit.hit.directory),
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    stringResource(R.string.agent_transcript_hit_anchor, hit.hit.anchor),
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(hit.hit.snippet, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (session == null) {
+                    Text(
+                        stringResource(R.string.agent_transcript_hit_missing),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+    )
 }
 
 /** Search coverage: what this pass re-read, what is only cached, and why a full-history claim is impossible. */

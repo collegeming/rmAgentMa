@@ -1293,6 +1293,28 @@
 	<!-- Option to force IPv6-only connections -->
 	<string name="ipversion_ipv6">IPv6 only</string>
 
+	<!-- Host operating system and Agent target (SSH hosts) -->
+	<!-- Title for the host operating system selector in the host editor -->
+	<string name="hostpref_os_type_title">Host operating system</string>
+	<!-- Explains that the operating system decides how Agent sessions reach this host -->
+	<string name="hostpref_os_type_summary">Windows hosts reach their Agent through a target of their own.</string>
+	<!-- Option for a host that is a POSIX system with its own shell -->
+	<string name="hostpref_os_type_linux">Linux</string>
+	<!-- Option for a Windows host, which offers an Agent target below -->
+	<string name="hostpref_os_type_windows">Windows</string>
+	<!-- Title for the Agent target selector of a Windows host -->
+	<string name="hostpref_agent_target_title">Agent target</string>
+	<!-- Option for an Agent installed on the Windows host itself -->
+	<string name="hostpref_agent_target_native">Windows itself</string>
+	<!-- Option for an Agent installed inside a WSL distribution -->
+	<string name="hostpref_agent_target_wsl">WSL distribution</string>
+	<!-- Title of the distribution name field, shown when the Agent target is a WSL distribution -->
+	<string name="hostpref_wsl_distribution_title">WSL distribution name</string>
+	<!-- Explains which name belongs in the distribution field -->
+	<string name="hostpref_wsl_distribution_summary">The name WSL reports, for example Ubuntu-22.04.</string>
+	<!-- Rejects a distribution name that cannot be placed in the Agent command unchanged -->
+	<string name="hostpref_wsl_distribution_error">Use the name WSL reports: letters, digits, spaces, dots, dashes and underscores only.</string>
+
 	<!-- ProxyJump / Jump Host support -->
 	<!-- Title for jump host selector in host editor -->
 	<string name="hostpref_jumphost_title">Jump host (ProxyJump)</string>

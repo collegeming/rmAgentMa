@@ -51,13 +51,24 @@ import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.AgentSessionConfig
 import org.rmagentma.core.AgentSessionHandle
+import org.rmagentma.core.DirectoryEntryKind
+import org.rmagentma.core.DirectoryListing
+import org.rmagentma.core.DirectoryListingProblem
 import org.rmagentma.core.RemoteAgentProbe
+import org.rmagentma.core.RemoteDirectoryListing
 import org.rmagentma.core.RemoteScanner
+import org.rmagentma.core.RemoteTarget
+import org.rmagentma.core.RemoteTranscriptSearch
 import org.rmagentma.core.RemoteWorkingDirectoryCheck
+import org.rmagentma.core.TRANSCRIPT_SEARCH_MAX_FILES
+import org.rmagentma.core.TRANSCRIPT_SEARCH_MAX_QUERY
+import org.rmagentma.core.TranscriptSearchProblem
+import org.rmagentma.core.TranscriptSearchTarget
 import org.rmagentma.core.ZcodeBusyException
 import org.rmagentma.core.ZcodeDriver
 import org.rmagentma.core.ZcodeLaunchConfig
 import org.rmagentma.core.ZcodeSessionHandle
+import org.rmagentma.core.remoteTargetOf
 import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -106,6 +117,7 @@ class AgentRepository @Inject constructor(
     private val index: AgentIndexStore,
     private val challenges: AgentChallenges,
     private val linkStates: AgentLinkStateStore,
+    private val detections: AgentDetectionStore,
     private val dispatchers: CoroutineDispatchers,
 ) {
     val hosts: Flow<List<Host>> = hostRepository.observeSshHosts()
@@ -142,6 +154,9 @@ class AgentRepository @Inject constructor(
     private val mutableLiveLinkStates = MutableStateFlow<Map<Long, AgentLinkState>>(emptyMap())
     val liveLinkStates: StateFlow<Map<Long, AgentLinkState>> = mutableLiveLinkStates.asStateFlow()
     private val probeMutex = Mutex()
+
+    /** The Agent target each host's rows were read on, so a retargeted host keeps no rows from the other context. */
+    private val probedHostTargets = mutableMapOf<Long, String>()
 
     private val scope = CoroutineScope(SupervisorJob() + dispatchers.io)
     private val switchMutex = Mutex()
@@ -189,9 +204,14 @@ class AgentRepository @Inject constructor(
                 try {
                     val ids = currentHosts.map { it.id }.toSet()
                     refreshMutex.withLock { mutableSessions.value = index.retainHosts(ids) }
-                    probeMutex.withLock { mutableAvailability.update { rows -> rows.filter { it.hostId in ids } } }
+                    probeMutex.withLock {
+                        forgetRetargetedHosts(currentHosts)
+                        mutableAvailability.update { rows -> rows.filter { it.hostId in ids } }
+                        seedDetectedAgents(currentHosts)
+                    }
                     pool.retainHosts(ids)
                     forgetRemovedHostLinkStates(ids)
+                    forgetRemovedHostDetections(ids)
                     if (selectedSession.value?.hostId?.let { it !in ids } == true) closeConversation()
                 } catch (e: CancellationException) {
                     throw e
@@ -224,8 +244,9 @@ class AgentRepository @Inject constructor(
     private suspend fun probeHost(hostId: Long, interactive: Boolean, force: Boolean): List<AgentAvailability> = probeMutex.withLock {
         val cached = mutableAvailability.value.filter { it.hostId == hostId }
         if (!force && cached.size == AgentKind.entries.size) return@withLock cached
+        val target = hostTarget(hostId)
         val result = try {
-            RemoteAgentProbe(dispatchers.io).probe(pool.hostSession(hostId, interactive))
+            RemoteAgentProbe(dispatchers.io).probe(pool.hostSession(hostId, interactive), target = target)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -235,7 +256,80 @@ class AgentRepository @Inject constructor(
             }
         }
         mutableAvailability.update { previous -> previous.filterNot { it.hostId == hostId } + result }
+        probedHostTargets[hostId] = target.id
+        recordDetections(hostId, target, result)
         return@withLock result
+    }
+
+    /**
+     * Drops the rows of a host whose Agent target changed: a path detected in the previous shell context does not
+     * hold in the new one, and the host reads as unknown again until it is probed there.
+     */
+    private fun forgetRetargetedHosts(currentHosts: List<Host>) {
+        val targets = currentHosts.associate { it.id to remoteTargetOf(it.osType, it.agentTarget).id }
+        val retargeted = probedHostTargets.filter { (hostId, probed) -> targets[hostId]?.let { it != probed } == true }.keys
+        if (retargeted.isEmpty()) return
+        retargeted.forEach { probedHostTargets.remove(it) }
+        mutableAvailability.update { rows -> rows.filterNot { it.hostId in retargeted } }
+    }
+
+    /** The shell context a host row describes; a row that vanished keeps the POSIX default it was read with. */
+    private suspend fun hostTarget(hostId: Long): RemoteTarget = hostRepository.findHostById(hostId)?.let { remoteTargetOf(it.osType, it.agentTarget) } ?: RemoteTarget.Posix
+
+    /**
+     * Writes what the probe just verified into this host's Agent configuration: every row that named an executable
+     * is kept for the target it was found on, and the rows of this host stand for no older detection afterwards.
+     */
+    private suspend fun recordDetections(hostId: Long, target: RemoteTarget, rows: List<AgentAvailability>) {
+        try {
+            val now = System.currentTimeMillis()
+            detections.replace(
+                hostId,
+                rows.filter { it.executable.isNotBlank() }.map {
+                    AgentDetection(hostId, target.id, it.kind, it.executable, it.version, it.capabilities, now)
+                },
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // A detection that cannot be written still answered this probe; the next probe writes it again.
+            Timber.w(e, "Agent detection is not persisted")
+        }
+    }
+
+    /**
+     * Fills in the detections of hosts this process has not probed yet, so a configured connection keeps its
+     * detected path across a restart. A row that arrived from a probe is never replaced by a stored one.
+     */
+    private suspend fun seedDetectedAgents(currentHosts: List<Host>) {
+        val stored = try {
+            detections.all()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.w(e, "Agent detections are unreadable")
+            return
+        }
+        if (stored.isEmpty()) return
+        val targets = currentHosts.associate { it.id to remoteTargetOf(it.osType, it.agentTarget).id }
+        val seeded = stored.filter { targets[it.hostId] == it.target }
+        if (seeded.isEmpty()) return
+        mutableAvailability.update { previous ->
+            val known = previous.map { it.hostId to it.kind }.toSet()
+            previous + seeded.filterNot { (it.hostId to it.kind) in known }
+                .map { AgentAvailability(it.hostId, it.kind, it.executable, true, "", it.version, it.capabilities) }
+        }
+        seeded.forEach { probedHostTargets.putIfAbsent(it.hostId, it.target) }
+    }
+
+    /**
+     * The row that opens a conversation: a probe verdict of this process wins, a detection from an earlier run on
+     * the same target opens the session without one, and a host with neither is probed now. No path is invented,
+     * so a host that holds no installation fails as not installed instead of starting with a guessed path.
+     */
+    private suspend fun runtimeFor(hostId: Long, kind: AgentKind): AgentAvailability {
+        mutableAvailability.value.firstOrNull { it.hostId == hostId && it.kind == kind }?.let { return it }
+        return probeHost(hostId, interactive = true, force = false).single { it.kind == kind }
     }
 
     private suspend fun refreshIndex(hostId: Long?, interactive: Boolean) = refreshMutex.withLock {
@@ -249,6 +343,9 @@ class AgentRepository @Inject constructor(
             mutableRefreshingHosts.update { it + host.id }
             try {
                 val available = probeHost(host.id, interactive, force = true)
+                // A target the app cannot enter holds no readable session list either, so the refresh stops at the
+                // probe verdict instead of failing once per Agent.
+                if (!remoteTargetOf(host.osType, host.agentTarget).supported) continue
                 for (agent in AgentKind.entries) {
                     currentCoroutineContext().ensureActive()
                     // Only a completed read promotes this pair to remote-loaded; any path out of the try leaves the
@@ -324,9 +421,13 @@ class AgentRepository @Inject constructor(
                 pool.allowUserRetry(session.hostId)
                 currentCoroutineContext().ensureActive()
                 trace("probe_start")
-                val runtime = probeHost(session.hostId, interactive = true, force = false).single { it.kind == session.agent }
+                val runtime = runtimeFor(session.hostId, session.agent)
                 trace("probe_end")
                 if (!runtime.available) throw java.io.IOException("${session.agent.wireName} unavailable: ${runtime.error.ifBlank { "agent startup probe failed" }}")
+                // A verified path is what the launch uses. A blank one means the probe named no installation, and no
+                // default stands in for it: the session fails here instead of starting an executable nobody found.
+                val executable = runtime.executable.takeIf { it.isNotBlank() }
+                    ?: throw java.io.IOException("${session.agent.wireName} executable not found: the probe detected no installation")
                 val remote = pool.hostSession(session.hostId)
                 // The directory is checked before an Agent process exists for this session, on the same host session
                 // the Agent is launched on: a directory the host cannot use fails as itself, leaves the cached probe
@@ -339,10 +440,10 @@ class AgentRepository @Inject constructor(
                     AgentKind.ZCODE -> ZcodeDriver(
                         child,
                         dispatchers.io,
-                        ZcodeLaunchConfig(executable = runtime.executable.takeIf { it.isNotBlank() } ?: "~/.zcode/server/agents/glm/zcode-agent"),
+                        ZcodeLaunchConfig(executable = executable),
                     ).prepare(remote, sessionId, session.cwd, workspaceIdentity = null, replayHistory = true)
 
-                    else -> AcpDriver(session.agent, child, dispatchers.io, runtime.executable.takeIf { it.isNotBlank() }).prepare(remote, sessionId, session.cwd)
+                    else -> AcpDriver(session.agent, child, dispatchers.io, executable).prepare(remote, sessionId, session.cwd)
                 }
                 trace("prepare_done")
                 val accepted = synchronized(stateLock) {
@@ -480,14 +581,152 @@ class AgentRepository @Inject constructor(
         }
     }
 
-    suspend fun send(text: String, expected: AgentSession? = null) = operation {
+    /**
+     * One bounded, read-only content search across the transcripts of [sessions]. Every candidate file is named by
+     * listing the host first, never by guessing a path, so a session whose transcript this build cannot point at is
+     * reported as unread instead of being answered as a history that holds no such text. Each host answers for its
+     * own rows: a host that could not be reached keeps its own error, and a search the Agent refused keeps its own
+     * code, while the hits that did arrive stay usable.
+     */
+    suspend fun searchTranscripts(query: String, sessions: List<AgentSession>): AgentTranscriptOutcome = operation {
+        val text = query.trim()
+        // A query the search would refuse is answered as that refusal before any host is read, so a typo costs no
+        // remote round trip; the search itself still validates the same rule on the wire.
+        if (text.isEmpty()) {
+            return@operation AgentTranscriptOutcome(query = text, problems = listOf(TranscriptSearchProblem.QUERY_EMPTY))
+        }
+        if (text.length > TRANSCRIPT_SEARCH_MAX_QUERY || text.any { it.code < 32 || it.code == 127 }) {
+            return@operation AgentTranscriptOutcome(query = text, problems = listOf(TranscriptSearchProblem.QUERY_INVALID))
+        }
+        val hits = mutableListOf<AgentTranscriptHit>()
+        val problems = mutableListOf<TranscriptSearchProblem>()
+        val failures = mutableListOf<AgentTranscriptFailure>()
+        val skips = mutableListOf<AgentTranscriptSkip>()
+        val roots = mutableListOf<String>()
+        var truncated = false
+        var searched = 0
+        val selection = sessions.distinctBy { Triple(it.hostId, it.agent, it.sessionId) }.groupBy { it.hostId }
+        for ((hostId, selected) in selection) {
+            val readable = mutableListOf<AgentSession>()
+            selected.forEach { session ->
+                val reason = agentTranscriptSkipReason(session.agent)
+                when {
+                    reason != null -> skips += AgentTranscriptSkip(session, reason)
+                    readable.size < TRANSCRIPT_SEARCH_MAX_FILES -> readable += session
+                    else -> skips += AgentTranscriptSkip(session, AgentTranscriptSkipReason.OVER_LIMIT)
+                }
+            }
+            if (readable.isEmpty()) continue
+            try {
+                val host = pool.hostSession(hostId)
+                val lookup = transcriptRoot(host, readable.first().cwd)
+                val root = lookup.root
+                if (root == null) {
+                    val problem = lookup.problem
+                    if (problem != null) {
+                        failures += AgentTranscriptFailure(hostId, problem.code)
+                    } else {
+                        readable.forEach { skips += AgentTranscriptSkip(it, AgentTranscriptSkipReason.ROOT_NOT_FOUND) }
+                    }
+                    continue
+                }
+                roots += root
+                val directories = sessionDirectories(host, root, readable.map { it.sessionId }.toSet())
+                val targets = mutableListOf<TranscriptSearchTarget>()
+                for (session in readable) {
+                    val directory = directories[session.sessionId]
+                    if (directory == null) {
+                        skips += AgentTranscriptSkip(session, AgentTranscriptSkipReason.SESSION_DIRECTORY_NOT_FOUND)
+                        continue
+                    }
+                    val file = newestTranscriptFile(transcriptFiles(host, directory))
+                    if (file == null) {
+                        skips += AgentTranscriptSkip(session, AgentTranscriptSkipReason.FILE_NOT_FOUND)
+                        continue
+                    }
+                    targets += TranscriptSearchTarget(session.agent, session.sessionId, directory, listOf(file))
+                }
+                if (targets.isEmpty()) continue
+                val result = RemoteTranscriptSearch(dispatchers.io).search(host, text, targets)
+                hits += result.hits.map { AgentTranscriptHit(hostId, it) }
+                truncated = truncated || result.truncated
+                result.problem?.let { problems += it }
+                // A search that answered with a problem read nothing: those sessions keep no verdict of their own.
+                if (result.problem == null) searched += targets.size
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                failures += AgentTranscriptFailure(hostId, describe(e))
+            }
+        }
+        AgentTranscriptOutcome(
+            query = text,
+            hits = hits,
+            truncated = truncated,
+            problems = problems,
+            failures = failures,
+            skips = skips,
+            searchedSessions = searched,
+            roots = roots,
+        )
+    }
+
+    /** Where one host's transcripts live, or the listing problem that kept every candidate from being read. */
+    private suspend fun transcriptRoot(host: HostSession, cwd: String): TranscriptRootLookup {
+        var problem: DirectoryListingProblem? = null
+        for (candidate in transcriptRootCandidates(cwd)) {
+            when (val listing = listingOf(host, candidate)) {
+                is DirectoryListing.Listed -> return TranscriptRootLookup(candidate, null)
+                is DirectoryListing.Unavailable -> when (listing.problem) {
+                    DirectoryListingProblem.MISSING, DirectoryListingProblem.NOT_A_DIRECTORY -> Unit
+                    else -> problem = problem ?: listing.problem
+                }
+            }
+        }
+        return TranscriptRootLookup(null, problem)
+    }
+
+    /** Session directories the root holds, keyed by session id; one listing per project directory, bounded. */
+    private suspend fun sessionDirectories(host: HostSession, root: String, sessionIds: Set<String>): Map<String, String> {
+        val found = mutableMapOf<String, String>()
+        val projects = (listingOf(host, root) as? DirectoryListing.Listed)?.entries.orEmpty()
+            .filter { it.kind == DirectoryEntryKind.DIRECTORY }
+            .take(TRANSCRIPT_ROOT_SCAN_LIMIT)
+        for (project in projects) {
+            if (found.size == sessionIds.size) break
+            val directory = "$root/${project.name}"
+            (listingOf(host, directory) as? DirectoryListing.Listed)?.entries.orEmpty()
+                .filter { it.kind == DirectoryEntryKind.DIRECTORY && it.name in sessionIds }
+                .forEach { found.putIfAbsent(it.name, "$directory/${it.name}") }
+        }
+        return found
+    }
+
+    /** Transcript file names one session directory holds; a directory nobody read contributes no name. */
+    private suspend fun transcriptFiles(host: HostSession, directory: String): List<String> =
+        (listingOf(host, directory) as? DirectoryListing.Listed)?.entries.orEmpty()
+            .filter { it.kind == DirectoryEntryKind.FILE }
+            .map { it.name }
+
+    private suspend fun listingOf(host: HostSession, directory: String): DirectoryListing = RemoteDirectoryListing(dispatchers.io).list(host, directory)
+
+    suspend fun send(text: String, expected: AgentSession? = null) {
+        sendPrompt(text, expected)
+    }
+
+    /**
+     * Sends one prompt and reports whether the conversation took it. A prompt refused for having no open handle, a
+     * running turn or another conversation, and a prompt whose write failed, all answer false - so a queued message
+     * is only ever reported as delivered once the receiving conversation really received it.
+     */
+    internal suspend fun sendPrompt(text: String, expected: AgentSession? = null): Boolean = operation {
         require(text.isNotBlank())
         val job = currentCoroutineContext()[Job]
         val (current, token) = synchronized(stateLock) {
-            val current = handle ?: return@operation
-            if (mutableBusy.value || mutableConversationState.value != AgentConversationState.Ready) return@operation
+            val current = handle ?: return@operation false
+            if (mutableBusy.value || mutableConversationState.value != AgentConversationState.Ready) return@operation false
             // A caller that named its conversation never writes into whichever conversation replaced it.
-            if (expected != null && !matchesActive(expected)) return@operation
+            if (expected != null && !matchesActive(expected)) return@operation false
             try {
                 val appended = history.append(AgentEvent(type = "user", text = text, id = "local-${java.util.UUID.randomUUID()}"))
                 mutableEvents.value = if (history.hasLatest) history.loadLatest() else appended
@@ -501,8 +740,10 @@ class AgentRepository @Inject constructor(
             promptJob = job
             current to generation
         }
+        var taken = false
         try {
             current.send(text)
+            taken = true
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -515,6 +756,7 @@ class AgentRepository @Inject constructor(
                 }
             }
         }
+        taken
     }
 
     suspend fun cancel(expected: AgentSession? = null) = withContext(dispatchers.io) {
@@ -780,6 +1022,19 @@ class AgentRepository @Inject constructor(
         mutableLinkRecords.value = mutableLinkRecords.value.filterNot { it.hostId in removed }
     }
 
+    /** The same holds for a detected path: a host that is gone keeps no configuration for a row id reused later. */
+    private suspend fun forgetRemovedHostDetections(ids: Set<Long>) {
+        val removed = try {
+            detections.all().map { it.hostId }.toSet() - ids
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Timber.w(e, "Agent detections are unreadable")
+            return
+        }
+        removed.forEach { detections.forget(it) }
+    }
+
     /** An explicit teardown ends every connection, so no CONNECTED row may survive it. */
     private suspend fun markHostsDisconnected() {
         mutableLiveLinkStates.value = emptyMap()
@@ -839,3 +1094,6 @@ class AgentRepository @Inject constructor(
         }
     }
 }
+
+/** Where one host's transcripts live, or the listing problem that kept every candidate from being read. */
+private data class TranscriptRootLookup(val root: String?, val problem: DirectoryListingProblem?)

@@ -17,6 +17,7 @@
 
 package org.connectbot.renderer
 
+import kotlinx.coroutines.CancellationException
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConfigBusyException
 import org.json.JSONArray
@@ -401,11 +402,44 @@ internal class RendererActions(private val source: RendererSource) {
         return success(RendererProjection.draft(text, conversationId).put("saved", true))
     }
 
+    /**
+     * One saved host as the renderer's project, with the conversation's own working directory as its workspace
+     * root. The directory is really listed once, bounded and read-only, so the root reports the state the host
+     * observed: a directory that is gone, unreadable or behind an unreachable host is flagged as itself instead of
+     * being answered as empty. A host whose workspace this product never learned fails explicitly, because an
+     * invented or empty directory would be read as "the folder is empty".
+     */
     private suspend fun readProject(params: JSONObject): ProbeResult {
-        // The renderer requests the conversation's `project_id`, which this host maps to the saved host behind it.
         val id = params.optString("projectId")
-        val host = source.snapshot().hosts.firstOrNull { RendererProjection.projectId(it.id) == id }
-        return if (host == null) fail(404, "PROJECT_NOT_FOUND", "没有这个项目。") else success(RendererProjection.project(host))
+        val snapshot = source.snapshot()
+        val host = snapshot.hosts.firstOrNull { RendererProjection.projectId(it.id) == id }
+            ?: return fail(404, "PROJECT_NOT_FOUND", "没有这个项目。")
+        val directory = workspaceDirectory(snapshot, host.id)
+            ?: return fail(409, "WORKSPACE_UNKNOWN", "该主机还没有会话记录它的工作目录，无法读取文件区。")
+        // A host that cannot be reached keeps its transport error to itself here: the root still belongs to the
+        // project, so it is reported as the directory nobody could read rather than as a failed project.
+        val listing = try {
+            source.listWorkspace(host.id, directory)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            null
+        }
+        return success(RendererProjection.project(host, RendererProjection.workspaceRoot(directory, listing)))
+    }
+
+    /**
+     * The working directory one project is presented with: the open conversation's own when it belongs to that
+     * host, otherwise the newest indexed session of that host — both are directories the product already holds,
+     * never a path guessed for the host.
+     */
+    private fun workspaceDirectory(snapshot: RendererSnapshot, hostId: Long): String? {
+        val open = snapshot.session?.takeIf { it.hostId == hostId }?.cwd?.takeIf { it.startsWith('/') }
+        val indexed = snapshot.indexedSessions
+            .filter { it.hostId == hostId && it.cwd.startsWith('/') }
+            .maxByOrNull { it.updatedAt }
+            ?.cwd
+        return open ?: indexed
     }
 
     /** The snapshot of the conversation [conversationId] names, or null when a different one is open. */

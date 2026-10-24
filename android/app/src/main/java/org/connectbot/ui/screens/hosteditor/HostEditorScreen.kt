@@ -91,6 +91,11 @@ import org.connectbot.ui.theme.ConnectBotTheme
 import org.connectbot.util.HostConstants
 import org.connectbot.util.LocalFontProvider
 import org.connectbot.util.TerminalFont
+import org.rmagentma.core.AGENT_TARGET_NATIVE
+import org.rmagentma.core.AGENT_TARGET_WSL_PREFIX
+import org.rmagentma.core.HOST_OS_LINUX
+import org.rmagentma.core.HOST_OS_WINDOWS
+import org.rmagentma.core.validWslDistribution
 import java.util.Date
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -127,6 +132,8 @@ fun HostEditorScreen(
         onEditAutomation = { onNavigateToAutomation(uiState.hostId) },
         onJumpHostChange = viewModel::updateJumpHostId,
         onIpVersionChange = viewModel::updateIpVersion,
+        onOsTypeChange = viewModel::updateOsType,
+        onAgentTargetChange = viewModel::updateAgentTarget,
         onPasswordChange = viewModel::updatePassword,
         onClearPassword = viewModel::clearSavedPassword,
         onMoshPortChange = viewModel::updateMoshPort,
@@ -165,6 +172,8 @@ fun HostEditorScreenContent(
     onIpVersionChange: (String) -> Unit,
     onPasswordChange: (String) -> Unit,
     onClearPassword: () -> Unit,
+    onOsTypeChange: (String) -> Unit = {},
+    onAgentTargetChange: (String) -> Unit = {},
     onMoshPortChange: (String) -> Unit = {},
     onMoshNetworkTimeoutChange: (String) -> Unit = {},
     onMoshServerChange: (String) -> Unit = {},
@@ -181,7 +190,8 @@ fun HostEditorScreenContent(
     var showAdvancedOptions by rememberSaveable(hostId) { mutableStateOf(false) }
     val protocols = listOf("ssh", "mosh", "telnet", "local")
     val canSave = (uiState.protocol == "local" || uiState.hostname.isNotBlank()) &&
-        (uiState.protocol != "mosh" || uiState.isMoshNetworkTimeoutValid)
+        (uiState.protocol != "mosh" || uiState.isMoshNetworkTimeoutValid) &&
+        !uiState.hasInvalidAgentTarget
 
     EditorScaffold(
         title = stringResource(if (hostId == -1L) R.string.hostpref_add_host else R.string.hostpref_setting_title),
@@ -260,6 +270,23 @@ fun HostEditorScreenContent(
 
             // Only show username, hostname, and port for non-local protocols
             if (uiState.protocol != "local") {
+                // The host's operating system decides how Agent sessions reach it; only SSH hosts carry Agents.
+                if (uiState.protocol == "ssh") {
+                    OsTypeSelector(
+                        osType = uiState.osType,
+                        onOsTypeSelect = onOsTypeChange,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+
+                    if (uiState.osType == HOST_OS_WINDOWS) {
+                        AgentTargetSelector(
+                            agentTarget = uiState.agentTarget,
+                            onAgentTargetSelect = onAgentTargetChange,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
+                    }
+                }
+
                 // Show username field for SSH and Mosh protocols
                 if (uiState.protocol == "ssh" || uiState.protocol == "mosh") {
                     OutlinedTextField(
@@ -1101,6 +1128,141 @@ private fun IpVersionSelector(
                     contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding,
                 )
             }
+        }
+    }
+}
+
+/** Operating system of the remote host; Windows is the one that reaches its Agent through a target of its own. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun OsTypeSelector(
+    osType: String,
+    onOsTypeSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val options = listOf(
+        HOST_OS_LINUX to stringResource(R.string.hostpref_os_type_linux),
+        HOST_OS_WINDOWS to stringResource(R.string.hostpref_os_type_windows),
+    )
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        OutlinedTextField(
+            value = options.find { it.first == osType }?.second ?: osType,
+            onValueChange = {},
+            label = { Text(stringResource(R.string.hostpref_os_type_title)) },
+            supportingText = { Text(stringResource(R.string.hostpref_os_type_summary)) },
+            readOnly = true,
+            singleLine = true,
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+            modifier = Modifier
+                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
+                .fillMaxWidth(),
+        )
+
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            options.forEach { (value, label) ->
+                DropdownMenuItem(
+                    text = { Text(label) },
+                    onClick = {
+                        onOsTypeSelect(value)
+                        expanded = false
+                    },
+                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Where the Agent of a Windows host runs: the Windows host itself, or one WSL distribution. The distribution
+ * name is entered by the user because only the host knows which distributions it has; the name is validated
+ * here with the same rule the command line requires.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AgentTargetSelector(
+    agentTarget: String,
+    onAgentTargetSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val isWsl = agentTarget.startsWith(AGENT_TARGET_WSL_PREFIX)
+    val distribution = if (isWsl) agentTarget.removePrefix(AGENT_TARGET_WSL_PREFIX) else ""
+    val distributionValid = validWslDistribution(distribution)
+    val options = listOf(
+        AGENT_TARGET_NATIVE to stringResource(R.string.hostpref_agent_target_native),
+        AGENT_TARGET_WSL_PREFIX to stringResource(R.string.hostpref_agent_target_wsl),
+    )
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { expanded = it },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            OutlinedTextField(
+                value = if (isWsl) options[1].second else options[0].second,
+                onValueChange = {},
+                label = { Text(stringResource(R.string.hostpref_agent_target_title)) },
+                readOnly = true,
+                singleLine = true,
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(),
+                modifier = Modifier
+                    .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
+                    .fillMaxWidth(),
+            )
+
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+            ) {
+                options.forEach { (value, label) ->
+                    DropdownMenuItem(
+                        text = { Text(label) },
+                        onClick = {
+                            // Selecting WSL before its name is known leaves an empty name, which the field marks.
+                            onAgentTargetSelect(if (value == AGENT_TARGET_NATIVE) AGENT_TARGET_NATIVE else agentTarget.takeIf { isWsl } ?: value)
+                            expanded = false
+                        },
+                        contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding,
+                    )
+                }
+            }
+        }
+
+        if (isWsl) {
+            OutlinedTextField(
+                value = distribution,
+                onValueChange = { onAgentTargetSelect(AGENT_TARGET_WSL_PREFIX + it) },
+                label = { Text(stringResource(R.string.hostpref_wsl_distribution_title)) },
+                isError = !distributionValid,
+                supportingText = {
+                    Text(
+                        stringResource(
+                            if (distributionValid) {
+                                R.string.hostpref_wsl_distribution_summary
+                            } else {
+                                R.string.hostpref_wsl_distribution_error
+                            },
+                        ),
+                    )
+                },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+            )
         }
     }
 }

@@ -40,6 +40,10 @@ import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentOption
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.AgentSessionConfig
+import org.rmagentma.core.DirectoryEntryKind
+import org.rmagentma.core.DirectoryListing
+import org.rmagentma.core.DirectoryListingProblem
+import org.rmagentma.core.RemoteDirectoryEntry
 import org.rmagentma.core.ZcodeConfigChange
 import org.rmagentma.core.ZcodeConfigStatus
 import org.rmagentma.core.ZcodeModelOption
@@ -48,6 +52,7 @@ import org.rmagentma.core.ZcodeSessionConfig
 import org.rmagentma.rendererhost.ProbeBridge
 import org.rmagentma.rendererhost.ProbeResult
 import org.rmagentma.rendererhost.json
+import java.io.IOException
 
 @RunWith(AndroidJUnit4::class)
 class RendererActionsTest {
@@ -242,8 +247,17 @@ class RendererActionsTest {
     }
 
     @Test
-    fun projectReadMapsTheConversationProjectIdToItsSavedHost() = runTest {
-        val source = FakeSource().apply { hosts = listOf(this@RendererActionsTest.host) }
+    fun projectReadNamesTheConversationsWorkingDirectoryAsItsWorkspaceRoot() = runTest {
+        val source = FakeSource().apply {
+            hosts = listOf(this@RendererActionsTest.host)
+            session = this@RendererActionsTest.session
+            indexed = this@RendererActionsTest.session
+            active = true
+            workspace = DirectoryListing.Listed(
+                listOf(RemoteDirectoryEntry("main.kt", DirectoryEntryKind.FILE, 12)),
+                truncated = true,
+            )
+        }
         val actions = RendererActions(source)
 
         val listed = (actions.handle("projects.list", payload()).body as JSONObject).getJSONArray("data")
@@ -255,12 +269,85 @@ class RendererActionsTest {
         val project = (read.body as JSONObject).getJSONObject("data")
         assertThat(project.getString("project_id")).isEqualTo("host-7")
         assertThat(project.getString("name")).isEqualTo("工作机")
-        assertThat(project.getJSONObject("explorer").isNull("workspace_pe_id")).isTrue()
-        assertThat(project.getJSONObject("explorer").getJSONArray("entries").length()).isZero()
+        val explorer = project.getJSONObject("explorer")
+        // The renderer resolves the workspace root by this id, so it must be the entry's own pe_id, derived
+        // from the host rather than from any state of the directory that was listed.
+        assertThat(explorer.getString("workspace_pe_id")).isEqualTo("pe-host-7")
+        val root = explorer.getJSONArray("entries").getJSONObject(0)
+        assertThat(root.getString("pe_id")).isEqualTo("pe-host-7")
+        assertThat(root.getString("role")).isEqualTo("workspace")
+        assertThat(root.getString("display_name")).isEqualTo("app")
+        assertThat(root.getString("display_path")).isEqualTo("/workspace/app")
+        assertThat(root.getInt("order_index")).isZero()
+        assertThat(root.getString("runtime_status")).isEqualTo("available")
+        assertThat(root.has("runtime_problem")).isFalse()
+        // The directory really was listed, on the host behind the project id.
+        assertThat(source.workspaceCalls).containsExactly(7L to "/workspace/app")
 
         val missing = actions.handle("project.read", payload(params = mapOf("projectId" to "host-99")))
         assertThat(missing.status).isEqualTo(404)
         assertThat((missing.body as JSONObject).getString("code")).isEqualTo("PROJECT_NOT_FOUND")
+    }
+
+    @Test
+    fun workspaceProblemsAreReportedAsThemselvesInsteadOfAnEmptyListing() = runTest {
+        val expected = mapOf(
+            DirectoryListingProblem.MISSING to "missing",
+            DirectoryListingProblem.NOT_A_DIRECTORY to "missing",
+            DirectoryListingProblem.NOT_READABLE to "permission_denied",
+            DirectoryListingProblem.TIMEOUT to "disconnected",
+            DirectoryListingProblem.TOOL_MISSING to "disconnected",
+            DirectoryListingProblem.FAILED to "disconnected",
+        )
+        for ((problem, status) in expected) {
+            val source = openSourceWithWorkspace { workspace = DirectoryListing.Unavailable(problem) }
+            val root = projectRoot(RendererActions(source), "host-7")
+            assertThat(root.getString("runtime_status")).describedAs(problem.code).isEqualTo(status)
+            assertThat(root.getString("runtime_problem")).describedAs(problem.code).isEqualTo(problem.code)
+        }
+
+        // A host this app cannot reach at all never read a directory, so the root says exactly that.
+        val unreachable = openSourceWithWorkspace { workspaceFailure = IOException("Host 7 is not connected") }
+        val root = projectRoot(RendererActions(unreachable), "host-7")
+        assertThat(root.getString("runtime_status")).isEqualTo("disconnected")
+        assertThat(root.getString("runtime_problem")).isEqualTo("host_unreachable")
+        assertThat(root.getString("display_path")).isEqualTo("/workspace/app")
+    }
+
+    @Test
+    fun projectWithoutAKnownWorkspaceFailsInsteadOfAnsweringAnEmptyFolder() = runTest {
+        // No open conversation and no indexed row: the product holds no directory for this host.
+        val source = FakeSource().apply { hosts = listOf(this@RendererActionsTest.host) }
+        val result = RendererActions(source).handle("project.read", payload(params = mapOf("projectId" to "host-7")))
+        assertThat(result.status).isEqualTo(409)
+        assertThat((result.body as JSONObject).getString("code")).isEqualTo("WORKSPACE_UNKNOWN")
+        assertThat(source.workspaceCalls).isEmpty()
+
+        // The newest indexed session of the host is a directory the product really holds, and it is listed.
+        val indexedOnly = FakeSource().apply {
+            hosts = listOf(this@RendererActionsTest.host)
+            sessions = listOf(
+                this@RendererActionsTest.session.copy(cwd = "/workspace/old", updatedAt = 10),
+                this@RendererActionsTest.session.copy(cwd = "/workspace/new", updatedAt = 20),
+            )
+        }
+        assertThat(projectRoot(RendererActions(indexedOnly), "host-7").getString("display_path")).isEqualTo("/workspace/new")
+        assertThat(indexedOnly.workspaceCalls).containsExactly(7L to "/workspace/new")
+    }
+
+    /** One open conversation of host 7 whose workspace listing a case decides. */
+    private fun openSourceWithWorkspace(configure: FakeSource.() -> Unit): FakeSource = FakeSource().apply {
+        hosts = listOf(this@RendererActionsTest.host)
+        session = this@RendererActionsTest.session
+        indexed = this@RendererActionsTest.session
+        active = true
+        configure()
+    }
+
+    private suspend fun projectRoot(actions: RendererActions, projectId: String): JSONObject {
+        val read = actions.handle("project.read", payload(params = mapOf("projectId" to projectId)))
+        assertThat(read.status).isEqualTo(200)
+        return (read.body as JSONObject).getJSONObject("data").getJSONObject("explorer").getJSONArray("entries").getJSONObject(0)
     }
 
     @Test

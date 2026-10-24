@@ -26,6 +26,10 @@
     <string name="agent_search" tools:machine_translated="true">搜索标题、消息或目录</string>
     <!-- 说明没有已保存的 SSH 主机。 -->
     <string name="agent_no_devices" tools:machine_translated="true">请先在主机列表中添加 SSH 主机。</string>
+    <!-- 未选主机时新建会话的 Agent 选择器：Agent 只在其所在的主机上提供。 -->
+    <string name="agent_pick_host_first" tools:machine_translated="true">请先选择远程主机</string>
+    <!-- 标记所选主机的探测没有找到的 Agent 选项；选中它会显示探测结论。 -->
+    <string name="agent_choice_not_detected" tools:machine_translated="true">（未检测到）</string>
     <!-- 会话列表为空或筛选无结果。 -->
     <string name="agent_no_sessions" tools:machine_translated="true">没有匹配的会话。刷新以读取远端历史，或新建会话。</string>
     <!-- 单次搜索的范围：本轮从远端重新读取的条数与仅来自缓存索引的条数。 -->
@@ -264,6 +268,10 @@
     <string name="agent_probe_connect_failed" tools:machine_translated="true">连接失败：探测未连上主机或未取得探测结果。</string>
     <!-- 探测结论：失败原因不在已知分类内，原始错误另行显示。 -->
     <string name="agent_probe_unknown_failure" tools:machine_translated="true">探测失败：原因无法识别。</string>
+    <!-- 探测结论：该主机目标在本应用中没有入口，因此未运行任何探测，也无法在其上开会话。 -->
+    <string name="agent_probe_target_unsupported" tools:machine_translated="true">不支持的目标：Windows 本机目标尚未实现，请在该主机上选择 WSL 发行版。</string>
+    <!-- 在显示检测到的安装路径与版本的位置重新探测该主机。 -->
+    <string name="agent_probe_refresh" tools:machine_translated="true">重新探测</string>
     <!-- 探测失败时列表保持原样，顶栏“刷新”是既有重试入口。 -->
     <string name="agent_probe_retry_hint" tools:machine_translated="true">已保留原有会话列表；可用顶部的“刷新”重试。</string>
     <!-- 该主机的 SSH 连接当前可用。 -->
@@ -332,4 +340,110 @@
     <string name="agent_config_write_unsupported" tools:machine_translated="true">该 Agent 不支持切换</string>
     <!-- 面板正在等待 Agent 对所选值的应答。 -->
     <string name="agent_config_writing" tools:machine_translated="true">正在切换…</string>
+    <!-- 动作：在本地标题／预览过滤之外，检索远端对话记录正文。 -->
+    <string name="agent_transcript_search" tools:machine_translated="true">搜索对话内容</string>
+    <!-- 远端对话内容检索读取所选会话时的进行中提示。 -->
+    <string name="agent_transcript_searching" tools:machine_translated="true">正在检索远端对话内容…</string>
+    <!-- 一次远端内容检索的范围：读取了多少个远端会话。 -->
+    <string name="agent_transcript_scope" tools:machine_translated="true">检索范围：已读取远端会话 %1$d 个</string>
+    <!-- 一次远端内容检索实际读取的目录。 -->
+    <string name="agent_transcript_roots" tools:machine_translated="true">读取的目录：%1$s</string>
+    <!-- 本次检索返回的远端命中条数。 -->
+    <string name="agent_transcript_hits" tools:machine_translated="true">远端命中 %1$d 条</string>
+    <!-- 检索受上限、时钟或不可读文件限制，仍有部分历史未读取。 -->
+    <string name="agent_transcript_truncated" tools:machine_translated="true">结果被截断：命中已达上限，或部分记录未读完。</string>
+    <!-- 检索确实读取过的范围内没有命中；不用于失败或部分检索的结论。 -->
+    <string name="agent_transcript_no_hits" tools:machine_translated="true">该范围内没有命中。</string>
+    <!-- 未被远端内容检索读取的会话，并给出各自原因。 -->
+    <string name="agent_transcript_skips" tools:machine_translated="true">未检索的会话：%1$s</string>
+    <!-- 完全未能读取的主机，并给出各主机自己的错误。 -->
+    <string name="agent_transcript_failures" tools:machine_translated="true">未读取成功的主机：%1$s</string>
+    <!-- 范围说明中的一项：名称与原因。 -->
+    <string name="agent_transcript_item" tools:machine_translated="true">%1$s：%2$s</string>
+    <!-- 命中位于记录文件的具体位置。 -->
+    <string name="agent_transcript_hit_anchor" tools:machine_translated="true">记录：%1$s</string>
+    <!-- 命中的会话已不在已加载列表中，无法从这里打开。 -->
+    <string name="agent_transcript_hit_missing" tools:machine_translated="true">该会话已不在当前列表中</string>
+    <!-- 退出远端内容检索，回到可浏览的会话列表。 -->
+    <string name="agent_transcript_clear" tools:machine_translated="true">退出内容检索</string>
+    <!-- 检索被拒：没有输入检索内容。 -->
+    <string name="agent_transcript_problem_query_empty" tools:machine_translated="true">请输入要检索的内容。</string>
+    <!-- 检索被拒：内容包含远端参数无法携带的字符，或长度超限。 -->
+    <string name="agent_transcript_problem_query_invalid" tools:machine_translated="true">检索内容包含无法发送的字符，或长度超出上限。</string>
+    <!-- 检索被拒：当前选择中没有任何可检索的范围。 -->
+    <string name="agent_transcript_problem_scope" tools:machine_translated="true">没有可检索的会话范围。</string>
+    <!-- 主机缺少 python3 或 base64，无法执行远端检索。 -->
+    <string name="agent_transcript_problem_tool" tools:machine_translated="true">该主机缺少 python3 或 base64，无法执行远端检索。</string>
+    <!-- 远端检索触及自己的时钟上限；已返回的命中真实但不是完整答案。 -->
+    <string name="agent_transcript_problem_timeout" tools:machine_translated="true">检索超时；已返回的命中仍然有效，但可能不完整。</string>
+    <!-- 主机返回了本版本无法按检索解析的内容。 -->
+    <string name="agent_transcript_problem_failed" tools:machine_translated="true">主机返回了无法解析的检索结果。</string>
+    <!-- 主机未读到收尾汇总行，无法证明检索已完成。 -->
+    <string name="agent_transcript_problem_incomplete" tools:machine_translated="true">主机未返回检索结束标志，结果可能不完整。</string>
+    <!-- 未检索原因：该 Agent 的记录在数据库中，不在远端检索可命名的文件里。 -->
+    <string name="agent_transcript_skip_history" tools:machine_translated="true">该 Agent 的对话记录不在可检索的文件中</string>
+    <!-- 未检索原因：会话工作目录附近没有找到记录根目录。 -->
+    <string name="agent_transcript_skip_root" tools:machine_translated="true">未找到会话记录根目录</string>
+    <!-- 未检索原因：根目录下没有与会话 ID 同名的目录。 -->
+    <string name="agent_transcript_skip_directory" tools:machine_translated="true">根目录下没有该会话的目录</string>
+    <!-- 未检索原因：会话目录中没有本次检索可读取的记录文件。 -->
+    <string name="agent_transcript_skip_file" tools:machine_translated="true">会话目录中没有可读取的记录文件</string>
+    <!-- 未检索原因：选择中的会话多于一次检索能读取的数量。 -->
+    <string name="agent_transcript_skip_limit" tools:machine_translated="true">超出一次检索的会话上限</string>
+    <!-- 动作：把消息投递给另一个会话，可在同主机或另一主机。 -->
+    <string name="agent_message_send" tools:machine_translated="true">发消息到其它会话</string>
+    <!-- 消息目标会话的选择标签。 -->
+    <string name="agent_message_target" tools:machine_translated="true">目标会话</string>
+    <!-- 没有其它会话可投递时的提示。 -->
+    <string name="agent_message_no_targets" tools:machine_translated="true">当前没有其它会话可投递。</string>
+    <!-- 消息对目标提出什么要求的选择标签。 -->
+    <string name="agent_message_kind" tools:machine_translated="true">投递方式</string>
+    <!-- 请求目标会话处理的消息。 -->
+    <string name="agent_message_kind_request" tools:machine_translated="true">请求处理</string>
+    <!-- 仅告知目标会话的消息。 -->
+    <string name="agent_message_kind_notify" tools:machine_translated="true">仅通知</string>
+    <!-- 请求的语义：下次打开目标会话时自动发送。 -->
+    <string name="agent_message_kind_request_hint" tools:machine_translated="true">下次打开目标会话时自动发送该消息。</string>
+    <!-- 通知的语义：下次打开目标会话时作为提示展示。 -->
+    <string name="agent_message_kind_notify_hint" tools:machine_translated="true">下次打开目标会话时作为提示展示，不发送给 Agent。</string>
+    <!-- 消息正文输入框的标签。 -->
+    <string name="agent_message_text" tools:machine_translated="true">消息内容</string>
+    <!-- 请求已入队的确认。 -->
+    <string name="agent_message_queued_request" tools:machine_translated="true">已入队：打开目标会话时会自动发送该消息。</string>
+    <!-- 通知已入队的确认。 -->
+    <string name="agent_message_queued_notify" tools:machine_translated="true">已入队：打开目标会话时只作为提示展示。</string>
+    <!-- 队列拒绝了消息，而不是报告一次并未发生的投递。 -->
+    <string name="agent_message_refused" tools:machine_translated="true">消息未入队：内容为空、过长或目标无效。</string>
+    <!-- 仍有待投递给当前会话的消息条数。 -->
+    <string name="agent_message_pending" tools:machine_translated="true">该会话还有 %1$d 条排队消息。</string>
+    <!-- 重试把排队消息投递给当前会话。 -->
+    <string name="agent_message_retry" tools:machine_translated="true">重试投递</string>
+    <!-- 排队消息投递未完成；消息没有丢失。 -->
+    <string name="agent_message_delivery_failed" tools:machine_translated="true">投递未完成，消息仍保留在队列：%1$s</string>
+    <!-- 打开会话时自动发送的排队消息条数。 -->
+    <string name="agent_message_delivered_request" tools:machine_translated="true">已自动发送 %1$d 条排队消息。</string>
+    <!-- 其它会话留下的提示；只展示，不发送给 Agent。 -->
+    <string name="agent_message_notice" tools:machine_translated="true">其它会话的提示：%1$s</string>
+    <!-- 忽略协作提示。 -->
+    <string name="agent_message_dismiss" tools:machine_translated="true">忽略</string>
+    <!-- 动作：把当前会话的消息引用到新会话的输入框。 -->
+    <string name="agent_quote_to_new" tools:machine_translated="true">引用到新会话</string>
+    <!-- 引用内容只做预填，由用户自行发送。 -->
+    <string name="agent_quote_prefilled" tools:machine_translated="true">已把引用内容填入输入框，请确认后自行发送。</string>
+    <!-- 引用内容为控制预算丢弃了消息或截断了字符。 -->
+    <string name="agent_quote_trimmed" tools:machine_translated="true">引用内容已按预算裁剪，发送前请检查。</string>
+    <!-- 当前会话没有可引用的消息正文。 -->
+    <string name="agent_quote_empty" tools:machine_translated="true">当前会话没有可引用的消息。</string>
+    <!-- 抽屉顶部只读待办聚合的标题。 -->
+    <string name="agent_inbox" tools:machine_translated="true">待办</string>
+    <!-- 待办原因：该会话在等待审批应答。 -->
+    <string name="agent_inbox_approval" tools:machine_translated="true">待审批 %1$d</string>
+    <!-- 待办原因：该会话在等待问题应答。 -->
+    <string name="agent_inbox_question" tools:machine_translated="true">待回答 %1$d</string>
+    <!-- 待办原因：该会话有失败记录。 -->
+    <string name="agent_inbox_failure" tools:machine_translated="true">失败：%1$s</string>
+    <!-- 待办原因：该会话正在运行回合。 -->
+    <string name="agent_inbox_busy" tools:machine_translated="true">正在运行</string>
+    <!-- 回到待办行所属的会话。 -->
+    <string name="agent_inbox_open" tools:machine_translated="true">回到该会话</string>
 </resources>

@@ -50,7 +50,16 @@ class AgentRepositoryLinkStateTest {
         `when`(hosts.observeSshHosts()).thenReturn(emptyFlow())
         val index = mock(AgentIndexStore::class.java)
         `when`(index.read()).thenReturn(emptyList())
-        return AgentRepository(context, hosts, pool, index, AgentChallenges(), store, CoroutineDispatchers(dispatcher, dispatcher, dispatcher))
+        return AgentRepository(
+            context,
+            hosts,
+            pool,
+            index,
+            AgentChallenges(),
+            store,
+            AgentDetectionStore(context, dispatcher),
+            CoroutineDispatchers(dispatcher, dispatcher, dispatcher),
+        )
     }
 
     private suspend fun pool(statuses: List<AgentLinkStatus>): AgentSshPool {

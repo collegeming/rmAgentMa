@@ -31,6 +31,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConversationState
+import org.connectbot.agent.AgentMessageQueue
 import org.connectbot.agent.AgentRepository
 import org.connectbot.di.CoroutineDispatchers
 import org.junit.After
@@ -56,6 +57,7 @@ class AgentViewModelActiveSessionTest {
     private val active = MutableStateFlow<AgentSession?>(null)
     private val conversation = MutableStateFlow(AgentConversationState.Closed)
     private lateinit var repository: AgentRepository
+    private val messageQueue: AgentMessageQueue = mock(AgentMessageQueue::class.java)
     private lateinit var viewModel: AgentViewModel
 
     @Before
@@ -81,7 +83,7 @@ class AgentViewModelActiveSessionTest {
         `when`(repository.liveLinkStates).thenReturn(MutableStateFlow(emptyMap()))
         // A conversation that reaches Ready makes the ViewModel read its configuration.
         `when`(repository.config()).thenReturn(AgentConfigAccess.Available(AgentSessionConfig()))
-        viewModel = AgentViewModel(repository, dispatchers, SavedStateHandle())
+        viewModel = AgentViewModel(repository, messageQueue, dispatchers, SavedStateHandle())
         advanceUntilIdle()
     }
 
@@ -105,7 +107,7 @@ class AgentViewModelActiveSessionTest {
 
     @Test
     fun movesAScreenThatWasBuiltForAnotherHostOntoTheLiveConversation() = runTest {
-        val screen = AgentViewModel(repository, dispatchers, SavedStateHandle(mapOf("hostId" to 1L)))
+        val screen = AgentViewModel(repository, messageQueue, dispatchers, SavedStateHandle(mapOf("hostId" to 1L)))
         advanceUntilIdle()
         assertEquals(1L, screen.selectedHost.value)
 

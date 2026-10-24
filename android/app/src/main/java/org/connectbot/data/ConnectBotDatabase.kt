@@ -65,6 +65,7 @@ import java.util.UUID
  * - Version 10: Added mosh_port, mosh_server, and locale columns to hosts for Mosh support (AutoMigration)
  * - Version 11: UUID automation actions and port-forward startup preference (manual migration)
  * - Version 12: Added optional Mosh network timeout to hosts (AutoMigration)
+ * - Version 13: Added os_type and agent_target to hosts: Linux/Windows hosts and the Agent target on Windows (AutoMigration)
  * - Future versions: Use Room AutoMigration when possible for simple schema changes
  *
  * Security Considerations:
@@ -82,7 +83,7 @@ import java.util.UUID
         Profile::class,
         AutomationAction::class,
     ],
-    version = 12,
+    version = 13,
     exportSchema = true,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
@@ -94,6 +95,7 @@ import java.util.UUID
         AutoMigration(from = 8, to = 9),
         AutoMigration(from = 9, to = 10),
         AutoMigration(from = 11, to = 12),
+        AutoMigration(from = 12, to = 13),
     ],
 )
 @TypeConverters(Converters::class)

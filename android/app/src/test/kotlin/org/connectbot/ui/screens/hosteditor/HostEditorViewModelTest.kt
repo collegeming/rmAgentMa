@@ -47,9 +47,14 @@ import org.junit.runner.RunWith
 import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.any
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.never
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 import org.mockito.Mockito.withSettings
+import org.rmagentma.core.AGENT_TARGET_NATIVE
+import org.rmagentma.core.AGENT_TARGET_WSL_PREFIX
+import org.rmagentma.core.HOST_OS_LINUX
+import org.rmagentma.core.HOST_OS_WINDOWS
 import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
@@ -685,5 +690,43 @@ class HostEditorViewModelTest {
         val captor = ArgumentCaptor.forClass(Host::class.java)
         verify(repository).saveHost(captor.capture() ?: Host())
         assertEquals(0, captor.value.moshNetworkTimeout)
+    }
+
+    @Test
+    fun windowsHostSavesTheOperatingSystemAndTheAgentTarget() = runTest(testDispatcher) {
+        val host = Host(id = 42, hostname = "example.com", protocol = "ssh")
+        `when`(repository.findHostById(42)).thenReturn(host)
+        `when`(repository.saveHost(any(Host::class.java) ?: Host())).thenAnswer { it.arguments[0] as Host }
+        val viewModel = createViewModel(42)
+        advanceUntilIdle()
+        assertEquals(HOST_OS_LINUX, viewModel.uiState.value.osType)
+        assertEquals(AGENT_TARGET_NATIVE, viewModel.uiState.value.agentTarget)
+
+        viewModel.updateOsType(HOST_OS_WINDOWS)
+        viewModel.updateAgentTarget("wsl:Ubuntu-22.04")
+        assertTrue(viewModel.saveHost())
+
+        val captor = ArgumentCaptor.forClass(Host::class.java)
+        verify(repository).saveHost(captor.capture() ?: Host())
+        assertEquals(HOST_OS_WINDOWS, captor.value.osType)
+        assertEquals("wsl:Ubuntu-22.04", captor.value.agentTarget)
+    }
+
+    @Test
+    fun aWindowsTargetThatCanNotBeQuotedBlocksTheSave() = runTest(testDispatcher) {
+        val viewModel = createViewModel(42)
+        advanceUntilIdle()
+        viewModel.updateOsType(HOST_OS_WINDOWS)
+        viewModel.updateAgentTarget(AGENT_TARGET_WSL_PREFIX)
+        assertTrue(viewModel.uiState.value.hasInvalidAgentTarget)
+
+        assertFalse(viewModel.saveHost())
+        verify(repository, never()).saveHost(any(Host::class.java) ?: Host())
+
+        viewModel.updateAgentTarget("wsl:Ubuntu \" -e calc")
+        assertTrue(viewModel.uiState.value.hasInvalidAgentTarget)
+        assertFalse(viewModel.saveHost())
+        viewModel.updateAgentTarget(AGENT_TARGET_NATIVE)
+        assertFalse(viewModel.uiState.value.hasInvalidAgentTarget)
     }
 }

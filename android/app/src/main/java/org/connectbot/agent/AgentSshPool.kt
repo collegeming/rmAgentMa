@@ -53,6 +53,8 @@ import org.connectbot.util.SecurePasswordStorage
 import org.connectbot.util.encodeSshHostKey
 import org.rmagentma.core.ExecChannel
 import org.rmagentma.core.HostSession
+import org.rmagentma.core.RemoteTarget
+import org.rmagentma.core.remoteTargetOf
 import java.io.IOException
 import java.security.MessageDigest
 import java.security.PublicKey
@@ -231,12 +233,19 @@ class AgentSshPool @Inject constructor(
     fun hostSession(id: Long, interactive: Boolean = true): HostSession = object : HostSession {
         override val hostId = id
 
+        @Volatile
+        private var target: RemoteTarget? = null
+
         override suspend fun exec(command: String): ExecChannel = withContext(io) {
+            // Every remote command of a host passes here, so one target decides for the probe and for the launch alike:
+            // a command the probe replicated is the command the session starts, inside the same distribution.
+            val line = (target ?: targetOf(id).also { target = it }).shellCommand(command)
+                ?: throw IOException("This host's Agent target cannot run a remote command yet")
             val client = connect(id, interactive)
             runInterruptible {
                 val session = client.startSession()
                 try {
-                    val remote = session.exec(command)
+                    val remote = session.exec(line)
                     object : ExecChannel {
                         override val stdout = remote.inputStream
                         override val stdin = remote.outputStream
@@ -250,6 +259,9 @@ class AgentSshPool @Inject constructor(
             }
         }
     }
+
+    /** The shell context of a host row; a row that vanished keeps the POSIX default its commands were built for. */
+    private suspend fun targetOf(id: Long): RemoteTarget = hosts.findHostById(id)?.let { remoteTargetOf(it.osType, it.agentTarget) } ?: RemoteTarget.Posix
 
     private suspend fun chain(id: Long, visited: Set<Long> = emptySet()): List<Host> {
         require(id !in visited) { "ProxyJump cycle detected" }

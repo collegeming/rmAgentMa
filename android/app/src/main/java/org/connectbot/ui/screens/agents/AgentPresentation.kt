@@ -37,6 +37,44 @@ internal fun agentAvailability(
 
 internal fun canOpenAgent(availability: List<AgentAvailability>, hostId: Long?, kind: AgentKind): Boolean = agentAvailability(availability, hostId, kind)?.available != false
 
+/** What one host holds of one Agent: its probe found it, its probe ruled it out, or nothing has asked yet. */
+internal enum class AgentHostState { INSTALLED, NOT_INSTALLED, UNPROBED }
+
+internal data class AgentHostChoice(val kind: AgentKind, val state: AgentHostState)
+
+/**
+ * The Agents to offer for one host, host first: an Agent is only ever addressed on a host that holds it, so a host
+ * the user has not chosen yet offers nothing, and the Agents its probe found come before the rest in enum order.
+ * A kind the probe ruled out stays selectable, because selecting it is what shows why it did not answer.
+ */
+internal fun agentHostChoices(availability: List<AgentAvailability>, hostId: Long?): List<AgentHostChoice> {
+    if (hostId == null) return emptyList()
+    val choices = AgentKind.entries.map { kind ->
+        val row = agentAvailability(availability, hostId, kind)
+        AgentHostChoice(
+            kind,
+            when {
+                row == null -> AgentHostState.UNPROBED
+                row.available -> AgentHostState.INSTALLED
+                else -> AgentHostState.NOT_INSTALLED
+            },
+        )
+    }
+    return choices.filter { it.state == AgentHostState.INSTALLED } + choices.filterNot { it.state == AgentHostState.INSTALLED }
+}
+
+/**
+ * The Agent a host switch lands on: the user's current choice while that host holds it, otherwise the first Agent
+ * this host's probe found, and the previous choice when the host holds none, so its verdict stays readable.
+ */
+internal fun preferredAgentForHost(availability: List<AgentAvailability>, hostId: Long?, current: AgentKind): AgentKind {
+    if (hostId == null) return current
+    val choices = agentHostChoices(availability, hostId)
+    return choices.firstOrNull { it.kind == current && it.state == AgentHostState.INSTALLED }?.kind
+        ?: choices.firstOrNull { it.state == AgentHostState.INSTALLED }?.kind
+        ?: current
+}
+
 internal data class AgentProbeStatus(val state: AgentProbeState, val availability: AgentAvailability?)
 
 /**

@@ -29,6 +29,7 @@ import org.connectbot.agent.AgentConversationState
 import org.connectbot.agent.AgentDraftStore
 import org.connectbot.agent.AgentIndexStore
 import org.connectbot.agent.AgentRepository
+import org.connectbot.agent.AgentSshPool
 import org.connectbot.data.HostRepository
 import org.connectbot.di.CoroutineDispatchers
 import org.connectbot.util.PreferenceConstants
@@ -37,6 +38,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentSession
+import org.rmagentma.core.DirectoryListing
+import org.rmagentma.core.RemoteDirectoryListing
 import org.rmagentma.rendererhost.json
 import java.util.UUID
 import javax.inject.Inject
@@ -52,6 +55,7 @@ class AgentRendererSource @Inject constructor(
     private val repository: AgentRepository,
     private val hosts: HostRepository,
     private val index: AgentIndexStore,
+    private val pool: AgentSshPool,
     private val drafts: AgentDraftStore,
     private val preferences: SharedPreferences,
     private val dispatchers: CoroutineDispatchers,
@@ -202,6 +206,14 @@ class AgentRendererSource @Inject constructor(
     override suspend fun saveDraft(key: String, text: String) {
         drafts.write(key, text)
     }
+
+    /**
+     * The file panel's one remote read: a bounded, read-only directory listing on the host's own session. It runs
+     * non-interactively, so a host holding no saved credential fails here as itself instead of prompting a user
+     * who only looked at a panel, and every remote command still passes the pool's single target wrapper.
+     */
+    override suspend fun listWorkspace(hostId: Long, directory: String): DirectoryListing =
+        RemoteDirectoryListing(dispatchers.io).list(pool.hostSession(hostId, interactive = false), directory)
 
     private fun theme(): String = ThemeMode.fromString(preferences.getString(PreferenceConstants.THEME_MODE, null)).name.lowercase()
 
