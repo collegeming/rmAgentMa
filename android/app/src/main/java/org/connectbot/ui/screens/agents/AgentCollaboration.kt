@@ -66,7 +66,7 @@ internal fun queuedFor(session: AgentSession, queued: List<AgentQueuedMessage>):
  * What the chat shell says about the last queued-message action, as data. Every field reports something that
  * happened: a message that was queued, one the queue refused, what a delivery did, and what still waits.
  */
-internal data class AgentQueueStatus(
+data class AgentQueueStatus(
     val queued: AgentQueuedMessage? = null,
     val refused: Boolean = false,
     val deliveryFailure: String? = null,
@@ -76,7 +76,7 @@ internal data class AgentQueueStatus(
 )
 
 /** A quote-to-new-session action: the text waiting for a conversation, or that the open one held nothing to quote. */
-internal sealed interface AgentQuoteState {
+sealed interface AgentQuoteState {
     data class Pending(val text: String, val trimmed: Boolean, val source: AgentSession) : AgentQuoteState
 
     data object Empty : AgentQuoteState

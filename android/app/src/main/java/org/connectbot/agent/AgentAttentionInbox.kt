@@ -24,7 +24,7 @@ import org.rmagentma.core.AgentSession
 internal const val AGENT_ATTENTION_SUMMARY_LIMIT = 160
 
 /** Why a conversation waits for the user, declared most urgent first so ranking can follow the declaration order. */
-internal enum class AgentAttentionReason {
+enum class AgentAttentionReason {
     APPROVAL,
     QUESTION,
     FAILURE,
@@ -32,7 +32,7 @@ internal enum class AgentAttentionReason {
 }
 
 /** The conversation a row returns to; a retitled or moved session must still merge into the same row. */
-internal data class AgentAttentionKey(
+data class AgentAttentionKey(
     val hostId: Long,
     val agent: AgentKind,
     val sessionId: String,
@@ -51,7 +51,7 @@ internal data class AgentAttentionSignal(
 )
 
 /** One conversation to open, keeping every reason it asked for attention as detail. */
-internal data class AgentAttentionItem(
+data class AgentAttentionItem(
     val key: AgentAttentionKey,
     /** Reasons of this conversation, most urgent first; never empty for an item this file builds. */
     val reasons: List<AgentAttentionReason>,

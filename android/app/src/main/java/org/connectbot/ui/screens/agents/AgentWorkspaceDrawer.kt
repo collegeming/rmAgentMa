@@ -51,7 +51,6 @@ import org.connectbot.agent.AgentSearchScope
 import org.connectbot.agent.AgentSearchSource
 import org.connectbot.agent.AgentTranscriptHit
 import org.connectbot.agent.AgentTranscriptOutcome
-import org.connectbot.agent.queuedFor
 import org.connectbot.agent.searchAgentSessions
 import org.connectbot.data.entity.Host
 import org.rmagentma.core.AgentAvailability

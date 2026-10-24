@@ -29,11 +29,8 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
-import java.io.InterruptedIOException
 import java.nio.file.Files
 import java.util.Comparator
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 class RemoteDirectoryListingTest {
     @Test
@@ -263,7 +260,8 @@ class RemoteDirectoryListingTest {
             val host = AnswerHost("", failure = IOException("Host 42 was deleted"))
             val failure = runCatching { RemoteDirectoryListing(Dispatchers.IO).list(host, "/work") }.exceptionOrNull()
             assertEquals("Host 42 was deleted", failure?.message)
-            assertFalse(failure is DirectoryListing.Unavailable)
+            // The host's own connection error is what fails this call: a directory nobody read has no verdict.
+            assertTrue(failure is IOException)
         }
     }
 
@@ -324,21 +322,5 @@ private class AnswerChannel(answer: String, silent: Boolean) : ExecChannel {
         (stdout as? SilentInput)?.release()
         listOf(stdout, stdin, stderr).forEach { runCatching { it.close() } }
         closed.complete(Unit)
-    }
-}
-
-/** Never answers on its own, so a listing without a bound would block here forever. */
-private class SilentInput : InputStream() {
-    private val released = CountDownLatch(1)
-
-    fun release() = released.countDown()
-
-    override fun read(): Int {
-        try {
-            released.await(30, TimeUnit.SECONDS)
-        } catch (e: InterruptedException) {
-            throw InterruptedIOException("Listing was interrupted")
-        }
-        return -1
     }
 }

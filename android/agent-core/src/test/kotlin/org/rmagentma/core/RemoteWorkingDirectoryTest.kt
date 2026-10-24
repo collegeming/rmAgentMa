@@ -29,9 +29,6 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
-import java.io.InterruptedIOException
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class RemoteWorkingDirectoryTest {
@@ -149,21 +146,5 @@ private class CheckChannel(answer: String, blockAnswer: Boolean) : ExecChannel {
         (stdout as? SilentInput)?.release()
         listOf(stdout, stdin, stderr).forEach { runCatching { it.close() } }
         closed.complete(Unit)
-    }
-}
-
-/** Never answers on its own, so a check without a bound would block here forever. */
-private class SilentInput : InputStream() {
-    private val released = CountDownLatch(1)
-
-    fun release() = released.countDown()
-
-    override fun read(): Int {
-        try {
-            released.await(30, TimeUnit.SECONDS)
-        } catch (e: InterruptedException) {
-            throw InterruptedIOException("Check was interrupted")
-        }
-        return -1
     }
 }

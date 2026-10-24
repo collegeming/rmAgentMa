@@ -54,6 +54,7 @@ import org.rmagentma.core.AgentSessionHandle
 import org.rmagentma.core.DirectoryEntryKind
 import org.rmagentma.core.DirectoryListing
 import org.rmagentma.core.DirectoryListingProblem
+import org.rmagentma.core.HostSession
 import org.rmagentma.core.RemoteAgentProbe
 import org.rmagentma.core.RemoteDirectoryListing
 import org.rmagentma.core.RemoteScanner
