@@ -129,6 +129,9 @@ fun AgentScreen(
     val reading by viewModel.reading.collectAsState()
     val hostId by viewModel.selectedHost.collectAsState()
     val agent by viewModel.selectedAgent.collectAsState()
+    val configState by viewModel.config.collectAsState()
+    val configWriting by viewModel.configWriting.collectAsState()
+    val configNotice by viewModel.configNotice.collectAsState()
     val pendingSelection by viewModel.pendingSelection.collectAsState()
     var showNew by remember { mutableStateOf(false) }
     var newWorkspace by remember { mutableStateOf<AgentWorkspaceKey?>(null) }
@@ -136,6 +139,7 @@ fun AgentScreen(
     var showDebugTerminal by remember { mutableStateOf(false) }
     var denied by remember { mutableStateOf(false) }
     var showDetails by remember { mutableStateOf(false) }
+    var showConfig by remember { mutableStateOf(false) }
     var sessionView by rememberSaveable { mutableStateOf(AgentSessionView.CHAT) }
     var prompt by rememberSaveable { mutableStateOf("") }
     var pendingNetworkAction by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -189,6 +193,9 @@ fun AgentScreen(
     }
     LaunchedEffect(session == null) {
         if (session == null) sessionView = AgentSessionView.CHAT
+    }
+    LaunchedEffect(session) {
+        showConfig = false
     }
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -356,6 +363,7 @@ fun AgentScreen(
                         TextButton(onClick = { showDetails = true }) { Text(stringResource(R.string.agent_details)) }
                         TextButton(onClick = viewModel::closeConversation) { Text(stringResource(R.string.agent_close_text)) }
                     }
+                    AgentConfigHeader(configState, onOpen = { showConfig = true })
                     Row(Modifier.padding(horizontal = 12.dp)) {
                         AgentSessionView.entries.forEach { view ->
                             TextButton(
@@ -518,6 +526,16 @@ fun AgentScreen(
             session = detailsSession,
             details = details,
             onDismiss = { showDetails = false },
+        )
+    }
+    if (showConfig) {
+        AgentConfigSheet(
+            state = configState,
+            writing = configWriting,
+            notice = configNotice,
+            onSelect = viewModel::setConfigOption,
+            onRetry = viewModel::retryConfig,
+            onDismiss = { showConfig = false },
         )
     }
 }

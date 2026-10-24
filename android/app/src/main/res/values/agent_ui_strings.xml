@@ -280,4 +280,56 @@
     <string name="agent_link_retrying_last">状态未知：上次断开后自动重连未成功（已重试 %1$d 次，%2$s）。</string>
     <!-- The last run ended waiting for the user; the argument is the time. -->
     <string name="agent_link_needs_user_last">上次需要你处理：%1$s。</string>
+    <!-- Header line while the Agent configuration snapshot is being read. -->
+    <string name="agent_config_header_loading">模型与推理：读取中…</string>
+    <!-- Header line when the open conversation has no ACP configuration surface. -->
+    <string name="agent_config_header_unsupported">模型与推理：不支持</string>
+    <!-- Header line when no conversation is open. -->
+    <string name="agent_config_header_closed">模型与推理：会话不可用</string>
+    <!-- Header entry after a failed configuration read; tapping opens the panel with the reason. -->
+    <string name="agent_config_header_failed">模型与推理：读取失败</string>
+    <!-- Header summary: current model and reasoning tier, each resolved to a real value or an explicit absence. -->
+    <string name="agent_config_summary">模型 %1$s · 推理档 %2$s</string>
+    <!-- One role without an option in the Agent's catalogue. -->
+    <string name="agent_config_unsupported">不支持</string>
+    <!-- An option exists but the Agent stated no current value. -->
+    <string name="agent_config_unset">未指定</string>
+    <!-- Panel title. -->
+    <string name="agent_config_title">模型与推理</string>
+    <!-- Panel body while the snapshot is loading. -->
+    <string name="agent_config_loading">正在读取 Agent 配置…</string>
+    <!-- Panel body when the backend has no ACP configuration surface. -->
+    <string name="agent_config_unsupported_body">该 Agent 不提供 ACP 配置选项，无法读取或切换模型与推理档。</string>
+    <!-- Panel body when no conversation is open. -->
+    <string name="agent_config_closed_body">会话未连接，无法读取配置。</string>
+    <!-- Panel error with the concrete read failure. -->
+    <string name="agent_config_read_failed">读取配置失败：%1$s</string>
+    <!-- Fallback reason when an error carries no message. -->
+    <string name="agent_config_reason_unknown">原因未知</string>
+    <!-- Retry a failed configuration read. -->
+    <string name="agent_config_retry">重试</string>
+    <!-- The Agent advertised no configuration options at all. -->
+    <string name="agent_config_empty">该 Agent 未提供可切换的配置项。</string>
+    <!-- An advertised option carries no selectable values. -->
+    <string name="agent_config_no_values">该选项没有可切换的值。</string>
+    <!-- An option whose type is not the select type this app switches; it stays read-only. -->
+    <string name="agent_config_type_readonly">该选项类型不支持切换，仅显示当前值。</string>
+    <!-- Marks the currently selected value in the panel. -->
+    <string name="agent_config_current">当前</string>
+    <!-- Read-only current value of an option that has no selectable values. -->
+    <string name="agent_config_current_value">当前：%1$s</string>
+    <!-- Write receipt: the Agent reported a snapshot carrying the requested value. -->
+    <string name="agent_config_write_confirmed">已确认</string>
+    <!-- Write receipt: the Agent accepted the write but its snapshot still reports the old value. -->
+    <string name="agent_config_write_next_turn">已切换，下一轮生效</string>
+    <!-- Write receipt: the write reached the Agent but no snapshot confirmed it. -->
+    <string name="agent_config_write_unconfirmed">已送达，未确认</string>
+    <!-- Write receipt: the request failed; the previous value stays. -->
+    <string name="agent_config_write_failed">切换失败：%1$s</string>
+    <!-- Write receipt: the conversation was switched or closed before the result arrived. -->
+    <string name="agent_config_write_closed">会话已切换或关闭，结果未生效</string>
+    <!-- Write receipt: the backend has no configuration surface. -->
+    <string name="agent_config_write_unsupported">该 Agent 不支持切换</string>
+    <!-- The panel is waiting for the Agent's answer to the selected value. -->
+    <string name="agent_config_writing">正在切换…</string>
 </resources>

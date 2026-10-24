@@ -28,9 +28,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.contentOrNull
 import org.connectbot.agent.AgentConversationState
 import org.connectbot.agent.AgentRepository
 import org.connectbot.agent.HostAddressChange
@@ -38,6 +40,7 @@ import org.connectbot.di.CoroutineDispatchers
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 @HiltViewModel
@@ -71,6 +74,15 @@ class AgentViewModel @Inject constructor(
     val reading = mutableReading.asStateFlow()
     private val mutableOperationError = MutableStateFlow<String?>(null)
     val operationError = mutableOperationError.asStateFlow()
+    private val mutableConfig = MutableStateFlow<AgentConfigUiState>(AgentConfigUiState.Closed)
+    internal val config = mutableConfig.asStateFlow()
+    private val mutableConfigWriting = MutableStateFlow<String?>(null)
+    internal val configWriting = mutableConfigWriting.asStateFlow()
+    private val mutableConfigNotice = MutableStateFlow<AgentConfigNotice?>(null)
+    internal val configNotice = mutableConfigNotice.asStateFlow()
+    private val configRequest = AtomicLong()
+    private val configWriteToken = AtomicLong()
+    private var configJob: Job? = null
     private val mutableWorking = MutableStateFlow(false)
     val working = mutableWorking.asStateFlow()
     private val mutableResponding = MutableStateFlow<Set<AgentInteractionKey>>(emptySet())
@@ -97,6 +109,114 @@ class AgentViewModel @Inject constructor(
                 mutableResponding.update { pending ->
                     pending.filterTo(mutableSetOf()) { isCurrentAgentInteraction(it, selectedSession.value, events.value) }
                 }
+            }
+        }
+        viewModelScope.launch(dispatchers.default) {
+            combine(selectedSession, conversationState) { session, state -> session to state }
+                .distinctUntilChanged()
+                .collect { (session, state) -> onConversationChanged(session, state) }
+        }
+        viewModelScope.launch(dispatchers.default) {
+            events.collect { current ->
+                val latest = current.lastOrNull() ?: return@collect
+                if (isAgentConfigUpdate(latest.title) && conversationState.value == AgentConversationState.Ready) {
+                    selectedSession.value?.let { loadConfig(it, showLoading = false) }
+                }
+            }
+        }
+    }
+
+    private fun onConversationChanged(session: AgentSession?, state: AgentConversationState) {
+        when (state) {
+            AgentConversationState.Loading -> if (session != null) {
+                mutableConfig.value = AgentConfigUiState.Loading
+                mutableConfigNotice.value = null
+            }
+
+            AgentConversationState.Ready -> if (session != null) loadConfig(session, showLoading = true)
+
+            AgentConversationState.Failed, AgentConversationState.Closed -> {
+                mutableConfig.value = AgentConfigUiState.Closed
+                mutableConfigWriting.value = null
+            }
+        }
+    }
+
+    /** Reads the open conversation's snapshot; [showLoading] is false for background refreshes of a shown value. */
+    private fun loadConfig(target: AgentSession, showLoading: Boolean) {
+        val request = configRequest.incrementAndGet()
+        if (showLoading && mutableConfig.value !is AgentConfigUiState.Ready) mutableConfig.value = AgentConfigUiState.Loading
+        configJob?.cancel()
+        configJob = viewModelScope.launch(dispatchers.io) {
+            val access = try {
+                repository.config()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (isCurrentConfigTarget(target, request)) {
+                    mutableConfig.value = AgentConfigUiState.Failed(error.localizedMessage ?: error.javaClass.simpleName)
+                }
+                return@launch
+            }
+            if (isCurrentConfigTarget(target, request)) mutableConfig.value = access.toUiState()
+        }
+    }
+
+    private fun isCurrentConfigTarget(target: AgentSession, request: Long): Boolean = configRequest.get() == request && selectedSession.value === target &&
+        conversationState.value in setOf(AgentConversationState.Loading, AgentConversationState.Ready)
+
+    private fun isCurrentWriteTarget(target: AgentSession, token: Long): Boolean = configWriteToken.get() == token && selectedSession.value === target &&
+        conversationState.value in setOf(AgentConversationState.Loading, AgentConversationState.Ready)
+
+    private fun resetConfig() {
+        configRequest.incrementAndGet()
+        configWriteToken.incrementAndGet()
+        configJob?.cancel()
+        mutableConfig.value = AgentConfigUiState.Closed
+        mutableConfigWriting.value = null
+        mutableConfigNotice.value = null
+    }
+
+    fun retryConfig() {
+        val session = selectedSession.value ?: return
+        if (conversationState.value != AgentConversationState.Ready) {
+            mutableConfig.value = AgentConfigUiState.Closed
+            return
+        }
+        loadConfig(session, showLoading = true)
+    }
+
+    fun setConfigOption(optionId: String, value: String) {
+        if (optionId.isBlank() || mutableConfigWriting.value != null) return
+        val target = selectedSession.value ?: return
+        val ready = mutableConfig.value as? AgentConfigUiState.Ready ?: return
+        val option = ready.config.options.firstOrNull { it.id == optionId } ?: return
+        if (option.values.none { it.value == value } || option.currentValue?.contentOrNull == value) return
+        val token = configWriteToken.get()
+        mutableConfigNotice.value = null
+        mutableConfigWriting.value = optionId
+        viewModelScope.launch(dispatchers.io) {
+            try {
+                val access = repository.setConfigOption(optionId, value)
+                if (!isCurrentWriteTarget(target, token)) return@launch
+                // A read that started before this result must not overwrite the newer snapshot.
+                configRequest.incrementAndGet()
+                mutableConfig.value = access.toUiState()
+                mutableConfigNotice.value = AgentConfigNotice(agentConfigWriteOutcome(access, optionId, value))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (isCurrentWriteTarget(target, token)) {
+                    // Keep the last confirmed snapshot: a failed write must not show the sent value as applied.
+                    mutableConfigNotice.value = AgentConfigNotice(
+                        AgentConfigWriteOutcome.FAILED,
+                        error.localizedMessage ?: error.javaClass.simpleName,
+                    )
+                }
+            } finally {
+                // A conversation switch already cleared the indicator; an answer for a replaced conversation must
+                // not leave it behind either, so only a write that was reset in between keeps it untouched.
+                if (configWriteToken.get() == token) mutableConfigWriting.value = null
             }
         }
     }
@@ -163,6 +283,7 @@ class AgentViewModel @Inject constructor(
     fun retryConversation() {
         val selected = selectedSession.value ?: return
         if (busy.value || working.value || !canOpenAgent(availability.value, selected.hostId, selected.agent)) return
+        resetConfig()
         execute(exclusive = true) { repository.open(selected) }
     }
 
@@ -250,6 +371,7 @@ class AgentViewModel @Inject constructor(
 
     private suspend fun applySelection(selection: AgentSelection) {
         mutableFullText.value = null
+        resetConfig()
         when (selection) {
             is AgentSelection.Host -> {
                 mutableSelectedHost.value = selection.id

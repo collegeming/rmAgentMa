@@ -280,4 +280,56 @@
     <string name="agent_link_retrying_last" tools:machine_translated="true">状态未知：上次断开后自动重连未成功（已重试 %1$d 次，%2$s）。</string>
     <!-- 上次运行结束时需要用户处理；参数为时刻。 -->
     <string name="agent_link_needs_user_last" tools:machine_translated="true">上次需要你处理：%1$s。</string>
+    <!-- 读取 Agent 配置快照时的会话头部状态。 -->
+    <string name="agent_config_header_loading" tools:machine_translated="true">模型与推理：读取中…</string>
+    <!-- 当前会话后端没有 ACP 配置能力时的会话头部状态。 -->
+    <string name="agent_config_header_unsupported" tools:machine_translated="true">模型与推理：不支持</string>
+    <!-- 没有打开会话时的会话头部状态。 -->
+    <string name="agent_config_header_closed" tools:machine_translated="true">模型与推理：会话不可用</string>
+    <!-- 读取配置失败后的头部入口；点击打开面板查看原因。 -->
+    <string name="agent_config_header_failed" tools:machine_translated="true">模型与推理：读取失败</string>
+    <!-- 头部摘要：当前模型与推理档，各自显示真实值或明确的“不支持”。 -->
+    <string name="agent_config_summary" tools:machine_translated="true">模型 %1$s · 推理档 %2$s</string>
+    <!-- Agent 目录中没有该角色选项时的显示。 -->
+    <string name="agent_config_unsupported" tools:machine_translated="true">不支持</string>
+    <!-- 选项存在，但 Agent 未给出当前值。 -->
+    <string name="agent_config_unset" tools:machine_translated="true">未指定</string>
+    <!-- 面板标题。 -->
+    <string name="agent_config_title" tools:machine_translated="true">模型与推理</string>
+    <!-- 快照加载中的面板正文。 -->
+    <string name="agent_config_loading" tools:machine_translated="true">正在读取 Agent 配置…</string>
+    <!-- 后端没有 ACP 配置能力时的面板正文。 -->
+    <string name="agent_config_unsupported_body" tools:machine_translated="true">该 Agent 不提供 ACP 配置选项，无法读取或切换模型与推理档。</string>
+    <!-- 没有打开会话时的面板正文。 -->
+    <string name="agent_config_closed_body" tools:machine_translated="true">会话未连接，无法读取配置。</string>
+    <!-- 带具体读取失败原因的面板错误。 -->
+    <string name="agent_config_read_failed" tools:machine_translated="true">读取配置失败：%1$s</string>
+    <!-- 错误没有消息时的备用原因。 -->
+    <string name="agent_config_reason_unknown" tools:machine_translated="true">原因未知</string>
+    <!-- 重试读取配置。 -->
+    <string name="agent_config_retry" tools:machine_translated="true">重试</string>
+    <!-- Agent 完全没有提供配置选项。 -->
+    <string name="agent_config_empty" tools:machine_translated="true">该 Agent 未提供可切换的配置项。</string>
+    <!-- 选项没有可选值。 -->
+    <string name="agent_config_no_values" tools:machine_translated="true">该选项没有可切换的值。</string>
+    <!-- 选项类型不是本应用可切换的 select 类型；只读展示。 -->
+    <string name="agent_config_type_readonly" tools:machine_translated="true">该选项类型不支持切换，仅显示当前值。</string>
+    <!-- 标记面板中当前选中的值。 -->
+    <string name="agent_config_current" tools:machine_translated="true">当前</string>
+    <!-- 没有可选值的选项的只读当前值。 -->
+    <string name="agent_config_current_value" tools:machine_translated="true">当前：%1$s</string>
+    <!-- 写入回执：Agent 返回的快照已包含请求值。 -->
+    <string name="agent_config_write_confirmed" tools:machine_translated="true">已确认</string>
+    <!-- 写入回执：Agent 接受了写入，但快照仍报告旧值。 -->
+    <string name="agent_config_write_next_turn" tools:machine_translated="true">已切换，下一轮生效</string>
+    <!-- 写入回执：写入已送达，但没有快照确认。 -->
+    <string name="agent_config_write_unconfirmed" tools:machine_translated="true">已送达，未确认</string>
+    <!-- 写入回执：请求失败，保留原值。 -->
+    <string name="agent_config_write_failed" tools:machine_translated="true">切换失败：%1$s</string>
+    <!-- 写入回执：结果返回前会话已切换或关闭。 -->
+    <string name="agent_config_write_closed" tools:machine_translated="true">会话已切换或关闭，结果未生效</string>
+    <!-- 写入回执：后端没有配置能力。 -->
+    <string name="agent_config_write_unsupported" tools:machine_translated="true">该 Agent 不支持切换</string>
+    <!-- 面板正在等待 Agent 对所选值的应答。 -->
+    <string name="agent_config_writing" tools:machine_translated="true">正在切换…</string>
 </resources>
