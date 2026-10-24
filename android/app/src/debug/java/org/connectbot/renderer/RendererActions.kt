@@ -21,6 +21,7 @@ import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConfigBusyException
 import org.json.JSONArray
 import org.json.JSONObject
+import org.rmagentma.core.AgentSession
 import org.rmagentma.rendererhost.ProbeFailure
 import org.rmagentma.rendererhost.ProbeLimits
 import org.rmagentma.rendererhost.ProbeResult
@@ -53,19 +54,19 @@ internal class RendererActions(private val source: RendererSource) {
         "settings.client.write" -> writeSettings(body)
         "conversations.list" -> conversations()
         "conversation.read" -> conversation(params)
-        "messages.list" -> messages(query)
-        "messages.latest" -> latest(query)
-        "messages.send" -> send(body)
-        "turn.cancel" -> cancel(body)
-        "approvals.list" -> approvals()
+        "messages.list" -> messages(query, params.optString("conversationId"))
+        "messages.latest" -> latest(query, params.optString("conversationId"))
+        "messages.send" -> send(body, params.optString("conversationId"))
+        "turn.cancel" -> cancel(body, params.optString("conversationId"))
+        "approvals.list" -> approvals(params.optString("conversationId"))
         "approvals.review" -> review(params, body)
-        "runtime.ensure" -> ensure()
+        "runtime.ensure" -> ensure(params)
         "runtime.snapshot" -> snapshot()
         "config.read" -> readConfig(params)
         "config.set" -> setConfig(params, body)
         "draft.load" -> loadDraft(params)
         "draft.save" -> saveDraft(params, body)
-        "usage.read" -> usage()
+        "usage.read" -> usage(params.optString("conversationId"))
         "projects.list" -> success(RendererProjection.projects(source.snapshot().hosts))
         "project.read" -> readProject(params)
         "assistants.list" -> success(RendererProjection.assistants(source.snapshot().availability))
@@ -101,31 +102,51 @@ internal class RendererActions(private val source: RendererSource) {
         return success(json(THEME_KEY to theme))
     }
 
+    /**
+     * The product's own index as the renderer's conversation list: one row per (host, agent, session), each with
+     * the stable derived id a later `conversation.read` / `runtime.ensure` selects it by. The open conversation is
+     * included even before the index has refreshed it, and a row whose host was deleted is not listed.
+     */
     private suspend fun conversations(): ProbeResult {
         val snapshot = source.snapshot()
+        val open = snapshot.session
+        val hostIds = snapshot.hosts.map { it.id }.toSet()
+        val rows = (snapshot.indexedSessions + listOfNotNull(open))
+            // A row whose host was deleted is not offered; the open conversation stays listed even if the host
+            // read failed, because opening it already proved that its host exists.
+            .filter { it.sessionId.isNotBlank() && (it.hostId in hostIds || open?.sameConversation(it) == true) }
+            .distinctBy { RendererConversationId.of(it) }
+            .sortedWith(compareByDescending<AgentSession> { it.updatedAt }.thenBy { RendererConversationId.of(it) })
         val items = JSONArray()
-        val session = snapshot.session
-        if (session != null) {
-            val pending = snapshot.pending()
-            items.put(RendererProjection.conversation(snapshot, pending, RendererProjection.runtime(snapshot, pending)))
+        rows.forEach { row ->
+            val view = view(snapshot, row)
+            val pending = view.pending()
+            items.put(RendererProjection.conversation(view, RendererConversationId.of(row), pending, RendererProjection.runtime(view, pending)))
         }
         return success(json("items" to items, "total" to items.length(), "has_more" to false))
     }
 
+    /**
+     * One conversation. Asking by a derived id is the renderer's selection step, so a conversation that is not
+     * open yet is opened through the repository's exclusive switch before its row is answered.
+     */
     private suspend fun conversation(params: JSONObject): ProbeResult {
-        if (params.optString("conversationId") != RENDERER_CONVERSATION) return notFound()
-        val snapshot = source.snapshot()
-        if (snapshot.session == null) return notFound()
-        val pending = snapshot.pending()
-        return success(RendererProjection.conversation(snapshot, pending, RendererProjection.runtime(snapshot, pending)))
+        val requested = params.optString("conversationId")
+        return when (val selection = select(requested, reopen = false)) {
+            is Selection.Refused -> selection.result
+
+            is Selection.Open -> {
+                val pending = selection.snapshot.pending()
+                success(RendererProjection.conversation(selection.snapshot, requested, pending, RendererProjection.runtime(selection.snapshot, pending)))
+            }
+        }
     }
 
-    private suspend fun messages(query: JSONObject): ProbeResult {
-        val snapshot = source.snapshot()
-        if (snapshot.session == null) return notFound()
+    private suspend fun messages(query: JSONObject, conversationId: String): ProbeResult {
+        val snapshot = openFor(conversationId) ?: return notFound()
         val limit = if (query.has("limit")) query.optString("limit").toIntOrNull() ?: -1 else DEFAULT_PAGE
         if (limit !in 1..MAX_PAGE) return fail(422, "INVALID_CURSOR", "limit 必须是 1..$MAX_PAGE 的整数。")
-        val items = RendererProjection.messages(snapshot.events, snapshot.epoch, snapshot.turnId)
+        val items = RendererProjection.messages(snapshot.events, conversationId, snapshot.epoch, snapshot.turnId)
         val before = query.optString("before").ifEmpty { query.optString("anchor_message_id") }.ifEmpty { null }
         val after = query.optString("after").ifEmpty { null }
         // A cursor this window does not hold means the page cannot be served honestly from here.
@@ -134,17 +155,15 @@ internal class RendererActions(private val source: RendererSource) {
         return success(RendererProjection.page(items, limit, before, after, snapshot.hasEarlier))
     }
 
-    private suspend fun latest(query: JSONObject): ProbeResult {
-        val snapshot = source.snapshot()
-        if (snapshot.session == null) return notFound()
-        val items = RendererProjection.messages(snapshot.events, snapshot.epoch, snapshot.turnId)
+    private suspend fun latest(query: JSONObject, conversationId: String): ProbeResult {
+        val snapshot = openFor(conversationId) ?: return notFound()
+        val items = RendererProjection.messages(snapshot.events, conversationId, snapshot.epoch, snapshot.turnId)
         return success(RendererProjection.latest(items, query.optString("type").ifEmpty { null }))
     }
 
-    private suspend fun send(body: JSONObject): ProbeResult {
-        val snapshot = source.snapshot()
-        if (snapshot.session == null) return notFound()
-        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_READY", "会话尚未打开或不处于可发送状态。")
+    private suspend fun send(body: JSONObject, conversationId: String): ProbeResult {
+        val snapshot = openFor(conversationId) ?: return notFound()
+        if (!snapshot.active || snapshot.session == null) return fail(409, "CONVERSATION_NOT_READY", "会话尚未打开或不处于可发送状态。")
         if (snapshot.turnId != null) return fail(409, "TURN_BUSY", "上一个回合尚未结束。")
         if (snapshot.pending() != null) return fail(409, "APPROVAL_PENDING", "有审批请求待回答，暂不能发送。")
         if ((body.optJSONArray("files")?.length() ?: 0) > 0) return fail(422, "ATTACHMENT_UNSUPPORTED", "此版本只发送文本。")
@@ -154,8 +173,12 @@ internal class RendererActions(private val source: RendererSource) {
         if (content !is String || content.isBlank() || content.length > ProbeLimits.CONTENT_UNITS || content.toByteArray(Charsets.UTF_8).size > ProbeLimits.CONTENT_BYTES) {
             return fail(422, "INVALID_CONTENT", "消息内容为空或超出长度限制。")
         }
-        val messageId = source.send(content) ?: return fail(409, "TURN_BUSY", "会话正在处理其它操作，请稍后重试。")
+        val prepared = snapshot.session
+        val messageId = source.send(content, prepared) ?: return fail(409, "TURN_BUSY", "会话正在处理其它操作，请稍后重试。")
         val accepted = source.snapshot()
+        // The message was accepted for the conversation it was written for; if that conversation was replaced
+        // while it was in flight, no runtime of the replacement may be reported as its result.
+        if (!namesOpen(accepted, conversationId)) return fail(409, "CONVERSATION_SWITCHED", "会话已切换，该消息的结果不再属于当前会话。")
         return ProbeResult(
             202,
             json(
@@ -169,23 +192,22 @@ internal class RendererActions(private val source: RendererSource) {
         )
     }
 
-    private suspend fun cancel(body: JSONObject): ProbeResult {
-        val snapshot = source.snapshot()
-        if (snapshot.session == null) return notFound()
-        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_READY", "会话尚未打开。")
+    private suspend fun cancel(body: JSONObject, conversationId: String): ProbeResult {
+        val snapshot = openFor(conversationId) ?: return notFound()
+        if (!snapshot.active || snapshot.session == null) return fail(409, "CONVERSATION_NOT_READY", "会话尚未打开。")
         val turn = snapshot.turnId ?: return fail(409, "TURN_NOT_ACTIVE", "当前没有正在进行的回合。")
         val requested = body.optString("turn_id")
         if (requested.isNotEmpty() && requested != turn) return fail(409, "STALE_TURN", "该回合已不是当前回合。")
-        source.cancel()
+        source.cancel(snapshot.session)
         val cancelled = source.snapshot()
+        if (!namesOpen(cancelled, conversationId)) return fail(409, "CONVERSATION_SWITCHED", "会话已切换，取消结果不再属于当前会话。")
         return success(json("runtime" to RendererProjection.runtime(cancelled, cancelled.pending()), "turn_id" to turn))
     }
 
-    private suspend fun approvals(): ProbeResult {
-        val snapshot = source.snapshot()
-        if (snapshot.session == null) return notFound()
+    private suspend fun approvals(conversationId: String): ProbeResult {
+        val snapshot = openFor(conversationId) ?: return notFound()
         val pending = JSONArray()
-        snapshot.pending()?.let { pending.put(RendererProjection.permission(it, snapshot.epoch, snapshot.turnId)) }
+        snapshot.pending()?.let { pending.put(RendererProjection.permission(it, conversationId, snapshot.epoch, snapshot.turnId)) }
         return success(pending)
     }
 
@@ -194,8 +216,8 @@ internal class RendererActions(private val source: RendererSource) {
      * the selected session, so a historical or already-answered card can never become actionable here.
      */
     private suspend fun review(params: JSONObject, body: JSONObject): ProbeResult {
-        val snapshot = source.snapshot()
-        if (snapshot.session == null) return notFound()
+        val conversationId = params.optString("conversationId")
+        val snapshot = openFor(conversationId) ?: return notFound()
         val event = snapshot.pending()
         val reference = params.optString("requestRef")
         if (reference.isEmpty() || event == null || event.id != reference || !snapshot.active) {
@@ -212,36 +234,38 @@ internal class RendererActions(private val source: RendererSource) {
     }
 
     /**
-     * The product opens a conversation, never the renderer: this answers only for the session that is already
-     * open, so no second writer is ever attached to the same ACP session.
+     * The renderer's `runtime.ensure`: it makes the requested conversation the open one through the product's
+     * single exclusive switch entry, then reports that conversation's own runtime. A conversation that stays
+     * closed or failed is answered with the real reason instead of an idle-looking success.
      */
-    private suspend fun ensure(): ProbeResult {
-        val snapshot = source.snapshot()
-        if (snapshot.session == null) return notFound()
-        if (!snapshot.active && !snapshot.loading) {
-            return fail(409, "CONVERSATION_NOT_OPEN", "该会话未打开；请在产品对话页打开后重试。")
+    private suspend fun ensure(params: JSONObject): ProbeResult {
+        val requested = params.optString("conversationId")
+        return when (val selection = select(requested, reopen = true)) {
+            is Selection.Refused -> selection.result
+
+            is Selection.Open -> success(
+                json(
+                    "recovered" to false,
+                    "config_options" to catalogue(selection.snapshot),
+                    "runtime" to RendererProjection.runtime(selection.snapshot, selection.snapshot.pending()),
+                ),
+            )
         }
-        return success(
-            json(
-                "recovered" to false,
-                "config_options" to catalogue(snapshot),
-                "runtime" to RendererProjection.runtime(snapshot, snapshot.pending()),
-            ),
-        )
     }
 
     private suspend fun snapshot(): ProbeResult {
         val snapshot = source.snapshot()
-        if (snapshot.session == null) return notFound()
+        val session = snapshot.session ?: return notFound()
+        val conversationId = RendererConversationId.of(session)
         val pending = JSONArray()
-        snapshot.pending()?.let { pending.put(RendererProjection.permission(it, snapshot.epoch, snapshot.turnId)) }
+        snapshot.pending()?.let { pending.put(RendererProjection.permission(it, conversationId, snapshot.epoch, snapshot.turnId)) }
         return ProbeResult(
             body = json(
                 "epoch" to snapshot.epoch,
                 "seq" to snapshot.seq,
-                "conversation_id" to RENDERER_CONVERSATION,
+                "conversation_id" to conversationId,
                 "runtime" to RendererProjection.runtime(snapshot, snapshot.pending()),
-                "messages" to JSONArray(RendererProjection.messages(snapshot.events, snapshot.epoch, snapshot.turnId)),
+                "messages" to JSONArray(RendererProjection.messages(snapshot.events, conversationId, snapshot.epoch, snapshot.turnId)),
                 "pending" to pending,
                 "config_options" to catalogue(snapshot),
                 // Background execution is not implemented on this host and must not look verified.
@@ -265,13 +289,19 @@ internal class RendererActions(private val source: RendererSource) {
      * types this host cannot draw, and it is only served while that same conversation is open.
      */
     private suspend fun readConfig(params: JSONObject): ProbeResult {
-        if (params.optString("conversationId") != RENDERER_CONVERSATION) return notFound()
-        val snapshot = source.snapshot()
-        if (snapshot.session == null) return notFound()
-        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_OPEN", "该会话尚未就绪；请在产品对话页打开后重试。")
+        val conversationId = params.optString("conversationId")
+        val snapshot = openFor(conversationId) ?: return notFound()
+        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_OPEN", "该会话尚未就绪；请重试。")
         return when (val access = source.config()) {
-            is AgentConfigAccess.Available -> success(json("config_options" to RendererProjection.configOptions(access.config)))
+            is AgentConfigAccess.Available -> {
+                if (!namesOpen(source.snapshot(), conversationId)) {
+                    return fail(409, "CONVERSATION_SWITCHED", "会话已切换，配置不再属于当前会话。")
+                }
+                success(json("config_options" to RendererProjection.configOptions(access.config)))
+            }
+
             AgentConfigAccess.Unsupported -> fail(501, "CONFIG_UNSUPPORTED", "该会话的 Agent 没有可读的模型或配置选项。")
+
             else -> fail(409, "CONVERSATION_NOT_OPEN", "该会话在读取期间已关闭。")
         }
     }
@@ -282,13 +312,12 @@ internal class RendererActions(private val source: RendererSource) {
      * a snapshot is answered as `command_ack` rather than as applied.
      */
     private suspend fun setConfig(params: JSONObject, body: JSONObject): ProbeResult {
-        if (params.optString("conversationId") != RENDERER_CONVERSATION) return notFound()
+        val conversationId = params.optString("conversationId")
         val optionId = params.optString("optionId")
         val value = body.opt("value")
         if (value !is String || value.isEmpty()) return fail(422, "INVALID_CONFIG", "配置值必须是非空字符串。")
-        val snapshot = source.snapshot()
-        if (snapshot.session == null) return notFound()
-        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_READY", "会话尚未打开，暂时不能切换配置。")
+        val snapshot = openFor(conversationId) ?: return notFound()
+        if (!snapshot.active || snapshot.session == null) return fail(409, "CONVERSATION_NOT_READY", "会话尚未打开，暂时不能切换配置。")
         val published = when (val access = source.config()) {
             is AgentConfigAccess.Available -> RendererProjection.configOptions(access.config)
             AgentConfigAccess.Unsupported -> return fail(501, "CONFIG_UNSUPPORTED", "该会话的 Agent 没有可切换的模型或配置选项。")
@@ -300,7 +329,7 @@ internal class RendererActions(private val source: RendererSource) {
             return fail(422, "INVALID_CONFIG", "该配置选项不接受这个值。")
         }
         val result = try {
-            source.setConfigOption(optionId, value)
+            source.setConfigOption(optionId, value, snapshot.session)
         } catch (busy: AgentConfigBusyException) {
             // A busy Agent refused the write; retrying is the only honest answer, not a generic failure.
             return fail(409, "CONFIG_BUSY", "Agent 正在处理其它更新，配置尚未生效，请稍后重试。")
@@ -334,9 +363,8 @@ internal class RendererActions(private val source: RendererSource) {
      * The context usage the Agent itself reported in the loaded window, and nothing else. `data` stays null until
      * an agent sends a usage report, because a token count invented on this host would be a lie about the session.
      */
-    private suspend fun usage(): ProbeResult {
-        val snapshot = source.snapshot()
-        if (snapshot.session == null) return notFound()
+    private suspend fun usage(conversationId: String): ProbeResult {
+        val snapshot = openFor(conversationId) ?: return notFound()
         val reported = snapshot.events.lastOrNull { it.type == "usage" }
         return success(RendererProjection.usage(reported))
     }
@@ -346,11 +374,11 @@ internal class RendererActions(private val source: RendererSource) {
      * empty draft for a conversation this host has not opened would wipe the text the user really typed.
      */
     private suspend fun loadDraft(params: JSONObject): ProbeResult {
-        if (params.optString("conversationId") != RENDERER_CONVERSATION) return notFound()
-        val snapshot = source.snapshot()
+        val conversationId = params.optString("conversationId")
+        val snapshot = openFor(conversationId) ?: return notFound()
         val session = snapshot.session ?: return notFound()
-        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_OPEN", "该会话尚未打开；请在产品对话页打开后重试。")
-        return success(RendererProjection.draft(source.draft(RendererProjection.draftKey(session)) ?: ""))
+        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_OPEN", "该会话尚未打开；请重试。")
+        return success(RendererProjection.draft(source.draft(RendererProjection.draftKey(session)) ?: "", conversationId))
     }
 
     /**
@@ -359,10 +387,10 @@ internal class RendererActions(private val source: RendererSource) {
      * file it never accepted.
      */
     private suspend fun saveDraft(params: JSONObject, body: JSONObject): ProbeResult {
-        if (params.optString("conversationId") != RENDERER_CONVERSATION) return notFound()
-        val snapshot = source.snapshot()
+        val conversationId = params.optString("conversationId")
+        val snapshot = openFor(conversationId) ?: return notFound()
         val session = snapshot.session ?: return notFound()
-        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_OPEN", "该会话尚未打开；请在产品对话页打开后重试。")
+        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_OPEN", "该会话尚未打开；请重试。")
         if ((body.optJSONArray("files")?.length() ?: 0) > 0) return fail(422, "ATTACHMENT_UNSUPPORTED", "此版本只保存文本草稿。")
         val text = body.opt("text")
         if (text !is String) return fail(422, "DRAFT_INVALID", "草稿内容必须是字符串。")
@@ -370,7 +398,7 @@ internal class RendererActions(private val source: RendererSource) {
             return fail(413, "DRAFT_TOO_LARGE", "草稿超出长度限制，请缩短后再保存。")
         }
         source.saveDraft(RendererProjection.draftKey(session), text)
-        return success(RendererProjection.draft(text).put("saved", true))
+        return success(RendererProjection.draft(text, conversationId).put("saved", true))
     }
 
     private suspend fun readProject(params: JSONObject): ProbeResult {
@@ -378,6 +406,71 @@ internal class RendererActions(private val source: RendererSource) {
         val id = params.optString("projectId")
         val host = source.snapshot().hosts.firstOrNull { RendererProjection.projectId(it.id) == id }
         return if (host == null) fail(404, "PROJECT_NOT_FOUND", "没有这个项目。") else success(RendererProjection.project(host))
+    }
+
+    /** The snapshot of the conversation [conversationId] names, or null when a different one is open. */
+    private suspend fun openFor(conversationId: String): RendererSnapshot? = source.snapshot().takeIf { namesOpen(it, conversationId) }
+
+    /**
+     * True when [conversationId] still names the open conversation. The bridge's legacy id answers for whatever
+     * conversation is open, which keeps the frozen renderer bootstrap working.
+     */
+    private fun namesOpen(snapshot: RendererSnapshot, conversationId: String): Boolean {
+        val open = snapshot.session ?: return false
+        return conversationId == RENDERER_CONVERSATION || conversationId == RendererConversationId.of(open)
+    }
+
+    /** The indexed session an id names; an id outside the index never selects anything. */
+    private fun target(snapshot: RendererSnapshot, conversationId: String): AgentSession? {
+        if (conversationId == RENDERER_CONVERSATION) return snapshot.session
+        val parsed = RendererConversationId.parse(conversationId) ?: return null
+        return (snapshot.indexedSessions + listOfNotNull(snapshot.session)).firstOrNull { it.sameConversation(parsed) }
+    }
+
+    /**
+     * Makes the requested conversation the open one through [RendererSource.open], which is the product's
+     * repository switch. The answer is only an open conversation when that exact conversation is the ready one
+     * afterwards; a failed open reports the repository's own reason, and a newer switch that won the race is a
+     * refusal rather than a success for the replaced conversation.
+     */
+    private suspend fun select(conversationId: String, reopen: Boolean): Selection {
+        var snapshot = source.snapshot()
+        val target = target(snapshot, conversationId)
+            ?: return Selection.Refused(fail(404, "CONVERSATION_NOT_FOUND", "索引中没有这个会话。"))
+        val current = snapshot.session
+        if (current != null && current.sameConversation(target)) {
+            if (snapshot.active || snapshot.loading) return Selection.Open(snapshot, current)
+            if (!reopen) return Selection.Refused(fail(409, "CONVERSATION_NOT_OPEN", "该会话尚未打开，请重试。"))
+        }
+        val failure = source.open(target)
+        snapshot = source.snapshot()
+        val opened = snapshot.session
+        if (failure != null || opened == null || !opened.sameConversation(target) || !snapshot.active) {
+            return Selection.Refused(fail(409, "CONVERSATION_OPEN_FAILED", failure ?: "该会话未能保持打开，已被其它会话切换替代。"))
+        }
+        return Selection.Open(snapshot, opened)
+    }
+
+    /** The open snapshot for one row; every other row gets its row facts but none of the open conversation's state. */
+    private fun view(snapshot: RendererSnapshot, row: AgentSession): RendererSnapshot {
+        val current = snapshot.session
+        val same = current != null && current.sameConversation(row)
+        if (same && snapshot.active) return snapshot
+        return snapshot.copy(
+            session = row,
+            indexed = row,
+            events = emptyList(),
+            active = false,
+            loading = same && snapshot.loading,
+            turnId = null,
+            cancelling = false,
+            hasEarlier = false,
+        )
+    }
+
+    private sealed interface Selection {
+        data class Open(val snapshot: RendererSnapshot, val session: AgentSession) : Selection
+        data class Refused(val result: ProbeResult) : Selection
     }
 
     private fun unsupported(action: String): ProbeResult = when (action) {

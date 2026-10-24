@@ -473,12 +473,14 @@ class AgentRepository @Inject constructor(
         }
     }
 
-    suspend fun send(text: String) = operation {
+    suspend fun send(text: String, expected: AgentSession? = null) = operation {
         require(text.isNotBlank())
         val job = currentCoroutineContext()[Job]
         val (current, token) = synchronized(stateLock) {
             val current = handle ?: return@operation
             if (mutableBusy.value || mutableConversationState.value != AgentConversationState.Ready) return@operation
+            // A caller that named its conversation never writes into whichever conversation replaced it.
+            if (expected != null && !matchesActive(expected)) return@operation
             try {
                 val appended = history.append(AgentEvent(type = "user", text = text, id = "local-${java.util.UUID.randomUUID()}"))
                 mutableEvents.value = if (history.hasLatest) history.loadLatest() else appended
@@ -508,7 +510,18 @@ class AgentRepository @Inject constructor(
         }
     }
 
-    suspend fun cancel() = withContext(dispatchers.io) {
+    suspend fun cancel(expected: AgentSession? = null) = withContext(dispatchers.io) {
+        if (expected == null) {
+            cancelOpen(null)
+        } else {
+            // The same switch lock an open holds, so a cancellation written for one conversation can never tear
+            // down the conversation that replaced it while that replacement was still opening.
+            switchMutex.withLock { cancelOpen(expected) }
+        }
+    }
+
+    private suspend fun cancelOpen(expected: AgentSession?) {
+        if (expected != null && !matchesActive(expected)) return
         openingJob?.cancel()
         historyReadJob?.cancel()
         promptJob?.cancel()
@@ -518,7 +531,7 @@ class AgentRepository @Inject constructor(
                 conversationScope?.cancel()
                 mutableConversationState.value = AgentConversationState.Closed
                 mutableActive.value = null
-                return@withContext
+                return
             }
             promptJob?.cancel()
             handle to generation
@@ -562,9 +575,10 @@ class AgentRepository @Inject constructor(
      * a change it accepted without reporting a snapshot is [AgentConfigAccess.Unconfirmed] and never a success.
      * A result is only handed back for the conversation it was made for, so a session switch cannot inherit it.
      */
-    suspend fun setConfigOption(optionId: String, value: String): AgentConfigAccess = operation {
+    suspend fun setConfigOption(optionId: String, value: String, expected: AgentSession? = null): AgentConfigAccess = operation {
         require(optionId.isNotBlank())
         val (open, token) = synchronized(stateLock) {
+            if (expected != null && !matchesActive(expected)) return@operation AgentConfigAccess.Closed
             val current = handle ?: return@operation AgentConfigAccess.Closed
             current to generation
         }
@@ -602,6 +616,12 @@ class AgentRepository @Inject constructor(
     }
 
     private fun stillOpen(open: AgentSessionHandle, token: Long): Boolean = synchronized(stateLock) { generation == token && handle === open }
+
+    /** True while [expected] is exactly the conversation the repository has open and active. */
+    private fun matchesActive(expected: AgentSession): Boolean {
+        val current = mutableActive.value ?: return false
+        return current.hostId == expected.hostId && current.agent == expected.agent && current.sessionId == expected.sessionId
+    }
 
     suspend fun respondPermission(expectedSession: AgentSession, expectedEvent: AgentEvent, id: String, option: String) = respondInteraction(expectedSession, expectedEvent, id, "permission") { current -> current.respondPermission(id, option) }
 

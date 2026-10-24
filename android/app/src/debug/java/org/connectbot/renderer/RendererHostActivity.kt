@@ -50,8 +50,9 @@ import javax.inject.Inject
 
 /**
  * Debug-only host for the packaged renderer. It reuses the probe's bridge, limits and asset loader, but answers
- * every action from the product's own repositories instead of synthetic data: the conversation it serves is the
- * session the Compose chat already has open, and actions the product cannot serve fail with a stable code.
+ * every action from the product's own repositories instead of synthetic data: the conversation list is the
+ * product's session index, selecting a row opens it through the same repository switch the Compose chat uses,
+ * and actions the product cannot serve fail with a stable code.
  */
 @AndroidEntryPoint
 class RendererHostActivity : ComponentActivity() {
@@ -64,9 +65,10 @@ class RendererHostActivity : ComponentActivity() {
 
     private val actions by lazy { RendererActions(source) }
 
-    // Product projects are saved hosts (`host-<id>`), so the bridge must not pin the probe's synthetic project id.
+    // Product projects are saved hosts (`host-<id>`) and conversations are the product's derived session ids,
+    // so the bridge must not pin either of the probe's synthetic ids.
     @Volatile
-    private var bridge = ProbeBridge(projectId = null)
+    private var bridge = productBridge()
 
     @Volatile
     private var subscribed = false
@@ -129,7 +131,7 @@ class RendererHostActivity : ComponentActivity() {
                 if (view !== web || closed) return
                 // A fresh bridge per document, as the probe does: in-flight work for the previous document can then
                 // never answer the new one, and the new page always gets a clean handshake.
-                bridge = ProbeBridge(projectId = null)
+                bridge = productBridge()
                 reply = null
                 subscribed = false
                 if (!ProbeBridge.isEntry(url)) {
@@ -168,7 +170,21 @@ class RendererHostActivity : ComponentActivity() {
             }
         }
         container.addView(view, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-        view.loadUrl(ProbeBridge.ENTRY)
+        view.loadUrl(entryUrl())
+    }
+
+    private fun productBridge(): ProbeBridge = ProbeBridge(
+        projectId = null,
+        acceptsConversation = { RendererConversationId.parse(it) != null },
+    )
+
+    /**
+     * The renderer's own bootstrap opens `/conversation/conv-probe-1` when the document has no route, so the
+     * entry carries the conversation the product really has open; with none, it falls back to that legacy path.
+     */
+    private fun entryUrl(): String {
+        val id = source.conversationId() ?: return ProbeBridge.ENTRY
+        return "${ProbeBridge.ENTRY}#/conversation/$id"
     }
 
     private fun handle(action: String, payload: JSONObject): ProbeResult = runBlocking {
@@ -176,7 +192,7 @@ class RendererHostActivity : ComponentActivity() {
             "events.subscribe" -> {
                 subscribed = true
                 source.announce()
-                ProbeResult(body = json("subscribed" to true, "conversation_id" to RENDERER_CONVERSATION))
+                ProbeResult(body = json("subscribed" to true, "conversation_id" to (source.conversationId() ?: RENDERER_CONVERSATION)))
             }
 
             "events.unsubscribe" -> {

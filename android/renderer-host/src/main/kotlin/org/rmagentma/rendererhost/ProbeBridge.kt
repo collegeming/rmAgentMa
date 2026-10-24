@@ -23,9 +23,13 @@ import java.util.UUID
 
 /**
  * [projectId] pins the single project a synthetic host serves; the product host passes null because its
- * projects are saved hosts and its action layer resolves or refuses each id.
+ * projects are saved hosts and its action layer resolves or refuses each id. [acceptsConversation] lets the
+ * product host serve its own derived conversation ids while the probe keeps answering only its fixed one.
  */
-class ProbeBridge(private val projectId: String? = PROJECT) {
+class ProbeBridge(
+    private val projectId: String? = PROJECT,
+    private val acceptsConversation: (String) -> Boolean = { false },
+) {
     @Volatile
     var documentId: String = ""
         private set
@@ -118,7 +122,13 @@ class ProbeBridge(private val projectId: String? = PROJECT) {
             requireProbe(params.keys().asSequence().all { it in allowedParams })
             if (action in CONVERSATION_ACTIONS) {
                 val conversation = params.opt("conversationId")
-                requireProbe(conversation == CONVERSATION || (action in DEFAULT_CONVERSATION_ACTIONS && conversation == null), 404, "CONVERSATION_NOT_FOUND")
+                requireProbe(
+                    conversation == CONVERSATION ||
+                        (conversation is String && acceptsConversation(conversation)) ||
+                        (action in DEFAULT_CONVERSATION_ACTIONS && conversation == null),
+                    404,
+                    "CONVERSATION_NOT_FOUND",
+                )
             }
             if (action == "project.read" && projectId != null) requireProbe(params.opt("projectId") == projectId, 404, "PROJECT_NOT_FOUND")
             val sequence = requestSequence(requestId)

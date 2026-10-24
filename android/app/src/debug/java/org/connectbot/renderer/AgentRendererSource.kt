@@ -36,6 +36,7 @@ import org.connectbot.util.ThemeMode
 import org.json.JSONArray
 import org.json.JSONObject
 import org.rmagentma.core.AgentEvent
+import org.rmagentma.core.AgentSession
 import org.rmagentma.rendererhost.json
 import java.util.UUID
 import javax.inject.Inject
@@ -43,8 +44,8 @@ import javax.inject.Singleton
 
 /**
  * Binds the renderer host to the product's own agent data. It reads and drives the same singletons the Compose
- * chat uses, never opens a conversation on its own, and publishes the loaded event window as the renderer
- * stream so both surfaces show one conversation with one writer.
+ * chat uses and opens a conversation only through the repository's exclusive switch, so both surfaces show one
+ * conversation with one writer.
  */
 @Singleton
 class AgentRendererSource @Inject constructor(
@@ -95,30 +96,21 @@ class AgentRendererSource @Inject constructor(
 
     override suspend fun snapshot(): RendererSnapshot {
         val session = repository.activeSession.value ?: repository.selectedSession.value
-        synchronized(lock) {
-            val current = session?.let { "${it.hostId}:${it.agent.wireName}:${it.sessionId}:${it.cwd}" }.orEmpty()
-            if (current != identity) {
-                identity = current
-                epoch = UUID.randomUUID().toString()
-                sequence = 0
-                published.clear()
-                announcedPermissions.clear()
-                lastRuntime = ""
-            }
-        }
+        syncIdentity()
         val allHosts = try {
             hosts.getSshHosts()
         } catch (_: Exception) {
             emptyList()
         }
+        val indexedSessions = try {
+            index.read()
+        } catch (_: Exception) {
+            // An unreadable index holds no rows; the session's own fields still identify the conversation.
+            emptyList()
+        }
         val indexed = session?.let { opened ->
-            try {
-                index.read().firstOrNull {
-                    it.hostId == opened.hostId && it.agent == opened.agent && it.sessionId == opened.sessionId
-                }
-            } catch (_: Exception) {
-                // An unreadable index holds no metadata; the session's own fields still identify the conversation.
-                null
+            indexedSessions.firstOrNull {
+                it.hostId == opened.hostId && it.agent == opened.agent && it.sessionId == opened.sessionId
             }
         }
         return RendererSnapshot(
@@ -136,15 +128,30 @@ class AgentRendererSource @Inject constructor(
             epoch = synchronized(lock) { epoch },
             seq = synchronized(lock) { sequence },
             theme = theme(),
+            indexedSessions = indexedSessions,
         )
     }
 
-    override suspend fun send(text: String): String? {
+    /** The conversation the renderer should load first: whatever the product has open or selected right now. */
+    fun conversationId(): String? = currentSession()?.let(RendererConversationId::of)
+
+    override suspend fun open(session: AgentSession): String? {
+        val reported = repository.errors.value.size
+        // The repository serializes this behind its own switch lock and generation, exactly as the Compose chat
+        // does; it reports a failed open through its state instead of throwing, so the state decides the answer.
+        repository.open(session)
+        val current = repository.activeSession.value
+        if (current != null && current.sameConversation(session) && repository.conversationState.value == AgentConversationState.Ready) return null
+        return repository.errors.value.drop(reported).lastOrNull()?.takeIf { it.isNotBlank() }
+            ?: "会话未能进入就绪状态（可能已被后续的会话切换替代）。"
+    }
+
+    override suspend fun send(text: String, expected: AgentSession): String? {
         val previous = repository.events.value.lastOrNull { it.type == "user" }?.historyKey ?: -1L
         turn = UUID.randomUUID().toString()
         cancelling = false
         try {
-            repository.send(text)
+            repository.send(text, expected)
         } catch (error: Exception) {
             turn = null
             throw error
@@ -159,11 +166,11 @@ class AgentRendererSource @Inject constructor(
         return RendererProjection.messageId(user.historyKey)
     }
 
-    override suspend fun cancel() {
+    override suspend fun cancel(expected: AgentSession) {
         cancelling = true
         val cancelled = turn
         try {
-            repository.cancel()
+            repository.cancel(expected)
         } finally {
             cancelling = false
             turn = null
@@ -187,7 +194,7 @@ class AgentRendererSource @Inject constructor(
     /** The renderer reads and writes configuration through the repository singleton, never a channel of its own. */
     override suspend fun config(): AgentConfigAccess = repository.config()
 
-    override suspend fun setConfigOption(optionId: String, value: String): AgentConfigAccess = repository.setConfigOption(optionId, value)
+    override suspend fun setConfigOption(optionId: String, value: String, expected: AgentSession): AgentConfigAccess = repository.setConfigOption(optionId, value, expected)
 
     /** Drafts are local user content: they come and go through the store alone, never through the ACP channel. */
     override suspend fun draft(key: String): String? = drafts.read(key)
@@ -218,12 +225,13 @@ class AgentRendererSource @Inject constructor(
      * frame is the renderer's own `acp_config_option` message; an empty catalogue is the truth of having none.
      */
     private suspend fun publishConfigOptions() {
+        val conversation = syncIdentity() ?: return
         val access = repository.config()
         val catalog = (access as? AgentConfigAccess.Available)?.let { RendererProjection.configOptions(it.config) } ?: JSONArray()
         publish(
             "message.stream",
             json(
-                "conversation_id" to RENDERER_CONVERSATION,
+                "conversation_id" to conversation,
                 "type" to "acp_config_option",
                 "data" to json("config_options" to catalog),
             ),
@@ -237,6 +245,7 @@ class AgentRendererSource @Inject constructor(
     }
 
     private fun publishEvents(events: List<AgentEvent>) {
+        val conversation = syncIdentity() ?: return
         val currentTurn = turn
         val currentEpoch = synchronized(lock) { epoch }
         for (event in events) {
@@ -250,7 +259,7 @@ class AgentRendererSource @Inject constructor(
                 }
             }
             if (!fresh) continue
-            val frame = RendererProjection.message(event, currentEpoch, currentTurn) ?: continue
+            val frame = RendererProjection.message(event, conversation, currentEpoch, currentTurn) ?: continue
             publish("message.stream", frame)
         }
         // A permission card that left the window was answered or invalidated; the renderer must drop it.
@@ -260,7 +269,7 @@ class AgentRendererSource @Inject constructor(
             synchronized(lock) { announcedPermissions.remove(reference) }
             publish(
                 "confirmation.remove",
-                json("conversation_id" to RENDERER_CONVERSATION, "id" to reference, "request_id" to reference, "call_id" to reference),
+                json("conversation_id" to conversation, "id" to reference, "request_id" to reference, "call_id" to reference),
             )
         }
         synchronized(lock) {
@@ -279,33 +288,36 @@ class AgentRendererSource @Inject constructor(
     }
 
     private fun publishRuntime() {
+        val conversation = syncIdentity() ?: return
         val events = repository.events.value
         val runtime = RendererProjection.runtime(state(events), events.lastOrNull { it.type == "permission" })
         val serialized = runtime.toString()
         if (serialized == synchronized(lock) { lastRuntime }) return
         synchronized(lock) { lastRuntime = serialized }
-        publish("runtime.updated", json("conversation_id" to RENDERER_CONVERSATION, "runtime" to runtime))
+        publish("runtime.updated", json("conversation_id" to conversation, "runtime" to runtime))
     }
 
     private fun publishRuntimeSnapshot() {
+        val conversation = syncIdentity() ?: return
         val events = repository.events.value
         val runtime = RendererProjection.runtime(state(events), events.lastOrNull { it.type == "permission" })
-        publish("runtime.snapshot", json("conversation_id" to RENDERER_CONVERSATION, "runtime" to runtime))
+        publish("runtime.snapshot", json("conversation_id" to conversation, "runtime" to runtime))
     }
 
     private fun publishTurnCompleted(turnId: String, outcome: String, state: String) {
+        val conversation = syncIdentity() ?: return
         val events = repository.events.value
         val runtime = RendererProjection.runtime(state(events), events.lastOrNull { it.type == "permission" })
         publish(
             "turn.completed",
             json(
-                "conversation_id" to RENDERER_CONVERSATION,
-                "session_id" to RENDERER_CONVERSATION,
+                "conversation_id" to conversation,
+                "session_id" to conversation,
                 "turn_id" to turnId,
                 "status" to "finished",
                 "outcome" to outcome,
                 "state" to state,
-                "workspace" to (repository.selectedSession.value?.cwd ?: ""),
+                "workspace" to (currentSession()?.cwd ?: ""),
                 "runtime" to runtime,
             ),
         )
@@ -313,7 +325,7 @@ class AgentRendererSource @Inject constructor(
     }
 
     private fun state(events: List<AgentEvent>): RendererSnapshot = RendererSnapshot(
-        session = repository.activeSession.value ?: repository.selectedSession.value,
+        session = currentSession(),
         host = null,
         indexed = null,
         events = events,
@@ -328,6 +340,29 @@ class AgentRendererSource @Inject constructor(
         seq = synchronized(lock) { sequence },
         theme = theme(),
     )
+
+    private fun currentSession(): AgentSession? = repository.activeSession.value ?: repository.selectedSession.value
+
+    /**
+     * A new conversation starts a new runtime generation and drops every frame fact of the previous one: a
+     * turn accepted for the session that was open can never be reported as the replacement's running turn, and
+     * replayed history of the replacement is never mistaken for an already published row.
+     */
+    private fun syncIdentity(): String? = synchronized(lock) {
+        val session = currentSession()
+        val current = session?.let { "${it.hostId}:${it.agent.wireName}:${it.sessionId}:${it.cwd}" }.orEmpty()
+        if (current != identity) {
+            identity = current
+            epoch = UUID.randomUUID().toString()
+            sequence = 0
+            published.clear()
+            announcedPermissions.clear()
+            lastRuntime = ""
+            turn = null
+            cancelling = false
+        }
+        session?.let(RendererConversationId::of)
+    }
 
     private fun fingerprint(event: AgentEvent): String = listOf(event.type, event.text, event.status, event.raw?.toString().orEmpty()).joinToString("|")
 

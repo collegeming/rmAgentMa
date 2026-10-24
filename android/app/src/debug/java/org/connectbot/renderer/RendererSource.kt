@@ -60,6 +60,8 @@ data class RendererSnapshot(
     val seq: Long,
     /** Theme mode of the product as the renderer's own theme id. */
     val theme: String,
+    /** Every indexed session of a saved host, as the product's session index holds it now. */
+    val indexedSessions: List<AgentSession> = emptyList(),
 ) {
     fun pending(): AgentEvent? = events.lastOrNull { it.type == "permission" }
 }
@@ -68,11 +70,18 @@ data class RendererSnapshot(
 interface RendererSource {
     suspend fun snapshot(): RendererSnapshot
 
-    /** Sends one text-only prompt through the already open conversation; null when the product was busy. */
-    suspend fun send(text: String): String?
+    /**
+     * Opens [session] through the repository's exclusive conversation switch — the same entry the Compose chat
+     * uses, so the renderer can never attach a second writer. Answers null once it is the ready conversation,
+     * or the reason it did not become one.
+     */
+    suspend fun open(session: AgentSession): String?
 
-    /** Cancels the running turn of the open conversation. */
-    suspend fun cancel()
+    /** Sends one text-only prompt through [expected]'s conversation; null when it was replaced or busy. */
+    suspend fun send(text: String, expected: AgentSession): String?
+
+    /** Cancels the running turn of [expected]'s conversation, never of whichever conversation replaced it. */
+    suspend fun cancel(expected: AgentSession)
 
     /** Answers the live permission request behind [event]; false when it was already resolved. */
     suspend fun respondPermission(event: AgentEvent, option: String): Boolean
@@ -84,7 +93,7 @@ interface RendererSource {
     suspend fun config(): AgentConfigAccess
 
     /** Sets one configuration option through the same repository the Compose chat uses; throws when rejected. */
-    suspend fun setConfigOption(optionId: String, value: String): AgentConfigAccess
+    suspend fun setConfigOption(optionId: String, value: String, expected: AgentSession): AgentConfigAccess
 
     /** The stored draft of the conversation behind [key], or null when nothing was typed for it yet. */
     suspend fun draft(key: String): String?

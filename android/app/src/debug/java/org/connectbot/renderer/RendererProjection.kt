@@ -70,14 +70,14 @@ internal object RendererProjection {
         )
     }
 
-    /** One conversation: the open product session behind the bridge's fixed conversation id. */
-    fun conversation(snapshot: RendererSnapshot, pending: AgentEvent?, runtime: JSONObject): JSONObject {
+    /** One conversation: a derived product session id and the row fields the renderer reads. */
+    fun conversation(snapshot: RendererSnapshot, conversationId: String, pending: AgentEvent?, runtime: JSONObject): JSONObject {
         val session = snapshot.session ?: throw IllegalStateException("Conversation projection needs a session")
         val row = snapshot.indexed
         val name = listOf(row?.title, session.title, session.preview, session.sessionId, session.cwd)
             .firstOrNull { !it.isNullOrBlank() }
         return json(
-            "id" to RENDERER_CONVERSATION,
+            "id" to conversationId,
             "name" to name,
             "type" to "acp",
             "project_id" to projectId(session.hostId),
@@ -113,7 +113,7 @@ internal object RendererProjection {
      * A conversation's draft in the renderer's own shape. The file list is empty because this host stores none:
      * it hands out no upload reference, so an attachment in a draft could only be one it never issued.
      */
-    fun draft(text: String): JSONObject = json("text" to text, "files" to JSONArray(), "conversation_id" to RENDERER_CONVERSATION)
+    fun draft(text: String, conversationId: String): JSONObject = json("text" to text, "files" to JSONArray(), "conversation_id" to conversationId)
 
     /** A saved host is one project: the product has no server-side project registry. */
     fun project(host: Host): JSONObject = json(
@@ -282,16 +282,16 @@ internal object RendererProjection {
      * Messages of the loaded window, in window order. A row is skipped only when the renderer has nothing to
      * draw for it, so an update it cannot show is never dressed up as chat history.
      */
-    fun messages(events: List<AgentEvent>, epoch: String, turnId: String?): List<JSONObject> = events.mapNotNull { message(it, epoch, turnId) }
+    fun messages(events: List<AgentEvent>, conversationId: String, epoch: String, turnId: String?): List<JSONObject> = events.mapNotNull { message(it, conversationId, epoch, turnId) }
 
-    fun message(event: AgentEvent, epoch: String, turnId: String?): JSONObject? {
+    fun message(event: AgentEvent, conversationId: String, epoch: String, turnId: String?): JSONObject? {
         val id = messageId(event.historyKey)
         // The history store keeps no per-row clock, so no frame claims a timestamp it cannot know; the
         // renderer stamps arrival time itself.
         val base = json(
             "id" to id,
             "msg_id" to id,
-            "conversation_id" to RENDERER_CONVERSATION,
+            "conversation_id" to conversationId,
             "turn_id" to turnId,
         )
         when (event.type) {
@@ -305,13 +305,13 @@ internal object RendererProjection {
                 .put("content", json("content" to event.text, "status" to if (turnId == null) "done" else "thinking"))
 
             "tool", "tool_update" -> base.put("type", "acp_tool_call").put("position", "left")
-                .put("content", json("session_id" to RENDERER_CONVERSATION, "update" to toolUpdate(event)))
+                .put("content", json("session_id" to conversationId, "update" to toolUpdate(event)))
 
             "plan" -> base.put("type", "plan").put("position", "left")
-                .put("content", json("session_id" to RENDERER_CONVERSATION, "entries" to (event.raw?.asObject()?.opt("entries") ?: JSONArray()), "turn_id" to turnId))
+                .put("content", json("session_id" to conversationId, "entries" to (event.raw?.asObject()?.opt("entries") ?: JSONArray()), "turn_id" to turnId))
 
             "permission" -> base.put("type", "acp_permission").put("position", "left")
-                .put("content", permission(event, epoch, turnId))
+                .put("content", permission(event, conversationId, epoch, turnId))
 
             "error" -> base.put("type", "tips").put("position", "center")
                 .put("content", json("content" to event.text, "type" to "error"))
@@ -336,14 +336,14 @@ internal object RendererProjection {
     }
 
     /** Live approval card: identity plus the options the agent really offered, so the answer maps back. */
-    fun permission(event: AgentEvent, epoch: String, turnId: String?): JSONObject {
+    fun permission(event: AgentEvent, conversationId: String, epoch: String, turnId: String?): JSONObject {
         val options = JSONArray()
         event.options.forEach { option ->
             options.put(json("option_id" to option.id, "name" to option.label, "kind" to optionKind(option.id)))
         }
         return json(
-            "session_id" to RENDERER_CONVERSATION,
-            "conversation_id" to RENDERER_CONVERSATION,
+            "session_id" to conversationId,
+            "conversation_id" to conversationId,
             // The opaque reference an answer must quote is this event's own request id.
             "request_id" to event.id,
             "epoch" to epoch,

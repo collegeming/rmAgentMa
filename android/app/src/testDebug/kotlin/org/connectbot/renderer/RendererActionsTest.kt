@@ -33,7 +33,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentConfigOption
 import org.rmagentma.core.AgentConfigValue
 import org.rmagentma.core.AgentEvent
@@ -88,12 +87,13 @@ class RendererActionsTest {
             session = opened
             host = this@RendererActionsTest.host
             indexed = opened.copy(title = "索引标题", createdAt = 500, updatedAt = 900)
+            sessions = listOf(indexed!!)
             active = true
         }
         val body = (RendererActions(source).handle("conversations.list", payload()).body as JSONObject)
         assertThat(body.getBoolean("success")).isTrue()
         val conversation = body.getJSONObject("data").getJSONArray("items").getJSONObject(0)
-        assertThat(conversation.getString("id")).isEqualTo(RENDERER_CONVERSATION)
+        assertThat(conversation.getString("id")).isEqualTo(RendererConversationId.of(opened))
         assertThat(conversation.getString("name")).isEqualTo("索引标题")
         assertThat(conversation.getString("project_id")).isEqualTo("host-7")
         assertThat(conversation.getJSONObject("extra").getString("workspace")).isEqualTo("/workspace/app")
@@ -374,7 +374,7 @@ class RendererActionsTest {
         val data = (result.body as JSONObject).getJSONObject("data")
         assertThat(data.getString("confirmation")).isEqualTo("observed")
         assertThat(data.getJSONArray("config_options").getJSONObject(0).getString("current_value")).isEqualTo("gpt-4")
-        assertThat(source.writes).containsExactly("model" to "gpt-4")
+        assertThat(source.writes).containsExactly(Triple("model", "gpt-4", this@RendererActionsTest.session))
     }
 
     @Test
@@ -415,7 +415,7 @@ class RendererActionsTest {
         assertThat(body.getBoolean("success")).isFalse()
         assertThat(body.getString("code")).isEqualTo("HANDLE_FAILED")
         assertThat(body.getString("error")).contains("unknown configId")
-        assertThat(source.writes).containsExactly("model" to "gpt-4")
+        assertThat(source.writes).containsExactly(Triple("model", "gpt-4", this@RendererActionsTest.session))
     }
 
     @Test
@@ -674,81 +674,5 @@ class RendererActionsTest {
         val result = RendererActions(source).handle("config.read", payload(conversation = true))
         assertThat(result.status).isEqualTo(200)
         return (result.body as JSONObject).getJSONObject("data").getJSONArray("config_options")
-    }
-
-    /** In-memory stand-in for [RendererSource]; every fact a test needs is set explicitly. */
-    private class FakeSource : RendererSource {
-        var session: AgentSession? = null
-        var host: Host? = null
-        var indexed: AgentSession? = null
-        var events: List<AgentEvent> = emptyList()
-        var active = false
-        var loading = false
-        var turnId: String? = null
-        var cancelling = false
-        var hasEarlier = false
-        var hosts: List<Host> = emptyList()
-        var availability: List<AgentAvailability> = emptyList()
-        var currentTheme = "light"
-        var configAccess: AgentConfigAccess = AgentConfigAccess.Unsupported
-        var setter: (String, String) -> AgentConfigAccess = { _, _ -> AgentConfigAccess.Closed }
-        val writes = mutableListOf<Pair<String, String>>()
-        val responded = mutableListOf<Pair<AgentEvent, String>>()
-        val draftKeys = mutableListOf<String>()
-        val storedDrafts = mutableMapOf<String, String>()
-        var cancelCount = 0
-
-        override suspend fun snapshot(): RendererSnapshot = RendererSnapshot(
-            session = session,
-            host = host,
-            indexed = indexed,
-            events = events,
-            active = active,
-            loading = loading,
-            turnId = turnId,
-            cancelling = cancelling,
-            hasEarlier = hasEarlier,
-            hosts = hosts,
-            availability = availability,
-            epoch = "epoch-1",
-            seq = 4,
-            theme = currentTheme,
-        )
-
-        override suspend fun send(text: String): String? {
-            turnId = "turn-1"
-            return "m9"
-        }
-
-        override suspend fun cancel() {
-            cancelCount++
-            turnId = null
-        }
-
-        override suspend fun respondPermission(event: AgentEvent, option: String): Boolean {
-            responded += event to option
-            return true
-        }
-
-        override fun setTheme(value: String) {
-            currentTheme = value
-        }
-
-        override suspend fun config(): AgentConfigAccess = configAccess
-
-        override suspend fun setConfigOption(optionId: String, value: String): AgentConfigAccess {
-            writes += optionId to value
-            return setter(optionId, value)
-        }
-
-        override suspend fun draft(key: String): String? {
-            draftKeys += key
-            return storedDrafts[key]
-        }
-
-        override suspend fun saveDraft(key: String, text: String) {
-            draftKeys += key
-            storedDrafts[key] = text
-        }
     }
 }
