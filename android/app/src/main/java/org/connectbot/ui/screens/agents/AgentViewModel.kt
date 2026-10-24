@@ -100,6 +100,16 @@ class AgentViewModel @Inject constructor(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), selectedSession.value)
 
     init {
+        // A conversation opened behind this ViewModel's back (the renderer switches through the repository alone)
+        // has to move the picker with it; a picker-driven open already matches here, and a cleared live session
+        // leaves the picker alone.
+        viewModelScope.launch(dispatchers.default) {
+            activeSession.collect { active ->
+                if (active == null) return@collect
+                if (active.hostId != mutableSelectedHost.value) mutableSelectedHost.value = active.hostId
+                if (active.agent != mutableSelectedAgent.value) mutableSelectedAgent.value = active.agent
+            }
+        }
         // The repository flow is hot; keep the newest change so it can still be shown after a recomposition.
         viewModelScope.launch(dispatchers.default) {
             repository.addressChanges.collect { mutableAddressChange.value = it }
