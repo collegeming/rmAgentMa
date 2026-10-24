@@ -51,8 +51,6 @@ class RendererActionsTest {
         val actions = RendererActions(FakeSource())
         val expected = mapOf(
             "runtime.visible" to "LEASE_UNSUPPORTED",
-            "draft.load" to "DRAFT_UNSUPPORTED",
-            "draft.save" to "DRAFT_UNSUPPORTED",
             "attachment.begin" to "ATTACHMENT_UNSUPPORTED",
             "commands.list" to "COMMANDS_UNSUPPORTED",
             "artifacts.list" to "ARTIFACTS_UNSUPPORTED",
@@ -457,6 +455,92 @@ class RendererActionsTest {
         assertThat(ensured.getJSONArray("config_options").length()).isZero()
     }
 
+    @Test
+    fun draftRoundTripsForTheOpenConversationUnderItsOwnSessionKey() = runTest {
+        val source = openSource()
+        val actions = RendererActions(source)
+        val saved = actions.handle("draft.save", payload(conversation = true, body = mapOf("text" to "未发送的草稿", "files" to JSONArray())))
+        assertThat(saved.status).isEqualTo(200)
+        val savedDraft = (saved.body as JSONObject).getJSONObject("data")
+        assertThat(savedDraft.getString("text")).isEqualTo("未发送的草稿")
+        assertThat(savedDraft.getString("conversation_id")).isEqualTo(RENDERER_CONVERSATION)
+        assertThat(savedDraft.getBoolean("saved")).isTrue()
+
+        val loaded = actions.handle("draft.load", payload(conversation = true))
+        assertThat(loaded.status).isEqualTo(200)
+        val draft = (loaded.body as JSONObject).getJSONObject("data")
+        assertThat(draft.getString("text")).isEqualTo("未发送的草稿")
+        assertThat(draft.getString("conversation_id")).isEqualTo(RENDERER_CONVERSATION)
+        // No attachment is ever handed over, so a loaded draft carries an empty file list instead of a fake one.
+        assertThat(draft.getJSONArray("files").length()).isZero()
+        // One key per conversation: the session identity the product itself resumes the session by.
+        assertThat(source.draftKeys).containsExactly("7:kimi:session-a", "7:kimi:session-a")
+    }
+
+    @Test
+    fun draftFailsWithoutAnOpenConversationInsteadOfAnsweringAnEmptyDraft() = runTest {
+        val unopened = FakeSource()
+        for (action in listOf("draft.load", "draft.save")) {
+            val missing = RendererActions(unopened).handle(action, payload(conversation = true, body = mapOf("text" to "草稿")))
+            assertThat(missing.status).describedAs(action).isEqualTo(404)
+            assertThat((missing.body as JSONObject).getString("code")).isEqualTo("CONVERSATION_NOT_FOUND")
+        }
+        val loading = openSource().apply { active = false }
+        for (action in listOf("draft.load", "draft.save")) {
+            val closed = RendererActions(loading).handle(action, payload(conversation = true, body = mapOf("text" to "草稿")))
+            assertThat(closed.status).describedAs(action).isEqualTo(409)
+            assertThat((closed.body as JSONObject).getString("code")).isEqualTo("CONVERSATION_NOT_OPEN")
+        }
+        // Neither failed request touched the store, so a stored draft cannot be overwritten by an empty one.
+        assertThat(loading.storedDrafts).isEmpty()
+        val other = RendererActions(openSource()).handle("draft.load", payload(params = mapOf("conversationId" to "conv-other")))
+        assertThat(other.status).isEqualTo(404)
+    }
+
+    @Test
+    fun draftRefusesOversizedTextAndAttachmentReferences() = runTest {
+        val source = openSource()
+        val actions = RendererActions(source)
+        val long = actions.handle("draft.save", payload(conversation = true, body = mapOf("text" to "长".repeat(16385))))
+        assertThat(long.status).isEqualTo(413)
+        assertThat((long.body as JSONObject).getString("code")).isEqualTo("DRAFT_TOO_LARGE")
+
+        val reference = jsonOf("kind" to "upload", "path" to "probe-upload:7f00c1c2-1111-2222-3333-444455556666")
+        val files = actions.handle("draft.save", payload(conversation = true, body = mapOf("text" to "草稿", "files" to JSONArray().put(reference))))
+        assertThat(files.status).isEqualTo(422)
+        assertThat((files.body as JSONObject).getString("code")).isEqualTo("ATTACHMENT_UNSUPPORTED")
+
+        val invalid = actions.handle("draft.save", payload(conversation = true, body = mapOf("text" to 42)))
+        assertThat(invalid.status).isEqualTo(422)
+        assertThat((invalid.body as JSONObject).getString("code")).isEqualTo("DRAFT_INVALID")
+        assertThat(source.storedDrafts).isEmpty()
+    }
+
+    @Test
+    fun usageReportsTheAgentsOwnNumbersAndStaysNullWithoutOne() = runTest {
+        val silent = openSource().apply { events = listOf(AgentEvent(type = "content", text = "回答", historyKey = 4)) }
+        val empty = RendererActions(silent).handle("usage.read", payload(conversation = true)).body as JSONObject
+        assertThat(empty.getBoolean("success")).isTrue()
+        assertThat(empty.isNull("data")).isTrue()
+
+        val reported = openSource().apply {
+            events = listOf(
+                AgentEvent(type = "content", text = "回答", historyKey = 4),
+                AgentEvent(
+                    type = "usage",
+                    raw = buildJsonObject {
+                        put("sessionUpdate", "usage_update")
+                        put("used", 3200)
+                        put("size", 200000)
+                    },
+                ),
+            )
+        }
+        val usage = (RendererActions(reported).handle("usage.read", payload(conversation = true)).body as JSONObject).getJSONObject("data")
+        assertThat(usage.getInt("used")).isEqualTo(3200)
+        assertThat(usage.getInt("size")).isEqualTo(200000)
+    }
+
     private fun payload(conversation: Boolean = false, params: Map<String, String> = emptyMap(), query: Map<String, String> = emptyMap(), body: Map<String, Any?> = emptyMap()): JSONObject {
         val resolved = if (conversation) params + ("conversationId" to RENDERER_CONVERSATION) else params
         return JSONObject()
@@ -517,6 +601,8 @@ class RendererActionsTest {
         var setter: (String, String) -> AgentConfigAccess = { _, _ -> AgentConfigAccess.Closed }
         val writes = mutableListOf<Pair<String, String>>()
         val responded = mutableListOf<Pair<AgentEvent, String>>()
+        val draftKeys = mutableListOf<String>()
+        val storedDrafts = mutableMapOf<String, String>()
         var cancelCount = 0
 
         override suspend fun snapshot(): RendererSnapshot = RendererSnapshot(
@@ -560,6 +646,16 @@ class RendererActionsTest {
         override suspend fun setConfigOption(optionId: String, value: String): AgentConfigAccess {
             writes += optionId to value
             return setter(optionId, value)
+        }
+
+        override suspend fun draft(key: String): String? {
+            draftKeys += key
+            return storedDrafts[key]
+        }
+
+        override suspend fun saveDraft(key: String, text: String) {
+            draftKeys += key
+            storedDrafts[key] = text
         }
     }
 }

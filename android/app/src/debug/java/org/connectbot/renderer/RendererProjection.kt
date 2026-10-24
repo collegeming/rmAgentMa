@@ -27,6 +27,7 @@ import org.rmagentma.core.AgentConfigOption
 import org.rmagentma.core.AgentConfigValue
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
+import org.rmagentma.core.AgentSession
 import org.rmagentma.core.AgentSessionConfig
 import org.rmagentma.rendererhost.array
 import org.rmagentma.rendererhost.json
@@ -101,6 +102,18 @@ internal object RendererProjection {
     }
 
     fun projectId(hostId: Long): String = "host-$hostId"
+
+    /**
+     * Storage key of one conversation's draft: the identity the product itself resumes the session by, so a
+     * draft belongs to that conversation and never to whichever conversation happens to be open next.
+     */
+    fun draftKey(session: AgentSession): String = "${session.hostId}:${session.agent.wireName}:${session.sessionId}"
+
+    /**
+     * A conversation's draft in the renderer's own shape. The file list is empty because this host stores none:
+     * it hands out no upload reference, so an attachment in a draft could only be one it never issued.
+     */
+    fun draft(text: String): JSONObject = json("text" to text, "files" to JSONArray(), "conversation_id" to RENDERER_CONVERSATION)
 
     /** A saved host is one project: the product has no server-side project registry. */
     fun project(host: Host): JSONObject = json(

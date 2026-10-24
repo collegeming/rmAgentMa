@@ -29,7 +29,8 @@ import org.rmagentma.rendererhost.json
  * The renderer's action layer over real product state. Every route either answers from a repository that
  * already holds the fact, or fails with a stable code: a route this build cannot serve reports
  * `501 <NAME>_UNSUPPORTED` with the reason in `error`, while a route it serves reports the real conflict
- * (not ready, not pending, stale turn). Nothing here fabricates chat history, approvals or settings.
+ * (not ready, not pending, stale turn). Nothing here fabricates chat history, approvals, drafts, usage or
+ * settings.
  */
 internal class RendererActions(private val source: RendererSource) {
     suspend fun handle(action: String, payload: JSONObject): ProbeResult {
@@ -61,6 +62,8 @@ internal class RendererActions(private val source: RendererSource) {
         "runtime.snapshot" -> snapshot()
         "config.read" -> readConfig(params)
         "config.set" -> setConfig(params, body)
+        "draft.load" -> loadDraft(params)
+        "draft.save" -> saveDraft(params, body)
         "usage.read" -> usage()
         "projects.list" -> success(RendererProjection.projects(source.snapshot().hosts))
         "project.read" -> readProject(params)
@@ -320,11 +323,47 @@ internal class RendererActions(private val source: RendererSource) {
 
     private fun option(catalog: JSONArray, optionId: String): JSONObject? = (0 until catalog.length()).map { catalog.getJSONObject(it) }.firstOrNull { it.optString("id") == optionId }
 
+    /**
+     * The context usage the Agent itself reported in the loaded window, and nothing else. `data` stays null until
+     * an agent sends a usage report, because a token count invented on this host would be a lie about the session.
+     */
     private suspend fun usage(): ProbeResult {
         val snapshot = source.snapshot()
         if (snapshot.session == null) return notFound()
         val reported = snapshot.events.lastOrNull { it.type == "usage" }
         return success(RendererProjection.usage(reported))
+    }
+
+    /**
+     * Reads back the draft the user left in the renderer's send box. Only the open conversation answers here: an
+     * empty draft for a conversation this host has not opened would wipe the text the user really typed.
+     */
+    private suspend fun loadDraft(params: JSONObject): ProbeResult {
+        if (params.optString("conversationId") != RENDERER_CONVERSATION) return notFound()
+        val snapshot = source.snapshot()
+        val session = snapshot.session ?: return notFound()
+        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_OPEN", "该会话尚未打开；请在产品对话页打开后重试。")
+        return success(RendererProjection.draft(source.draft(RendererProjection.draftKey(session)) ?: ""))
+    }
+
+    /**
+     * Stores the send box's text for the open conversation. Text over the draft limit is refused rather than cut,
+     * and an attachment reference is refused too: this host issues no upload reference, so one could only name a
+     * file it never accepted.
+     */
+    private suspend fun saveDraft(params: JSONObject, body: JSONObject): ProbeResult {
+        if (params.optString("conversationId") != RENDERER_CONVERSATION) return notFound()
+        val snapshot = source.snapshot()
+        val session = snapshot.session ?: return notFound()
+        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_OPEN", "该会话尚未打开；请在产品对话页打开后重试。")
+        if ((body.optJSONArray("files")?.length() ?: 0) > 0) return fail(422, "ATTACHMENT_UNSUPPORTED", "此版本只保存文本草稿。")
+        val text = body.opt("text")
+        if (text !is String) return fail(422, "DRAFT_INVALID", "草稿内容必须是字符串。")
+        if (text.length > ProbeLimits.DRAFT_UNITS || text.toByteArray(Charsets.UTF_8).size > ProbeLimits.DRAFT_BYTES) {
+            return fail(413, "DRAFT_TOO_LARGE", "草稿超出长度限制，请缩短后再保存。")
+        }
+        source.saveDraft(RendererProjection.draftKey(session), text)
+        return success(RendererProjection.draft(text).put("saved", true))
     }
 
     private suspend fun readProject(params: JSONObject): ProbeResult {
@@ -336,7 +375,6 @@ internal class RendererActions(private val source: RendererSource) {
 
     private fun unsupported(action: String): ProbeResult = when (action) {
         "runtime.visible" -> fail(501, "LEASE_UNSUPPORTED", "本机不支持会话可见租约。")
-        "draft.load", "draft.save" -> fail(501, "DRAFT_UNSUPPORTED", "本机没有可供渲染器读写的草稿存储。")
         "attachment.begin", "attachment.chunk", "attachment.finish", "attachment.abort" -> fail(501, "ATTACHMENT_UNSUPPORTED", "本机未开放附件上传。")
         "commands.list" -> fail(501, "COMMANDS_UNSUPPORTED", "本机未向渲染器提供斜杠命令目录。")
         "artifacts.list" -> fail(501, "ARTIFACTS_UNSUPPORTED", "本机没有会话产物列表。")

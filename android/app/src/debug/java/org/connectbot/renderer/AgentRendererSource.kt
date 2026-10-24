@@ -26,6 +26,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConversationState
+import org.connectbot.agent.AgentDraftStore
 import org.connectbot.agent.AgentIndexStore
 import org.connectbot.agent.AgentRepository
 import org.connectbot.data.HostRepository
@@ -50,6 +51,7 @@ class AgentRendererSource @Inject constructor(
     private val repository: AgentRepository,
     private val hosts: HostRepository,
     private val index: AgentIndexStore,
+    private val drafts: AgentDraftStore,
     private val preferences: SharedPreferences,
     private val dispatchers: CoroutineDispatchers,
 ) : RendererSource {
@@ -186,6 +188,13 @@ class AgentRendererSource @Inject constructor(
     override suspend fun config(): AgentConfigAccess = repository.config()
 
     override suspend fun setConfigOption(optionId: String, value: String): AgentConfigAccess = repository.setConfigOption(optionId, value)
+
+    /** Drafts are local user content: they come and go through the store alone, never through the ACP channel. */
+    override suspend fun draft(key: String): String? = drafts.read(key)
+
+    override suspend fun saveDraft(key: String, text: String) {
+        drafts.write(key, text)
+    }
 
     private fun theme(): String = ThemeMode.fromString(preferences.getString(PreferenceConstants.THEME_MODE, null)).name.lowercase()
 

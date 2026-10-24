@@ -85,4 +85,10 @@ interface RendererSource {
 
     /** Sets one configuration option through the same repository the Compose chat uses; throws when rejected. */
     suspend fun setConfigOption(optionId: String, value: String): AgentConfigAccess
+
+    /** The stored draft of the conversation behind [key], or null when nothing was typed for it yet. */
+    suspend fun draft(key: String): String?
+
+    /** Stores [text] as the draft of the conversation behind [key]. */
+    suspend fun saveDraft(key: String, text: String)
 }
