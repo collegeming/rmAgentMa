@@ -33,6 +33,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.io.IOException
 import java.util.UUID
@@ -176,6 +177,10 @@ class ZcodeSessionHandle internal constructor(
     override val events: Flow<AgentEvent> = connection.events
     private val loading = Mutex()
     private val prompt = Mutex()
+    private val configWrite = Mutex()
+
+    /** Latest settings reported by the Agent; current-only snapshots never replace the full catalog. */
+    val config: ZcodeSessionConfig get() = connection.config
 
     @Volatile private var ready = false
 
@@ -265,6 +270,91 @@ class ZcodeSessionHandle internal constructor(
                     ),
                 )
             }
+        }
+    }
+
+    /** Reads the current-only session snapshot without touching the create/resume catalog. */
+    suspend fun read(): ZcodeSessionConfig {
+        check(ready && !closed) { "ZCode session is not ready" }
+        connection.request("session/read", buildJsonObject { put("sessionId", sessionId) })
+        return connection.config
+    }
+
+    suspend fun setModel(
+        providerId: String,
+        modelId: String,
+        reasoningLevel: String? = null,
+        expectedRevision: Long? = null,
+    ): ZcodeConfigChange {
+        require(providerId.isNotBlank() && modelId.isNotBlank()) { "Model provider and ID cannot be blank" }
+        require(reasoningLevel == null || reasoningLevel.isNotBlank()) { "Reasoning level cannot be blank" }
+        val requested = ZcodeModelSelection(providerId, modelId, reasoningLevel).label
+        return configChange(
+            "session/setModel",
+            buildJsonObject {
+                put("sessionId", sessionId)
+                put(
+                    "model",
+                    buildJsonObject {
+                        put("providerId", providerId)
+                        put("modelId", modelId)
+                        if (reasoningLevel != null) put("options", buildJsonObject { put("reasoningLevel", reasoningLevel) })
+                    },
+                )
+                expectedRevision?.let { put("expectedRevision", it) }
+            },
+            requested,
+        ) { it.currentModel?.label }
+    }
+
+    suspend fun setThoughtLevel(level: String, expectedRevision: Long? = null): ZcodeConfigChange {
+        require(level.isNotBlank()) { "Thought level cannot be blank" }
+        return configChange(
+            "session/setThoughtLevel",
+            buildJsonObject {
+                put("sessionId", sessionId)
+                put("thoughtLevel", level)
+                expectedRevision?.let { put("expectedRevision", it) }
+            },
+            level,
+        ) { it.thought.current }
+    }
+
+    suspend fun setMode(mode: String, expectedRevision: Long? = null): ZcodeConfigChange {
+        require(mode.isNotBlank()) { "Mode cannot be blank" }
+        return configChange(
+            "session/setMode",
+            buildJsonObject {
+                put("sessionId", sessionId)
+                put("mode", mode)
+                expectedRevision?.let { put("expectedRevision", it) }
+            },
+            mode,
+        ) { it.currentMode }
+    }
+
+    private suspend fun configChange(
+        method: String,
+        params: JsonObject,
+        requested: String,
+        appliedOf: (ZcodeSessionConfig) -> String?,
+    ): ZcodeConfigChange {
+        check(ready && !closed) { "ZCode session is not ready" }
+        return configWrite.withLock {
+            val response = connection.request(method, params)
+            val observed = ZcodeSessionConfig().applySnapshot(response, fullCatalog = false)
+            val authoritative = response["settings"] is JsonObject
+            val applied = if (authoritative) appliedOf(observed) else null
+            val status = when {
+                !authoritative -> ZcodeConfigStatus.DELIVERED_PENDING
+                applied == requested -> ZcodeConfigStatus.CONFIRMED
+                else -> ZcodeConfigStatus.ADJUSTED
+            }
+            val revision = observed.revision
+                ?: (response["stateRevision"] as? JsonPrimitive)?.longOrNull
+                ?: (response["revision"] as? JsonPrimitive)?.longOrNull
+            val busy = observed.busy || (response["busy"] as? JsonPrimitive)?.booleanOrNull == true
+            ZcodeConfigChange(status, requested, applied, revision, busy, connection.config, response)
         }
     }
 

@@ -52,7 +52,13 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
-class ZcodeException(val code: Int) : IOException("ZCode request failed (code $code)")
+open class ZcodeException(
+    val code: Int,
+    message: String = "ZCode request failed (code $code)",
+) : IOException(message)
+
+/** The Agent refused a write because a permission update is still in flight. */
+class ZcodeBusyException(code: Int, message: String) : ZcodeException(code, message)
 
 internal class ZcodeConnection(
     private val channel: ExecChannel,
@@ -87,6 +93,22 @@ internal class ZcodeConnection(
     }
 
     @Volatile var sessionId: String? = null
+
+    @Volatile private var configState = ZcodeSessionConfig()
+    private val configLock = Any()
+
+    /** Latest settings; the create/resume catalog and current-only snapshots are merged by careful update. */
+    val config: ZcodeSessionConfig get() = configState
+
+    internal fun applySnapshot(snapshot: JsonObject, fullCatalog: Boolean): ZcodeSessionConfig = synchronized(configLock) {
+        configState = configState.applySnapshot(snapshot, fullCatalog)
+        configState
+    }
+
+    internal fun applySettings(settings: JsonObject, revision: Long?): ZcodeSessionConfig = synchronized(configLock) {
+        configState = configState.applySettings(settings, fullCatalog = false, revision = revision ?: configState.revision)
+        configState
+    }
 
     @Volatile private var subscribed = false
     private var lastSeq = -1L
@@ -249,10 +271,17 @@ internal class ZcodeConnection(
                     "ready" -> if (params.string("databaseKind") == "session") storageReady.complete(Unit)
                     "failed" -> throw IOException("ZCode storage startup failed")
                 }
-            } else if (method == "session/event" && subscribed) {
-                receiveEvent(params)
-            } else if (method == "state.updated" && subscribed && params.string("sessionId") == sessionId) {
-                emit(AgentEvent("session_info", raw = params))
+            } else if (method == "session/event") {
+                if (subscribed) receiveEvent(params)
+            } else if (method == "state.updated") {
+                if (subscribed && params.string("sessionId") == sessionId) {
+                    (params["patch"] as? JsonObject)?.let { patch ->
+                        applySettings(patch, (params["revision"] as? JsonPrimitive)?.longOrNull)
+                    }
+                    emit(AgentEvent("session_info", raw = params))
+                }
+            } else {
+                emit(AgentEvent("unknown", title = method, raw = params))
             }
             return
         }
@@ -262,14 +291,26 @@ internal class ZcodeConnection(
         val entry = pending[id] ?: return
         val error = message["error"] as? JsonObject
         if (error != null) {
-            entry.result.completeExceptionally(ZcodeException((error["code"] as? JsonPrimitive)?.longOrNull?.toInt() ?: -32603))
+            val code = (error["code"] as? JsonPrimitive)?.longOrNull?.toInt() ?: -32603
+            val detail = error.string("message").ifEmpty { "ZCode request failed (code $code)" }
+            val failure = if (detail.contains("Permission update is busy", ignoreCase = true)) {
+                ZcodeBusyException(code, detail)
+            } else {
+                ZcodeException(code, detail)
+            }
+            entry.result.completeExceptionally(failure)
         } else {
             val value = message["result"] as? JsonObject ?: throw IOException("Invalid ZCode result")
             if (entry.method == "session/subscribe") {
                 (value["events"] as? JsonArray ?: throw IOException("Invalid ZCode subscription events")).forEach {
                     receiveEvent(it as? JsonObject ?: throw IOException("Invalid ZCode replay event"))
                 }
+                (value["snapshot"] as? JsonObject)?.let { applySnapshot(it, fullCatalog = false) }
                 buffer.barrier()
+            } else if (entry.method == "session/create" || entry.method == "session/resume") {
+                applySnapshot(value, fullCatalog = true)
+            } else if (entry.method in ZCODE_CURRENT_ONLY_METHODS) {
+                applySnapshot(value, fullCatalog = false)
             }
             entry.result.complete(value)
         }
@@ -410,6 +451,8 @@ internal class ZcodeConnection(
         }
     }
 }
+
+private val ZCODE_CURRENT_ONLY_METHODS = setOf("session/read", "session/setModel", "session/setThoughtLevel", "session/setMode")
 
 internal fun zcodePermissionOptions(params: JsonObject): List<AgentOption> = (params["options"] as? JsonArray).orEmpty().mapNotNull {
     val option = it as? JsonObject ?: return@mapNotNull null
