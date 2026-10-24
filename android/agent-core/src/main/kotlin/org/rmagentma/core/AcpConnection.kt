@@ -52,14 +52,20 @@ import java.util.concurrent.atomic.AtomicLong
 
 class AcpException(val code: Int, val reason: String = "") : IOException("ACP request failed (code $code)" + if (reason.isEmpty()) "" else ": $reason")
 
+// A peer can accept an activation frame and never answer it (opencode 1.19.4 does this for session/load,
+// measured 2026-10-24), so the open needs its own bound; a real answer arrives in seconds, and the history
+// replay barrier that follows an answer deliberately stays outside it.
+internal const val ACP_ACTIVATION_TIMEOUT_MILLIS = 30_000L
+
 internal class AcpConnection(
     private val channel: ExecChannel,
     parentScope: CoroutineScope,
     private val ioDispatcher: CoroutineDispatcher,
     private val cleanupTimeoutMillis: Long = 1000,
+    private val activationTimeoutMillis: Long = ACP_ACTIVATION_TIMEOUT_MILLIS,
     internal val trace: (String) -> Unit = {},
 ) {
-    private data class Pending(val method: String, val result: CompletableDeferred<JsonObject>)
+    private data class Pending(val method: String, val result: CompletableDeferred<JsonObject>, val answered: CompletableDeferred<Unit> = CompletableDeferred())
     internal data class Incoming(val id: JsonPrimitive, val method: String, val params: JsonObject, val bytes: Long)
 
     private val scope = CoroutineScope(parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[Job]))
@@ -141,14 +147,15 @@ internal class AcpConnection(
     private suspend fun diagnostic(message: String) = emit(AgentEvent("error", text = message))
 
     suspend fun request(method: String, params: JsonObject): JsonObject {
-        if (method in SESSION_ACTIVATION_METHODS) {
+        val activation = method in SESSION_ACTIVATION_METHODS
+        if (activation) {
             trace("consumer_wait")
             eventBuffer.awaitConsumer()
             trace("consumer_ready")
         }
         val phase = if (method == "initialize") {
             "initialize"
-        } else if (method in SESSION_ACTIVATION_METHODS) {
+        } else if (activation) {
             "load"
         } else {
             null
@@ -168,6 +175,9 @@ internal class AcpConnection(
                 },
             )
             phase?.let { trace("${it}_sent") }
+            if (activation && withTimeoutOrNull(activationTimeoutMillis) { entry.answered.await() } == null) {
+                throw IOException("Agent did not answer $method within ${activationTimeoutMillis}ms")
+            }
             return deferred.await().also { phase?.let { trace("${it}_ok") } }
         } finally {
             pending.remove(id, entry)
@@ -287,6 +297,9 @@ internal class AcpConnection(
         }
         val entry = pending[id] ?: return
         if (entry.result.isCompleted) return
+        // Any frame that reaches this point is this request's answer, so record its arrival before the replay
+        // barrier below, which may keep the caller waiting on its own event consumer for much longer.
+        entry.answered.complete(Unit)
         val error = message["error"]
         if (error != null) {
             val code = ((error as? JsonObject)?.get("code") as? JsonPrimitive)?.longOrNull?.toInt()
@@ -404,7 +417,13 @@ internal class AcpConnection(
             incomingBytes = 0
         }
         eventBuffer.close(terminalCause?.message?.takeIf { it.isNotBlank() } ?: terminalCause?.let { "ACP transport closed unexpectedly" })
-        pending.values.forEach { it.result.completeExceptionally(terminalCause ?: EOFException("ACP channel closed")) }
+        val failure = terminalCause ?: EOFException("ACP channel closed")
+        pending.values.forEach {
+            // An ended transport ends the wait for an answer too, so an activation never sits out its bound
+            // on a channel that is already gone.
+            it.answered.completeExceptionally(failure)
+            it.result.completeExceptionally(failure)
+        }
         pending.clear()
         scope.cancel()
         cleanupScope.launch {

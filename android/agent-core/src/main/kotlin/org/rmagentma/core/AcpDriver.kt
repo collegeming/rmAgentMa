@@ -42,6 +42,7 @@ class AcpDriver(
     private val scope: CoroutineScope,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val executable: String? = null,
+    private val activationTimeoutMillis: Long = ACP_ACTIVATION_TIMEOUT_MILLIS,
 ) : AgentDriver {
     init {
         require(agent in setOf(AgentKind.KIMI, AgentKind.OPENCODE, AgentKind.OMP, AgentKind.DSH)) { "Agent does not support ACP" }
@@ -133,7 +134,7 @@ class AcpDriver(
         try {
             val started = System.nanoTime()
             val logger = java.util.logging.Logger.getLogger("org.rmagentma.core.AcpDriver")
-            AcpConnection(channel, scope, ioDispatcher, trace = { stage ->
+            AcpConnection(channel, scope, ioDispatcher, activationTimeoutMillis = activationTimeoutMillis, trace = { stage ->
                 logger.info("hostId=${host.hostId} agent=${agent.wireName} stage=$stage elapsedMs=${(System.nanoTime() - started) / 1_000_000}")
             }).also { it.trace("exec_channel_open") }
         } catch (e: Exception) {
