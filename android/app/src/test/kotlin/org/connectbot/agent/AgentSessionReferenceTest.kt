@@ -40,9 +40,10 @@ class AgentSessionReferenceTest {
 
     @Test
     fun writesTheWindowOldestFirstWhateverOrderTheEventsArriveIn() {
+        // `second` arrived first but carries the newest history key, so it is quoted last.
         val events = listOf(event("content", "second", 2), event("user", "first", 0), event("content", "third", 1))
         val pack = agentSessionContextPack(reference(), events)
-        assertThat(pack.text).containsSubsequence("[user] first", "[assistant] third", "[assistant] second")
+        assertThat(pack.text).containsSubsequence("user: first", "assistant: third", "assistant: second")
         assertThat(pack.quotedCount).isEqualTo(3)
         assertThat(pack.omittedCount).isZero()
     }
@@ -85,7 +86,7 @@ class AgentSessionReferenceTest {
     @Test
     fun cutsOneOversizedMessageAndSaysWhatItDropped() {
         val pack = agentSessionContextPack(reference(), listOf(event("tool", "x".repeat(5_000), 0)), itemLimit = 200)
-        val line = pack.text.lines().single { it.startsWith("[tool] ") }
+        val line = pack.text.lines().single { it.startsWith("tool: ") }
         assertThat(line.length).isLessThanOrEqualTo(200)
         assertThat(line).endsWith("[5000 chars, rest omitted]")
         assertThat(pack.cutCount).isEqualTo(1)
@@ -106,7 +107,7 @@ class AgentSessionReferenceTest {
         )
         val pack = agentSessionContextPack(reference(), events)
         assertThat(pack.quotedCount).isEqualTo(2)
-        assertThat(pack.text).contains("[assistant] answer", "[tool] output")
+        assertThat(pack.text).contains("assistant: answer", "tool: output")
         assertThat(pack.text).doesNotContain("Allow the command?")
         assertThat(pack.text).doesNotContain("Which branch?")
     }
@@ -122,9 +123,15 @@ class AgentSessionReferenceTest {
             assertThat(pack.text.length).describedAs("pack at budget $budget").isLessThanOrEqualTo(budget)
         }
         val tightItems = agentSessionContextPack(reference(), events, itemLimit = 64, charBudget = 20_000)
-        val quotes = tightItems.text.lines().filter { it.startsWith("[user] ") || it.startsWith("[assistant] ") }
-        assertThat(quotes).isNotEmpty()
+        val quotes = tightItems.text.lines().filter { it.startsWith("user: ") || it.startsWith("assistant: ") }
+        // A tighter item limit narrows every quoted line and drops none of them while the character budget holds.
+        assertThat(quotes).hasSize(AGENT_CONTEXT_MESSAGES)
         assertThat(quotes.all { it.length <= 64 }).isTrue()
+        // The smallest legal budget cannot hold even the newest message of this history, and the pack says so
+        // instead of borrowing room from the source label, the notices or the closing marker.
+        val smallest = agentSessionContextPack(longNames, events, charBudget = AGENT_CONTEXT_MIN_BUDGET)
+        assertThat(smallest.status).isEqualTo(AgentContextPackStatus.EMPTY)
+        assertThat(smallest.text).contains("No message of this session fits the character budget.")
     }
 
     @Test

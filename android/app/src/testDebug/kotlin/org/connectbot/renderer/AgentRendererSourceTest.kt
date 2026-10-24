@@ -43,6 +43,7 @@ import org.mockito.Mockito.`when`
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
+import org.rmagentma.core.DIRECTORY_LISTING_MAX_ENTRIES
 import org.rmagentma.core.DirectoryListing
 import org.rmagentma.core.ExecChannel
 import org.rmagentma.core.HostSession
@@ -112,7 +113,9 @@ class AgentRendererSourceTest {
 
     @Test
     fun workspaceListingReadsTheHostSessionWithoutAskingTheUserForCredentials() = runTest {
-        val answer = """{"level":"info","directory":"/work","entries":[{"name":"a.kt","kind":"file","size":3}],"count":1,"truncated":false}"""
+        // The panel's one read is the listing itself: NDJSON rows, one per entry plus the summary row that closes it.
+        val answer = """{"record":"entry","name":"a.kt","kind":"file","size":3}""" + "\n" +
+            """{"record":"listing","directory":"/work","count":1,"truncated":false}"""
         var sentCommand: String? = null
         `when`(pool.hostSession(7L, false)).thenReturn(
             object : HostSession {
@@ -132,10 +135,22 @@ class AgentRendererSourceTest {
         val listed = listing as DirectoryListing.Listed
         assertThat(listed.entries.single().name).isEqualTo("a.kt")
         assertThat(listed.entries.single().size).isEqualTo(3L)
+        assertThat(listed.truncated).isFalse()
         val sent = sentCommand.orEmpty()
         assertThat(sent).startsWith("/bin/sh -c ")
         assertThat(sent).contains("| base64 -d | python3 - ")
-        assertThat(sent).contains("'--directory' '/work'")
-        assertThat(sent).contains("'--limit' '200'")
+        // Directory and window reach python3 as arguments of the payload, so they are asserted in the spelling the
+        // host really receives rather than in the payload's own spelling.
+        assertThat(sent).contains(payloadArgument("--directory", "/work"))
+        assertThat(sent).contains(payloadArgument("--limit", "$DIRECTORY_LISTING_MAX_ENTRIES"))
     }
+}
+
+/**
+ * One argument as the host really receives it: the payload single-quotes every argument, and the command hands that
+ * whole payload to `sh -c` as one quoted word, so each of those quotes is escaped once more on the way out.
+ */
+private fun payloadArgument(name: String, value: String): String {
+    val quote = "'\"'\"'"
+    return "$quote$name$quote $quote$value$quote"
 }

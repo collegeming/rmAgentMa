@@ -104,11 +104,13 @@ class RemoteTranscriptSearchTest {
         val command = host.commands.single()
         assertTrue(command.startsWith("/bin/sh -c "))
         assertTrue(command, command.contains("| base64 -d | python3 -"))
-        assertTrue(command, command.contains("'--max-files' '50'"))
-        assertTrue(command, command.contains("'--max-bytes' '2097152'"))
-        assertTrue(command, command.contains("'--max-matches' '5'"))
-        assertTrue(command, command.contains("'--max-snippet' '160'"))
-        assertTrue(command, command.contains("'--timeout' '30'"))
+        // Every bound reaches python3 as an argument of the payload, so each one is asserted in the spelling the
+        // host really receives rather than in the payload's own spelling.
+        assertTrue(command, command.contains(payloadArgument("--max-files", "$TRANSCRIPT_SEARCH_MAX_FILES")))
+        assertTrue(command, command.contains(payloadArgument("--max-bytes", "$TRANSCRIPT_SEARCH_MAX_BYTES")))
+        assertTrue(command, command.contains(payloadArgument("--max-matches", "5")))
+        assertTrue(command, command.contains(payloadArgument("--max-snippet", "$TRANSCRIPT_SEARCH_MAX_SNIPPET")))
+        assertTrue(command, command.contains(payloadArgument("--timeout", "$TRANSCRIPT_SEARCH_SCAN_SECONDS")))
         // Query and scopes travel base64-encoded, so a host whose locale is not UTF-8 still receives these characters.
         assertTrue(command, command.contains(Base64.getEncoder().encodeToString("关键词 mixed".toByteArray())))
         val scopeJson = """{"agent":"dsh","sessionId":"same","directory":"/home/user/.dsh/sessions/p/same",""" +
@@ -264,6 +266,15 @@ class RemoteTranscriptSearchTest {
 
     private fun summary(files: Int, read: Int, truncated: Boolean): String =
         """{"record":"search","scopes":1,"files":$files,"read":$read,"bytes":1024,"matches":0,"truncated":$truncated,"unreadable":0,"timedOut":false}"""
+}
+
+/**
+ * One argument as the host really receives it: the payload single-quotes every argument, and the command hands that
+ * whole payload to `sh -c` as one quoted word, so each of those quotes is escaped once more on the way out.
+ */
+private fun payloadArgument(name: String, value: String): String {
+    val quote = "'\"'\"'"
+    return "$quote$name$quote $quote$value$quote"
 }
 
 /** A host that answers the search command from script output, or never answers at all. */

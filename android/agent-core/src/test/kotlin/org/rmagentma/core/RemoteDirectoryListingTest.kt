@@ -60,13 +60,17 @@ class RemoteDirectoryListingTest {
 
                 val command = host.commands.single()
                 assertTrue(command.startsWith("/bin/sh -c "))
-                assertTrue(command.contains("--directory"))
-                assertTrue(command.contains("'--limit' '200'"))
-                assertTrue(command.contains("--max-bytes"))
+                // The directory, the window and the byte bound reach python3 as arguments of the payload, so they are
+                // asserted in the spelling the host really receives rather than in the payload's own spelling.
+                assertTrue(command, command.contains(payloadArgument("--directory", root.toString())))
+                assertTrue(command, command.contains(payloadArgument("--limit", "$DIRECTORY_LISTING_MAX_ENTRIES")))
+                assertTrue(command, command.contains(payloadArgument("--max-bytes", "$DIRECTORY_LISTING_MAX_BYTES")))
                 // The command travels into python3 the way every other remote script does, so a host without
                 // python3 says so in the answer instead of failing as an empty directory.
                 assertTrue(command.contains("| base64 -d | python3 -"))
-                for (write in listOf(">", "rm ", "mkdir", "touch", "tee", "chmod", "mv ")) {
+                // Nothing here writes on the host: no append redirect and no writer command. The payload is only
+                // sent over `>/dev/null` to test for python3 itself.
+                for (write in listOf(">>", "rm ", "mkdir", "touch", "tee", "chmod", "mv ", "install ", "sed -i")) {
                     assertFalse(command, command.contains(write))
                 }
             } finally {
@@ -80,9 +84,10 @@ class RemoteDirectoryListingTest {
         withTimeout(30_000) {
             val root = Files.createTempDirectory("listing-names")
             try {
-                // Quotes, JSON braces and a line break are all legal in a POSIX file name; the listing must carry
-                // each of them back as the same name rather than as extra entries or as mangled text.
-                val names = listOf("quote'.kt", "brace{}.kt", "line\nbreak.kt", "<script>alert(1)</script>")
+                // Quotes, JSON braces, angle brackets and a line break are all legal in a POSIX file name; only a
+                // slash is not, since it separates path components, so every name here stays one entry. The listing
+                // must carry each name back as that same name rather than as extra entries or as mangled text.
+                val names = listOf("quote'.kt", "brace{}.kt", "line\nbreak.kt", "<script>alert(1)<x>")
                 names.forEach { Files.write(root.resolve(it), "x".toByteArray()) }
 
                 val listed = RemoteDirectoryListing(Dispatchers.IO).list(ProcessHost(), root.toString()) as DirectoryListing.Listed
@@ -268,6 +273,15 @@ class RemoteDirectoryListingTest {
     private fun deleteTree(root: java.nio.file.Path) {
         Files.walk(root).use { it.sorted(Comparator.reverseOrder()).forEach(Files::delete) }
     }
+}
+
+/**
+ * One argument as the host really receives it: the payload single-quotes every argument, and the command hands that
+ * whole payload to `sh -c` as one quoted word, so each of those quotes is escaped once more on the way out.
+ */
+private fun payloadArgument(name: String, value: String): String {
+    val quote = "'\"'\"'"
+    return "$quote$name$quote $quote$value$quote"
 }
 
 /** A host that answers the listing command from a script output, or never answers at all. */
