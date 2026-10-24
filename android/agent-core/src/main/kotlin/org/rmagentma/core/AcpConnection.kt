@@ -79,6 +79,7 @@ internal class AcpConnection(
     private var incomingBytes = 0L
     private val writer = Mutex()
     private val eventBuffer = BoundedEventBuffer()
+    private val stderrTail = StderrTail()
     val events = eventBuffer.events
 
     @Volatile var sessionId: String? = null
@@ -98,9 +99,11 @@ internal class AcpConnection(
         }
         scope.launch(ioDispatcher) {
             try {
-                runInterruptible { drainStderr(channel.stderr) }
+                runInterruptible { drainStderr(channel.stderr, stderrTail) }
             } catch (_: Exception) {
                 if (!stopped.get()) diagnostic("ACP stderr stream closed unexpectedly")
+            } finally {
+                stderrTail.markDrained()
             }
         }
         scope.launch(ioDispatcher) {
@@ -131,7 +134,8 @@ internal class AcpConnection(
             } catch (e: Exception) {
                 failure = if (e is IOException) e else IOException("ACP transport read failed", e)
             } finally {
-                finish(failure)
+                stderrTail.awaitDrained()
+                finish(withStderrTail(failure, stderrTail))
             }
         }
     }

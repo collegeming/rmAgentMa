@@ -112,6 +112,7 @@ internal class ZcodeConnection(
 
     @Volatile private var subscribed = false
     private var lastSeq = -1L
+    private val stderrTail = StderrTail()
 
     init {
         require(requestTimeoutMs > 0 && cleanupTimeoutMs > 0)
@@ -123,7 +124,11 @@ internal class ZcodeConnection(
             }
         }
         scope.launch(ioDispatcher) {
-            runCatching { runInterruptible { drainStderr(channel.stderr) } }
+            try {
+                runCatching { runInterruptible { drainStderr(channel.stderr, stderrTail) } }
+            } finally {
+                stderrTail.markDrained()
+            }
         }
         scope.launch(ioDispatcher) {
             var failure: IOException = EOFException("ZCode stdout reached EOF")
@@ -138,7 +143,8 @@ internal class ZcodeConnection(
             } catch (e: Exception) {
                 failure = if (e is IOException) e else IOException("ZCode transport read failed")
             } finally {
-                finish(failure)
+                stderrTail.awaitDrained()
+                finish(withStderrTail(failure, stderrTail))
             }
         }
     }

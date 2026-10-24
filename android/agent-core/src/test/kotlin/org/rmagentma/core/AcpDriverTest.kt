@@ -177,7 +177,7 @@ class AcpDriverTest {
                 val closing = async { connection.close() }
                 assertEquals(null, kotlinx.coroutines.withTimeoutOrNull(100) { closing.await() })
                 assertEquals(listOf("content", "complete", "error"), events.map { it.type })
-                assertEquals("ACP stdout reached EOF", events.last().text)
+                assertEquals("ACP stdout reached EOF; stderr tail: private-stderr-body", events.last().text)
                 releaseClose.countDown()
                 withTimeout(1000) { transportClosed.await() }
                 closing.await()
@@ -415,10 +415,14 @@ class AcpDriverTest {
                     }
                 }
                 override val stdin = object : java.io.ByteArrayOutputStream() {
-                    override fun flush() { pendingSeen.complete(Unit) }
+                    override fun flush() {
+                        pendingSeen.complete(Unit)
+                    }
                 }
                 override val stderr = ByteArrayInputStream(byteArrayOf())
-                override fun close() { closed.complete(Unit) }
+                override fun close() {
+                    closed.complete(Unit)
+                }
             }
             val connection = AcpConnection(channel, scope, Dispatchers.IO)
             try {

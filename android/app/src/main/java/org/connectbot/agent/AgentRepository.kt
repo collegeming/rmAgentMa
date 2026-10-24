@@ -53,6 +53,7 @@ import org.rmagentma.core.AgentSessionConfig
 import org.rmagentma.core.AgentSessionHandle
 import org.rmagentma.core.RemoteAgentProbe
 import org.rmagentma.core.RemoteScanner
+import org.rmagentma.core.RemoteWorkingDirectoryCheck
 import org.rmagentma.core.ZcodeBusyException
 import org.rmagentma.core.ZcodeDriver
 import org.rmagentma.core.ZcodeLaunchConfig
@@ -327,6 +328,12 @@ class AgentRepository @Inject constructor(
                 trace("probe_end")
                 if (!runtime.available) throw java.io.IOException("${session.agent.wireName} unavailable: ${runtime.error.ifBlank { "agent startup probe failed" }}")
                 val remote = pool.hostSession(session.hostId)
+                // The directory is checked before an Agent process exists for this session, on the same host session
+                // the Agent is launched on: a directory the host cannot use fails as itself, leaves the cached probe
+                // verdict untouched and opens no half-ready handle, so the user corrects the path and retries.
+                trace("cwd_check_start")
+                RemoteWorkingDirectoryCheck(dispatchers.io).verify(remote, session.cwd)
+                trace("cwd_check_end")
                 trace("prepare_start")
                 val opened: AgentSessionHandle = when (session.agent) {
                     AgentKind.ZCODE -> ZcodeDriver(
