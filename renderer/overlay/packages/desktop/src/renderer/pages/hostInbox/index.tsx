@@ -73,7 +73,12 @@ const HostInboxPage: React.FC = () => {
             <h1 className='m-0 text-20px leading-[1.2] font-bold text-t-primary'>
               {t('conversation.hostTools.inboxTitle')}
             </h1>
-            <Button size='small' icon={<Refresh theme='outline' size='14' />} loading={loading} onClick={() => void load()}>
+            <Button
+              size='small'
+              icon={<Refresh theme='outline' size='14' />}
+              loading={loading}
+              onClick={() => void load()}
+            >
               {t('conversation.hostTools.inboxRefresh')}
             </Button>
           </div>

@@ -201,8 +201,7 @@ export async function packReference(conversationId: string): Promise<ReferencePa
     `/api/conversations/${encodeURIComponent(conversationId)}/reference`
   );
   const row = recordOf(answer);
-  const text =
-    typeof answer === 'string' ? answer : pick(row, 'text', 'pack', 'reference', 'content');
+  const text = typeof answer === 'string' ? answer : pick(row, 'text', 'pack', 'reference', 'content');
   if (!text) throw new Error('HOST_REFERENCE_EMPTY');
   return { text, hostId: pick(row, 'host_id', 'host'), cwd: pick(row, 'cwd'), status: pick(row, 'status') };
 }

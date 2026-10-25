@@ -26,13 +26,7 @@ type Props = {
  * The host list is read once the sidebar holds host rows at all: without it a group could not be titled with
  * the host it runs on. A list with no host row behind it costs no request.
  */
-const HostHistoryFilterBar: React.FC<Props> = ({
-  conversations,
-  hostId,
-  agentId,
-  onHostChange,
-  onAgentChange,
-}) => {
+const HostHistoryFilterBar: React.FC<Props> = ({ conversations, hostId, agentId, onHostChange, onAgentChange }) => {
   const { t } = useTranslation();
   const directory = useHostDirectory();
   const { hostIds, agentIds } = filterOptionIds(conversations);
@@ -60,10 +54,7 @@ const HostHistoryFilterBar: React.FC<Props> = ({
           if (visible) openHostSelector();
         }}
         getPopupContainer={() => document.body}
-        options={[
-          all,
-          ...hostIds.map((id) => ({ label: hostLabelOf(id) ?? id, value: id })),
-        ]}
+        options={[all, ...hostIds.map((id) => ({ label: hostLabelOf(id) ?? id, value: id }))]}
       />
       <Select
         size='mini'

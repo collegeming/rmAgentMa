@@ -40,6 +40,77 @@ const FolderIcon = ({ size = 12 }: { size?: number }) => (
 );
 
 /**
+ * What the host already holds: the directories its own session rows name, and the sessions themselves.
+ * The rows come from the conversation list the app already loaded, so opening the picker costs no extra
+ * request — and a host with nothing loaded yet shows that rather than an invented directory.
+ *
+ * It is mounted only while the picker is open: a closed picker must not subscribe to the app's
+ * conversation list, nor need it to be there at all.
+ */
+const HostWorkspaceOptions: React.FC<{
+  hostId: string;
+  onPickDirectory: (hostDir: string) => void;
+  onOpenSession: (conversationId: string) => void;
+}> = ({ hostId, onPickDirectory, onOpenSession }) => {
+  const { t } = useTranslation();
+  const { conversations } = useConversationListSync();
+  const hostRows = useMemo(() => conversations.filter((row) => hostIdOf(row) === hostId), [conversations, hostId]);
+  const hostDirectories = useMemo(() => {
+    const seen = new Map<string, true>();
+    for (const row of hostRows) {
+      const cwd = hostWorkspaceOf(row)?.cwd;
+      if (cwd && !seen.has(cwd)) seen.set(cwd, true);
+    }
+    return [...seen.keys()];
+  }, [hostRows]);
+
+  return (
+    <div className='flex flex-col gap-2px' data-testid='guid-host-workspaces'>
+      <span className='text-12px text-t-tertiary'>{t('guid.workspace.hostDirectories')}</span>
+      {hostDirectories.slice(0, 8).map((hostDir) => (
+        <div
+          key={hostDir}
+          role='button'
+          tabIndex={0}
+          title={hostDir}
+          className='cursor-pointer truncate rounded-4px px-6px py-4px text-12px leading-16px text-t-secondary hover:bg-fill-2'
+          onClick={() => onPickDirectory(hostDir)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              onPickDirectory(hostDir);
+            }
+          }}
+        >
+          {hostDir}
+        </div>
+      ))}
+      {hostRows.length === 0 && (
+        <span className='text-12px text-t-tertiary'>{t('guid.workspace.hostDirectoriesEmpty')}</span>
+      )}
+      {hostRows.slice(0, 5).map((row) => (
+        <div
+          key={row.id}
+          role='button'
+          tabIndex={0}
+          className='flex min-w-0 cursor-pointer flex-col rounded-4px px-6px py-4px hover:bg-fill-2'
+          onClick={() => onOpenSession(row.id)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.preventDefault();
+              onOpenSession(row.id);
+            }
+          }}
+        >
+          <span className='truncate text-12px leading-16px text-t-primary'>{row.name}</span>
+          <span className='truncate text-11px leading-16px text-t-tertiary'>{hostWorkspaceOf(row)?.cwd ?? ''}</span>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+/**
  * The workspace picker: a host and a working directory on it, both named by the user. The directory is
  * typed rather than browsed, because the folder belongs to the host and no folder dialog on this phone can
  * reach it; a local machine path would name a directory the host does not have.
@@ -51,7 +122,6 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
 }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { conversations } = useConversationListSync();
   const [open, setOpen] = useState(false);
   const [hosts, setHosts] = useState<SavedHost[]>([]);
   const [hostsLoaded, setHostsLoaded] = useState(false);
@@ -66,21 +136,10 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
     setDir(workspaceDir);
   }, [workspaceDir]);
 
-  // What this host already holds: the directories its own session rows name, and the sessions themselves.
-  // The rows come from the conversation list the app already loaded, so opening this picker costs no extra
-  // request — and a host with nothing loaded yet shows that rather than an invented directory.
-  const hostRows = useMemo(
-    () => (hostId ? conversations.filter((row) => hostIdOf(row) === hostId) : []),
-    [conversations, hostId]
-  );
-  const hostDirectories = useMemo(() => {
-    const seen = new Map<string, true>();
-    for (const row of hostRows) {
-      const cwd = hostWorkspaceOf(row)?.cwd;
-      if (cwd && !seen.has(cwd)) seen.set(cwd, true);
-    }
-    return [...seen.keys()];
-  }, [hostRows]);
+  const pickDirectory = useCallback((hostDir: string) => {
+    setDir(hostDir);
+    setFailure(null);
+  }, []);
 
   // The host list is read once, when the picker is first opened: it costs a host request, and the home page
   // must not spend one before the user asks for it.
@@ -224,54 +283,7 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
 
             {/* What this host already holds, so a workspace can be picked from it instead of typed. */}
             {hostId && (
-              <div className='flex flex-col gap-2px' data-testid='guid-host-workspaces'>
-                <span className='text-12px text-t-tertiary'>{t('guid.workspace.hostDirectories')}</span>
-                {hostDirectories.slice(0, 8).map((hostDir) => (
-                  <div
-                    key={hostDir}
-                    role='button'
-                    tabIndex={0}
-                    title={hostDir}
-                    className='cursor-pointer truncate rounded-4px px-6px py-4px text-12px leading-16px text-t-secondary hover:bg-fill-2'
-                    onClick={() => {
-                      setDir(hostDir);
-                      setFailure(null);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        setDir(hostDir);
-                        setFailure(null);
-                      }
-                    }}
-                  >
-                    {hostDir}
-                  </div>
-                ))}
-                {hostRows.length === 0 && (
-                  <span className='text-12px text-t-tertiary'>{t('guid.workspace.hostDirectoriesEmpty')}</span>
-                )}
-                {hostRows.slice(0, 5).map((row) => (
-                  <div
-                    key={row.id}
-                    role='button'
-                    tabIndex={0}
-                    className='flex min-w-0 cursor-pointer flex-col rounded-4px px-6px py-4px hover:bg-fill-2'
-                    onClick={() => openSession(row.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        event.preventDefault();
-                        openSession(row.id);
-                      }
-                    }}
-                  >
-                    <span className='truncate text-12px leading-16px text-t-primary'>{row.name}</span>
-                    <span className='truncate text-11px leading-16px text-t-tertiary'>
-                      {hostWorkspaceOf(row)?.cwd ?? ''}
-                    </span>
-                  </div>
-                ))}
-              </div>
+              <HostWorkspaceOptions hostId={hostId} onPickDirectory={pickDirectory} onOpenSession={openSession} />
             )}
           </div>
 

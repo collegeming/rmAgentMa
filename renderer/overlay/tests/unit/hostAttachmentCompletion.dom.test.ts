@@ -14,33 +14,28 @@ afterEach(() => {
 });
 
 describe('native attachment completion guard', () => {
-  it.each(['signal', 'document'])('does not return finish result after %s cancellation', async (kind) => {
+  // 宿主尚不支持接收附件：上传止步于边界，既不碰传输、也不报进度。
+  // This host cannot receive attachments, so the upload stops at that boundary: no frame reaches the
+  // transport and no progress is ever reported.
+  it.each(['signal', 'document'])('stops before the transport after a %s cancellation', async (kind) => {
     const controller = new AbortController();
     const progress = vi.fn();
-    vi.stubGlobal('crypto', { subtle: { digest: async () => new ArrayBuffer(32) } });
+    if (kind === 'signal') controller.abort();
+    else
+      alive.mockImplementation(() => {
+        throw new Error('HOST_DOCUMENT_CLOSED');
+      });
     const file = {
       name: 'probe.txt',
       type: 'text/plain',
       size: 1,
       arrayBuffer: async () => new Uint8Array([1]).buffer,
     } as File;
-    action.mockImplementation(async (name: string) => {
-      if (name === 'attachment.begin') return { uploadId: 'upload-1', chunkBytes: 1 };
-      if (name === 'attachment.chunk') return { offset: 1 };
-      if (name === 'attachment.finish') {
-        if (kind === 'signal') controller.abort();
-        else
-          alive.mockImplementation(() => {
-            throw new Error('HOST_DOCUMENT_CLOSED');
-          });
-        return { attachmentRef: 'probe-upload:12345678-1234-1234-1234-123456789abc' };
-      }
-      return {};
-    });
     await expect(uploadHostAttachment(file, 'conv-probe-1', progress, undefined, controller.signal)).rejects.toThrow(
-      kind === 'signal' ? 'Upload aborted' : 'HOST_DOCUMENT_CLOSED'
+      'HOST_ATTACHMENTS_UNSUPPORTED'
     );
-    expect(progress.mock.calls.filter(([value]) => value === 100)).toHaveLength(0);
-    expect(action.mock.calls.some(([name]) => name === 'attachment.abort')).toBe(false);
+    expect(progress).not.toHaveBeenCalled();
+    expect(alive).not.toHaveBeenCalled();
+    expect(action).not.toHaveBeenCalled();
   });
 });

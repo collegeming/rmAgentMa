@@ -79,7 +79,9 @@ export function capabilityLabels(capabilities: HostAgentProbe['capabilities']): 
   }
   if (!capabilities || typeof capabilities !== 'object') return [];
   return Object.entries(capabilities)
-    .filter(([, value]) => value === true || (typeof value === 'string' && Boolean(value.trim())) || typeof value === 'number')
+    .filter(
+      ([, value]) => value === true || (typeof value === 'string' && Boolean(value.trim())) || typeof value === 'number'
+    )
     .map(([key, value]) => (value === true ? key : `${key}: ${String(value)}`));
 }
 

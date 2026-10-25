@@ -861,7 +861,7 @@ class RendererActionsTest {
      */
     @Test
     fun usageTheTurnBoundaryAndAgentSessionFactsEachReachTheRendererAsTheirOwnRow() = runTest {
-        val events = listOf(
+        val window = listOf(
             AgentEvent(
                 type = "usage",
                 raw = buildJsonObject {
@@ -874,7 +874,7 @@ class RendererActionsTest {
             AgentEvent(type = "complete", status = "end_turn", historyKey = 2),
             AgentEvent(type = "session_info", title = "新标题", raw = buildJsonObject { put("title", "新标题") }, historyKey = 3),
         )
-        val items = (RendererActions(openSource().apply { events = events }).handle("messages.list", payload(conversation = true)).body as JSONObject)
+        val items = (RendererActions(openSource().apply { events = window }).handle("messages.list", payload(conversation = true)).body as JSONObject)
             .getJSONObject("data").getJSONArray("items")
         assertThat(items.length()).isEqualTo(3)
         assertThat(items.getJSONObject(0).getString("type")).isEqualTo("acp_context_usage")

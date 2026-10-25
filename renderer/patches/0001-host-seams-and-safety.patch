@@ -7890,3 +7890,214 @@ diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-TW/guid.json
 +    "hostDirectoriesEmpty": "該主機還沒有對話，暫不知道目錄，請在上方填寫。"
    }
  }
+diff --git a/packages/desktop/src/renderer/services/feedback/resolveFeedbackModule.ts b/packages/desktop/src/renderer/services/feedback/resolveFeedbackModule.ts
+--- a/packages/desktop/src/renderer/services/feedback/resolveFeedbackModule.ts
++++ b/packages/desktop/src/renderer/services/feedback/resolveFeedbackModule.ts
+@@ -23,6 +23,10 @@
+   ['/assistants', 'assistant-preset'],
+   // The host page owns the Agent target and the probe verdicts of each saved host.
+   ['/hosts', 'agent-detection'],
++  // The inbox lists what is waiting inside sessions: approvals, questions, a failed turn.
++  ['/inbox', 'conversation-session'],
++  // The search page searches the conversation rows the app already holds.
++  ['/search', 'search-history'],
+   ['/settings/agent', 'agent-detection'],
+   ['/settings/model', 'model-auth'],
+   ['/settings/skills', 'skills-plugin'],
+diff --git a/tests/unit/feedback/resolveFeedbackModule.test.ts b/tests/unit/feedback/resolveFeedbackModule.test.ts
+--- a/tests/unit/feedback/resolveFeedbackModule.test.ts
++++ b/tests/unit/feedback/resolveFeedbackModule.test.ts
+@@ -22,6 +22,8 @@
+     ['/scheduled/job-42', 'scheduled-task'],
+     ['/assistants', 'assistant-preset'],
+     ['/hosts', 'agent-detection'],
++    ['/inbox', 'conversation-session'],
++    ['/search', 'search-history'],
+     ['/settings/agent', 'agent-detection'],
+     ['/settings/agent/claude/repair', 'agent-detection'],
+     ['/settings/model', 'model-auth'],
+diff --git a/tests/unit/renderer/GuidActionRow.dom.test.tsx b/tests/unit/renderer/GuidActionRow.dom.test.tsx
+--- a/tests/unit/renderer/GuidActionRow.dom.test.tsx
++++ b/tests/unit/renderer/GuidActionRow.dom.test.tsx
+@@ -186,25 +186,28 @@
+     environment.isDesktop = true;
+   });
+ 
+-  it('offers both host files and device upload in the mobile WebUI action sheet', () => {
++  // This host cannot receive attachments, so the mobile WebUI sheet offers neither the host-machine picker
++  // nor the device upload: it keeps one entry that names the reason and cannot be used.
++  it('offers only the disabled attach entry in the mobile WebUI action sheet', () => {
+     environment.isMobile = true;
+     environment.isDesktop = false;
+     renderActionRow({ allSkills: [], mcpServers: [] });
+ 
+-    expect(screen.getByTestId('attach-host-files')).toHaveTextContent('Add files');
+-    expect(screen.getByTestId('attach-my-device')).toHaveTextContent('Upload from device');
++    expect(screen.getByTestId('attach')).toHaveTextContent('Add files');
++    expect(screen.queryByTestId('attach-host-files')).not.toBeInTheDocument();
++    expect(screen.queryByTestId('attach-my-device')).not.toBeInTheDocument();
+   });
+ 
+-  it('adds files selected from the host picker in mobile WebUI', async () => {
++  it('opens no host picker from the mobile WebUI attach entry', async () => {
+     environment.isMobile = true;
+     environment.isDesktop = false;
+     const onFilesPicked = vi.fn();
+-    vi.mocked(ipcBridge.dialog.showOpen.invoke).mockResolvedValue(['/host/project/a.txt']);
+     renderActionRow({ allSkills: [], mcpServers: [], onFilesPicked });
+ 
+-    fireEvent.click(screen.getByTestId('attach-host-files'));
++    fireEvent.click(screen.getByTestId('attach'));
+ 
+-    await waitFor(() => expect(onFilesPicked).toHaveBeenCalledWith(['/host/project/a.txt']));
++    await waitFor(() => expect(ipcBridge.dialog.showOpen.invoke).not.toHaveBeenCalled());
++    expect(onFilesPicked).not.toHaveBeenCalled();
+   });
+ 
+   it('shows both search boxes when skills and MCP servers exceed the threshold', () => {
+diff --git a/tests/unit/renderer/conversation/ConversationRowCronMenu.dom.test.tsx b/tests/unit/renderer/conversation/ConversationRowCronMenu.dom.test.tsx
+--- a/tests/unit/renderer/conversation/ConversationRowCronMenu.dom.test.tsx
++++ b/tests/unit/renderer/conversation/ConversationRowCronMenu.dom.test.tsx
+@@ -7,6 +7,7 @@
+ import type { TChatConversation } from '@/common/config/storage';
+ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+ import React from 'react';
++import { MemoryRouter } from 'react-router-dom';
+ import { describe, expect, it, vi } from 'vitest';
+ 
+ vi.mock('react-i18next', () => ({
+@@ -73,12 +74,21 @@
+   ...overrides,
+ });
+ 
++// The row's menu carries the cross-session items, which navigate, so the row needs a router the way the
++// app always gives it one.
++const renderRow = (overrides: Partial<ConversationRowProps> = {}) =>
++  render(
++    <MemoryRouter>
++      <ConversationRow {...makeProps(overrides)} />
++    </MemoryRouter>
++  );
++
+ describe('conversation scheduled-task menu item', () => {
+   it('renders the Timer action between Rename and Archive and invokes it for the selected row', async () => {
+     const onCreateCronTask = vi.fn();
+     const onEditStart = vi.fn();
+     const onArchive = vi.fn();
+-    render(<ConversationRow {...makeProps({ onCreateCronTask, onArchive, onEditStart })} />);
++    renderRow({ onCreateCronTask, onArchive, onEditStart });
+ 
+     const rename = await screen.findByText('conversation.history.rename');
+     const createCronTask = screen.getByText('conversation.history.createCronTask');
+@@ -96,7 +106,7 @@
+   });
+ 
+   it('keeps row actions hidden while batch selection is active', () => {
+-    render(<ConversationRow {...makeProps({ batchMode: true, menuVisible: false })} />);
++    renderRow({ batchMode: true, menuVisible: false });
+ 
+     expect(screen.queryByText('conversation.history.createCronTask')).not.toBeInTheDocument();
+   });
+diff --git a/tests/unit/renderer/conversation/ConversationRowManualUnread.dom.test.tsx b/tests/unit/renderer/conversation/ConversationRowManualUnread.dom.test.tsx
+--- a/tests/unit/renderer/conversation/ConversationRowManualUnread.dom.test.tsx
++++ b/tests/unit/renderer/conversation/ConversationRowManualUnread.dom.test.tsx
+@@ -7,6 +7,7 @@
+ import type { TChatConversation } from '@/common/config/storage';
+ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+ import React from 'react';
++import { MemoryRouter } from 'react-router-dom';
+ import { describe, expect, it, vi } from 'vitest';
+ 
+ vi.mock('react-i18next', () => ({
+@@ -75,9 +76,18 @@
+   ...overrides,
+ });
+ 
++// The row's menu carries the cross-session items, which navigate, so the row needs a router the way the
++// app always gives it one.
++const renderRow = (overrides: Partial<ConversationRowProps> = {}) =>
++  render(
++    <MemoryRouter>
++      <ConversationRow {...makeProps(overrides)} />
++    </MemoryRouter>
++  );
++
+ describe('conversation mark-as-unread menu item', () => {
+   it('offers "Mark as unread" when the conversation is not manually unread', async () => {
+-    render(<ConversationRow {...makeProps({ isManualUnread: false })} />);
++    renderRow({ isManualUnread: false });
+ 
+     const item = await screen.findByText('conversation.history.markAsUnread');
+     expect(item).toBeInTheDocument();
+@@ -85,7 +95,7 @@
+   });
+ 
+   it('offers "Mark as read" when the conversation is manually unread', async () => {
+-    render(<ConversationRow {...makeProps({ isManualUnread: true })} />);
++    renderRow({ isManualUnread: true });
+ 
+     const item = await screen.findByText('conversation.history.markAsRead');
+     expect(item).toBeInTheDocument();
+@@ -94,7 +104,7 @@
+ 
+   it('invokes onToggleManualUnread with the conversation on click', async () => {
+     const onToggleManualUnread = vi.fn();
+-    render(<ConversationRow {...makeProps({ onToggleManualUnread })} />);
++    renderRow({ onToggleManualUnread });
+ 
+     const item = await screen.findByText('conversation.history.markAsUnread');
+     fireEvent.click(item);
+@@ -102,7 +112,7 @@
+   });
+ 
+   it('keeps the unread actions hidden while batch selection is active', () => {
+-    render(<ConversationRow {...makeProps({ batchMode: true, menuVisible: false })} />);
++    renderRow({ batchMode: true, menuVisible: false });
+ 
+     expect(screen.queryByText('conversation.history.markAsUnread')).not.toBeInTheDocument();
+     expect(screen.queryByText('conversation.history.markAsRead')).not.toBeInTheDocument();
+diff --git a/packages/desktop/src/renderer/components/layout/Sider/index.tsx b/packages/desktop/src/renderer/components/layout/Sider/index.tsx
+--- a/packages/desktop/src/renderer/components/layout/Sider/index.tsx
++++ b/packages/desktop/src/renderer/components/layout/Sider/index.tsx
+@@ -8,7 +8,13 @@
+ import { useThemeContext } from '@renderer/hooks/context/ThemeContext';
+ import { Inbox, Search } from '@icon-park/react';
+ import { useTranslation } from 'react-i18next';
+-import { SiderToolbar, SiderSearchEntry, SiderHostsEntry, SiderHostToolEntry, SiderNewConversationEntry } from './SiderNav';
++import {
++  SiderToolbar,
++  SiderSearchEntry,
++  SiderHostsEntry,
++  SiderHostToolEntry,
++  SiderNewConversationEntry,
++} from './SiderNav';
+ import SiderFooter from './SiderFooter';
+ import siderStyles from './Sider.module.css';
+ 
+diff --git a/packages/desktop/src/renderer/pages/conversation/GroupedHistory/index.tsx b/packages/desktop/src/renderer/pages/conversation/GroupedHistory/index.tsx
+--- a/packages/desktop/src/renderer/pages/conversation/GroupedHistory/index.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/GroupedHistory/index.tsx
+@@ -277,10 +277,7 @@
+     [timelineSections, passesFilter]
+   );
+ 
+-  const pinnedVisible = useMemo(
+-    () => pinnedConversations.filter(passesFilter),
+-    [pinnedConversations, passesFilter]
+-  );
++  const pinnedVisible = useMemo(() => pinnedConversations.filter(passesFilter), [pinnedConversations, passesFilter]);
+ 
+   if (timelineSections.length === 0 && pinnedConversations.length === 0) {
+     return (
+@@ -526,7 +523,10 @@
+                               onClick={(e) => {
+                                 e.stopPropagation();
+                                 void navigate('/guid', {
+-                                  state: { workspace: openWorkspace, ...(group.host ? { hostId: group.host.hostId } : {}) },
++                                  state: {
++                                    workspace: openWorkspace,
++                                    ...(group.host ? { hostId: group.host.hostId } : {}),
++                                  },
+                                 });
+                               }}
+                               onKeyDown={(e) => {

@@ -7,7 +7,15 @@ import type { SavedHost } from '@/common/host/hostTransport';
 import { Button, Popconfirm } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { capabilityLabels, osText, probeLabelKey, probeReading, sessionCountText, targetLabel, type HostProbeReading } from './hostModel';
+import {
+  capabilityLabels,
+  osText,
+  probeLabelKey,
+  probeReading,
+  sessionCountText,
+  targetLabel,
+  type HostProbeReading,
+} from './hostModel';
 
 type Props = {
   host: SavedHost;
@@ -75,7 +83,10 @@ const HostCard: React.FC<Props> = ({ host, refreshing, failure, onRefresh, onEdi
                     {t('settings.hosts.version', { version: agent.version })}
                   </span>
                 )}
-                <span className='flex flex-wrap items-center gap-4px' data-testid={`host-capabilities-${host.id}-${agent.id}`}>
+                <span
+                  className='flex flex-wrap items-center gap-4px'
+                  data-testid={`host-capabilities-${host.id}-${agent.id}`}
+                >
                   <span className='text-11px leading-16px text-t-tertiary'>{t('settings.hosts.capabilities')}</span>
                   {capabilities.length > 0 ? (
                     capabilities.map((capability) => (

@@ -78,7 +78,9 @@ const HostSearchPage: React.FC = () => {
     <div className='box-border flex h-full w-full min-h-0 flex-col overflow-hidden bg-1'>
       <div className={classNames('shrink-0 bg-1', isMobile ? 'px-16px pt-14px pb-10px' : 'px-40px pt-24px pb-10px')}>
         <div className='mx-auto flex w-full max-w-800px flex-col gap-10px'>
-          <h1 className='m-0 text-20px leading-[1.2] font-bold text-t-primary'>{t('conversation.hostTools.searchTitle')}</h1>
+          <h1 className='m-0 text-20px leading-[1.2] font-bold text-t-primary'>
+            {t('conversation.hostTools.searchTitle')}
+          </h1>
           <Input
             value={query}
             size='large'
@@ -116,7 +118,13 @@ const HostSearchPage: React.FC = () => {
                 ...agentIds.map((id) => ({ label: id, value: id })),
               ]}
             />
-            <Button type='primary' size='small' loading={busy} data-testid='host-search-submit' onClick={() => void run()}>
+            <Button
+              type='primary'
+              size='small'
+              loading={busy}
+              data-testid='host-search-submit'
+              onClick={() => void run()}
+            >
               {t('conversation.hostTools.searchAction')}
             </Button>
           </div>
@@ -199,11 +207,17 @@ const SearchCoverageHeader: React.FC<{ coverage: SearchCoverage }> = ({ coverage
       data-testid='host-search-coverage'
       className='flex flex-col gap-2px rounded-8px bg-fill-2 px-10px py-6px text-12px leading-18px text-t-secondary'
     >
-      <span>{t(complete ? 'conversation.hostTools.searchCoverageComplete' : 'conversation.hostTools.searchCoveragePartial')}</span>
+      <span>
+        {t(complete ? 'conversation.hostTools.searchCoverageComplete' : 'conversation.hostTools.searchCoveragePartial')}
+      </span>
       {coverage.truncated && <span>{t('conversation.hostTools.searchCoverageTruncated')}</span>}
-      {failed && <span className='break-words'>{t('conversation.hostTools.searchCoverageFailed', { sources: failed })}</span>}
+      {failed && (
+        <span className='break-words'>{t('conversation.hostTools.searchCoverageFailed', { sources: failed })}</span>
+      )}
       {coverage.problems.length > 0 && (
-        <span className='break-words'>{t('conversation.hostTools.searchCoverageProblems', { problems: coverage.problems.join(', ') })}</span>
+        <span className='break-words'>
+          {t('conversation.hostTools.searchCoverageProblems', { problems: coverage.problems.join(', ') })}
+        </span>
       )}
     </div>
   );

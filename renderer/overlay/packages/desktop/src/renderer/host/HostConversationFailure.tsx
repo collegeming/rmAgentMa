@@ -5,7 +5,12 @@
  */
 import { hostFailureText } from '@renderer/pages/hosts/hostsApi';
 import { retryHostEvents } from '@/common/host/hostTransport';
-import { markHostInterrupted, markHostLive, hostConnectionSnapshot, subscribeHostConnection } from '@/common/host/hostConnection';
+import {
+  markHostInterrupted,
+  markHostLive,
+  hostConnectionSnapshot,
+  subscribeHostConnection,
+} from '@/common/host/hostConnection';
 import { wsEmitter } from '@/common/adapter/httpBridge';
 import { Button } from '@arco-design/web-react';
 import { LinkOne } from '@icon-park/react';
