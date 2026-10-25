@@ -21,13 +21,20 @@ import kotlinx.coroutines.CancellationException
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConfigBusyException
 import org.connectbot.data.entity.Host
+import org.connectbot.ui.screens.agents.AgentHostState
+import org.connectbot.ui.screens.agents.agentHostChoices
+import org.connectbot.ui.screens.agents.projectQuestion
+import org.connectbot.ui.screens.agents.validAgentCwd
+import org.connectbot.ui.screens.agents.validQuestionAnswer
 import org.json.JSONArray
 import org.json.JSONObject
 import org.rmagentma.core.AGENT_TARGET_NATIVE
 import org.rmagentma.core.AGENT_TARGET_WSL_PREFIX
+import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.HOST_OS_LINUX
 import org.rmagentma.core.HOST_OS_WINDOWS
+import org.rmagentma.core.ShellCommands
 import org.rmagentma.core.remoteTargetOf
 import org.rmagentma.core.validWslDistribution
 import org.rmagentma.rendererhost.ProbeFailure
@@ -63,13 +70,18 @@ internal class RendererActions(private val source: RendererSource) {
         "settings.client.read" -> success(json(THEME_KEY to source.snapshot().theme))
         "settings.client.write" -> writeSettings(body)
         "conversations.list" -> conversations()
+        "conversations.create" -> createConversation(params, body)
         "conversation.read" -> conversation(params)
         "messages.list" -> messages(query, params.optString("conversationId"))
+        "messages.before" -> messagesBefore(query, params.optString("conversationId"))
         "messages.latest" -> latest(query, params.optString("conversationId"))
         "messages.send" -> send(body, params.optString("conversationId"))
         "turn.cancel" -> cancel(body, params.optString("conversationId"))
         "approvals.list" -> approvals(params.optString("conversationId"))
         "approvals.review" -> review(params, body)
+        "interactions.review" -> reviewQuestion(params, body)
+        "challenges.read" -> readChallenge()
+        "challenges.answer" -> answerChallenge(params, body)
         "runtime.ensure" -> ensure(params)
         "runtime.snapshot" -> snapshot()
         "config.read" -> readConfig(params)
@@ -83,7 +95,10 @@ internal class RendererActions(private val source: RendererSource) {
         "hosts.create" -> createHost(body)
         "hosts.update" -> updateHost(params, body)
         "hosts.delete" -> deleteHost(params)
+        "hosts.refresh" -> refreshHost(params)
         "detection.refresh" -> refreshDetection(params)
+        "terminal.open" -> terminal(params, body)
+        "terminal.command.start" -> terminal(params, body)
         "assistants.list" -> success(RendererProjection.assistants(source.snapshot().availability))
         "agents.list" -> success(RendererProjection.agents(source.snapshot().availability))
         "adapters.list" -> success(RendererProjection.adapters(source.snapshot().availability))
@@ -157,6 +172,44 @@ internal class RendererActions(private val source: RendererSource) {
         }
     }
 
+    /**
+     * Creates one conversation on a saved host and answers the row the product now holds, together with the native
+     * id the Agent assigned. The Agent and the absolute working directory are checked before anything runs, and the
+     * directory itself is verified read-only on the host by the repository, so a directory the host cannot use
+     * fails as its own reason. A conversation that opened without a native id is reported as unknown instead of
+     * being dressed up with an id this host invented, because that id is what a later request has to name it by.
+     */
+    private suspend fun createConversation(params: JSONObject, body: JSONObject): ProbeResult {
+        val host = requestedHost(params) ?: return hostNotFound()
+        val requestedAgent = (body.opt("agent") as? String).orEmpty().ifEmpty { params.optString("agent") }
+        val agent = AgentKind.fromWire(requestedAgent) ?: return fail(422, "AGENT_UNKNOWN", "未知的 Agent：$requestedAgent。")
+        val cwd = (body.opt("cwd") as? String).orEmpty().ifEmpty { params.optString("cwd") }
+        if (!validAgentCwd(cwd)) return fail(422, "INVALID_CWD", "工作目录必须是绝对路径，且不能包含控制字符。")
+        val failure = try {
+            source.createSession(host.id, agent, cwd)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "SESSION_CREATE_FAILED", "会话未能创建：${reason(error)}")
+        }
+        if (failure != null) return fail(409, "SESSION_CREATE_FAILED", "会话未能打开：$failure")
+        val snapshot = source.snapshot()
+        val created = snapshot.session
+        if (created == null || created.hostId != host.id || created.agent != agent || !snapshot.active) {
+            return fail(409, "SESSION_CREATE_FAILED", "会话未能保持打开，已被其它会话切换替代。")
+        }
+        val sessionId = created.sessionId.takeIf { it.isNotBlank() }
+            ?: return fail(409, "SESSION_ID_UNKNOWN", "会话已打开，但 Agent 未返回原生会话 id，无法在索引中定位它。")
+        val pending = snapshot.pending()
+        return success(
+            RendererProjection.conversation(snapshot, RendererConversationId.of(created), pending, RendererProjection.runtime(snapshot, pending))
+                .put("session_id", sessionId)
+                .put("agent", agent.wireName)
+                .put("cwd", created.cwd)
+                .put("created", true),
+        )
+    }
+
     private suspend fun messages(query: JSONObject, conversationId: String): ProbeResult {
         val snapshot = openFor(conversationId) ?: return notFound()
         val limit = if (query.has("limit")) query.optString("limit").toIntOrNull() ?: -1 else DEFAULT_PAGE
@@ -168,6 +221,37 @@ internal class RendererActions(private val source: RendererSource) {
         if (before != null && items.none { it.optString("id") == before }) return fail(422, "INVALID_CURSOR", "游标不在当前已加载的历史中。")
         if (after != null && items.none { it.optString("id") == after }) return fail(422, "INVALID_CURSOR", "游标不在当前已加载的历史中。")
         return success(RendererProjection.page(items, limit, before, after, snapshot.hasEarlier))
+    }
+
+    /**
+     * One page of the history that lies before the loaded window. The page is really read from the history store
+     * through the repository's own paging entry, and the answer is the page the product now holds: the renderer
+     * prepends it above what it already drew. A conversation whose earlier history the product no longer has, or
+     * whose page cannot be read, fails as exactly that instead of answering an empty page that reads like the end.
+     */
+    private suspend fun messagesBefore(query: JSONObject, conversationId: String): ProbeResult {
+        val snapshot = openFor(conversationId) ?: return notFound()
+        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_OPEN", "该会话尚未就绪；稍后再读取更早的历史。")
+        val limit = if (query.has("limit")) query.optString("limit").toIntOrNull() ?: -1 else DEFAULT_PAGE
+        if (limit !in 1..MAX_PAGE) return fail(422, "INVALID_CURSOR", "limit 必须是 1..$MAX_PAGE 的整数。")
+        val before = query.optString("before").ifEmpty { query.optString("anchor_message_id") }.ifEmpty { null }
+        val loaded = RendererProjection.messages(snapshot.events, conversationId, snapshot.epoch, snapshot.turnId)
+        // The cursor has to belong to the window the caller is reading, or the page below it would be a guess.
+        if (before != null && loaded.none { it.optString("id") == before }) return fail(422, "INVALID_CURSOR", "游标不在当前已加载的历史中。")
+        if (!snapshot.hasEarlier) return fail(409, "HISTORY_EXHAUSTED", "该会话没有更早的一页历史。")
+        try {
+            source.loadEarlier()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "HISTORY_LOAD_FAILED", "更早的历史未能读取：${reason(error)}")
+        }
+        val earlier = source.snapshot()
+        if (!namesOpen(earlier, conversationId)) return fail(409, "CONVERSATION_SWITCHED", "会话已切换，更早的历史不再属于当前会话。")
+        val items = RendererProjection.messages(earlier.events, conversationId, earlier.epoch, earlier.turnId)
+        // The window now holds the earlier page alone, so it is answered whole, and the newer part the caller
+        // still has is what `has_more_after` names.
+        return success(RendererProjection.page(items, limit, before = null, after = null, hasEarlier = earlier.hasEarlier, hasLater = true))
     }
 
     private suspend fun latest(query: JSONObject, conversationId: String): ProbeResult {
@@ -246,6 +330,77 @@ internal class RendererActions(private val source: RendererSource) {
         }
         if (!source.respondPermission(event, option)) return fail(409, "NOT_PENDING", "该审批请求已失效。")
         return success(json("state" to "answered", "request_id" to event.id, "option_id" to option))
+    }
+
+    /**
+     * Answers the live question of the open conversation. The reference must be the question card this host
+     * published, and the answer has to satisfy the schema the Agent stated, checked with the same projection the
+     * Compose conversation form uses. Whether the event is still the pending instance is decided by the repository
+     * against the selected session and the exact event, so a question from history can never become answerable
+     * here, and a question whose form this host cannot read is refused as unsupported rather than answered blind.
+     */
+    private suspend fun reviewQuestion(params: JSONObject, body: JSONObject): ProbeResult {
+        val conversationId = params.optString("conversationId")
+        val snapshot = openFor(conversationId) ?: return notFound()
+        val event = snapshot.pendingQuestion()
+        val reference = params.optString("requestRef")
+        if (reference.isEmpty() || event == null || event.id != reference || !snapshot.active) {
+            return fail(409, "NOT_PENDING", "该提问不再是当前挂起项。")
+        }
+        val epoch = body.optString("epoch")
+        if (epoch.isNotEmpty() && epoch != snapshot.epoch) return fail(409, "STALE_APPROVAL", "运行代次已变化，请重新读取。")
+        val answer = (body.opt("answer") as? String) ?: (body.opt("data") as? String)
+            ?: return fail(422, "INVALID_ANSWER", "回答必须是非空字符串。")
+        val form = projectQuestion(event.raw)
+        if (form.schema == null) return fail(501, "QUESTION_UNSUPPORTED", "该提问没有本机可读的作答结构。")
+        if (!validQuestionAnswer(form, answer)) return fail(422, "INVALID_ANSWER", "该回答不符合提问要求。")
+        if (!source.respondQuestion(event, answer)) return fail(409, "NOT_PENDING", "该提问已失效。")
+        // The answer is the user's own content and is not echoed back into a payload.
+        return success(json("state" to "answered", "request_id" to event.id, "question_id" to event.id))
+    }
+
+    /**
+     * The challenge the product is waiting on right now, if any: a host key confirmation, a login password or the
+     * passphrase of a private key. The answer is what this host must not hand out, so the payload carries the
+     * identity, the host it belongs to, the kind and the prompt text alone; a `null` challenge means no connection
+     * is asking for input, which is the truth and not a failure.
+     */
+    private suspend fun readChallenge(): ProbeResult {
+        val challenge = source.challenge() ?: return success(json("challenge" to null))
+        val hostId = challenge.hostId.takeIf { it > 0 && source.snapshot().hosts.any { host -> host.id == it } }
+        return success(
+            json(
+                "challenge" to json(
+                    "id" to challenge.id,
+                    "host_id" to hostId?.let(RendererProjection::projectId),
+                    "host_name" to challenge.hostName,
+                    "kind" to challenge.kind,
+                    "message" to challenge.message,
+                    // True when the user's input is a secret and must not be shown, stored or logged by the surface.
+                    "secret" to challenge.secret,
+                ),
+            ),
+        )
+    }
+
+    /**
+     * Hands the user's answer to the challenge this host is still waiting on. Only the pending id is answered, an
+     * absent answer cancels the request as the Compose dialog's own cancel does, and the value is passed through
+     * alone: it is never stored, logged or echoed back.
+     */
+    private suspend fun answerChallenge(params: JSONObject, body: JSONObject): ProbeResult {
+        val id = params.optString("challengeId")
+        val current = source.challenge()
+        if (id.isEmpty() || current == null || current.id != id) return fail(409, "CHALLENGE_NOT_PENDING", "该凭据请求已不再挂起。")
+        val answer = body.opt("answer")
+        if (answer != null && answer !== JSONObject.NULL && answer !is String) {
+            return fail(422, "INVALID_ANSWER", "答案必须是字符串；取消请省略 answer 或传 null。")
+        }
+        val text = answer as? String
+        if (text != null && text.length > MAX_SECRET_CHARS) return fail(422, "INVALID_ANSWER", "答案超出长度限制。")
+        // An absent answer, like an empty one, cancels the request, exactly as the Compose dialog's cancel does.
+        if (!source.respondChallenge(id, text.takeIf { it.isNotEmpty() })) return fail(409, "CHALLENGE_NOT_PENDING", "该凭据请求已不再挂起。")
+        return success(json("answered" to true, "challenge_id" to id))
     }
 
     /**
@@ -570,10 +725,108 @@ internal class RendererActions(private val source: RendererSource) {
         )
     }
 
+    /**
+     * One probe of one saved host through the repository's own refresh entry, which also rescans that host's
+     * session index. The answer names what the probe verified and how many conversations the product now holds for
+     * this host, so a caller can tell a refreshed index from one that was never read.
+     */
+    private suspend fun refreshHost(params: JSONObject): ProbeResult {
+        val host = requestedHost(params) ?: return hostNotFound()
+        val rows = try {
+            source.refreshDetection(host.id)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "HOST_REFRESH_FAILED", "刷新未能完成：${reason(error)}")
+        }
+        val sessions = source.snapshot().indexedSessions.count { it.hostId == host.id }
+        return success(
+            json(
+                "host_id" to RendererProjection.projectId(host.id),
+                "refreshed" to true,
+                "sessions" to sessions,
+                "detection" to RendererProjection.detection(rows),
+            ),
+        )
+    }
+
     /** The saved host an id names; the id is the same `host-<id>` a project row carries. */
     private suspend fun requestedHost(params: JSONObject): Host? {
         val hostId = RendererProjection.hostId(params.optString("hostId")) ?: return null
         return source.snapshot().hosts.firstOrNull { it.id == hostId }
+    }
+
+    /**
+     * The terminal launch this host can hand over for one target — either one conversation, or one saved host. The
+     * answer is the command the product's own terminal route would run, built by the same `ShellCommands.start` and
+     * wrapped once for the host's Agent target, together with the facts that name it. A conversation does not have
+     * to be open, because the TUI reads its session id from the index; a saved host has no session of its own, so
+     * its Agent and its directory have to come from somewhere else: the Agent is the one this product already uses
+     * on that host, otherwise the first its probe found installed, and the directory is the one the request names.
+     * Nothing is launched here — no intent, no activity, no command is run — so the caller decides how to show or
+     * run the text. A directory nobody named, a host holding no Agent, an unknown target and a target this app has
+     * no shell entry for each fail as themselves instead of producing a command that cannot run, and no credential
+     * is ever part of the answer.
+     */
+    private suspend fun terminal(params: JSONObject, body: JSONObject): ProbeResult {
+        val snapshot = source.snapshot()
+        val requested = body.opt("cwd")
+        if (requested != null && requested !== JSONObject.NULL && requested !is String) {
+            return fail(422, "INVALID_CWD", "工作目录必须是字符串形式的绝对路径。")
+        }
+        val directory = (requested as? String)?.takeIf { it.isNotEmpty() }
+        if (directory != null && !validAgentCwd(directory)) return fail(422, "INVALID_CWD", "工作目录必须是绝对路径，且不能包含控制字符。")
+        val conversationId = params.optString("conversationId")
+        if (conversationId.isNotEmpty()) {
+            val session = target(snapshot, conversationId) ?: return notFound()
+            val host = snapshot.hosts.firstOrNull { it.id == session.hostId } ?: return hostNotFound()
+            val cwd = directory ?: session.cwd.takeIf(::validAgentCwd)
+                ?: return fail(409, "WORKSPACE_UNKNOWN", "该会话没有可用的工作目录，无法生成终端命令。")
+            return terminalCommand(session.agent, host, cwd, session.sessionId, RendererConversationId.of(session))
+        }
+        val hostId = params.optString("hostId")
+        if (hostId.isEmpty()) return fail(422, "TERMINAL_TARGET_UNKNOWN", "终端命令必须指定一个会话或一台主机。")
+        val host = requestedHost(params) ?: return hostNotFound()
+        val cwd = directory ?: return fail(422, "INVALID_CWD", "主机范围的终端命令必须给出一个工作目录。")
+        val agent = terminalAgent(snapshot, host.id)
+            ?: return fail(409, "AGENT_UNAVAILABLE", "该主机上没有探测到可用的 Agent，无法生成终端命令。")
+        return terminalCommand(agent, host, cwd, sessionId = null, conversationId = null)
+    }
+
+    /**
+     * The Agent a host-scoped terminal command starts: the Agent of the conversation this product holds for that
+     * host while there is one — the choice this host already made there — otherwise the first Agent that host's
+     * probe found installed, in the same order the product offers them. A host holding neither has no Agent whose
+     * command could be handed over, which is refused instead of starting one nobody verified.
+     */
+    private fun terminalAgent(snapshot: RendererSnapshot, hostId: Long): AgentKind? {
+        val open = snapshot.session?.takeIf { it.hostId == hostId }?.agent
+        return open ?: agentHostChoices(snapshot.availability, hostId).firstOrNull { it.state == AgentHostState.INSTALLED }?.kind
+    }
+
+    /**
+     * One terminal command, built the way the product's own terminal route builds it: the same `ShellCommands.start`
+     * wrapped once for the host's Agent target. A conversation names its own session id, so the command resumes it;
+     * a host-scoped command has no session to resume and therefore carries neither a conversation nor a session id
+     * instead of an invented one.
+     */
+    private fun terminalCommand(agent: AgentKind, host: Host, cwd: String, sessionId: String?, conversationId: String?): ProbeResult {
+        val remoteTarget = remoteTargetOf(host.osType, host.agentTarget)
+        val command = remoteTarget.shellCommand(ShellCommands.start(agent, cwd, sessionId?.takeIf { it.isNotBlank() }))
+            ?: return fail(501, "TERMINAL_UNSUPPORTED", "该主机的 Agent 目标（${remoteTarget.id}）没有本机可用的终端入口。")
+        val data = json(
+            "host_id" to RendererProjection.projectId(host.id),
+            "host_name" to host.nickname.ifBlank { host.hostname },
+            "agent" to agent.wireName,
+            "cwd" to cwd,
+            "target" to remoteTarget.id,
+            "command" to command,
+        )
+        if (conversationId != null) {
+            data.put("conversation_id", conversationId)
+            data.put("session_id", sessionId.orEmpty())
+        }
+        return success(data)
     }
 
     private fun hostNotFound(): ProbeResult = fail(404, "HOST_NOT_FOUND", "没有这台主机。")
@@ -751,5 +1004,8 @@ internal class RendererActions(private val source: RendererSource) {
         const val MAX_PROTOCOL = 16
         const val MAX_OS_TYPE = 16
         const val MAX_AGENT_TARGET = 128
+
+        /** A credential answer is bounded like every other user input; a passphrase or password stays far shorter. */
+        const val MAX_SECRET_CHARS = 4096
     }
 }

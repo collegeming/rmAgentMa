@@ -24,6 +24,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
+import org.connectbot.agent.AgentChallenge
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConversationState
 import org.connectbot.agent.AgentDraftStore
@@ -39,6 +40,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
+import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.DirectoryListing
 import org.rmagentma.core.RemoteDirectoryListing
@@ -50,7 +52,9 @@ import javax.inject.Singleton
 /**
  * Binds the renderer host to the product's own agent data. It reads and drives the same singletons the Compose
  * chat uses and opens a conversation only through the repository's exclusive switch, so both surfaces show one
- * conversation with one writer.
+ * conversation with one writer. A terminal command is the same text that switch would hand to the app's own
+ * terminal route — the session index, the host row and the probe verdicts it already holds — so no terminal is
+ * started here and no credential is read out.
  */
 @Singleton
 class AgentRendererSource @Inject constructor(
@@ -190,6 +194,45 @@ class AgentRendererSource @Inject constructor(
         // so a stale card can only end here as false.
         repository.respondPermission(session, event, event.id, option)
         return repository.events.value.none { it === event }
+    }
+
+    override suspend fun respondQuestion(event: AgentEvent, answer: String): Boolean {
+        val session = repository.selectedSession.value ?: return false
+        // Same gate as an approval: only the instance the repository still holds as pending is answered, so a
+        // question that came back from history can never become actionable here.
+        repository.respondQuestion(session, event, event.id, answer)
+        return repository.events.value.none { it === event }
+    }
+
+    /** The pending challenge as the product holds it: an identity, the host it belongs to and the prompt text. */
+    override fun challenge(): AgentChallenge? = repository.challenge.value
+
+    /**
+     * Hands the answer to the challenge the repository is still waiting on. An id that is no longer pending is not
+     * answered at all, and the answer itself is passed through: this seam neither stores, logs nor echoes it.
+     */
+    override fun respondChallenge(id: String, response: String?): Boolean {
+        if (repository.challenge.value?.id != id) return false
+        repository.respondChallenge(id, response)
+        return true
+    }
+
+    override suspend fun loadEarlier() {
+        repository.loadEarlier()
+    }
+
+    /**
+     * A new conversation through the repository's own create entry, which checks the directory read-only on the
+     * host before an Agent process exists. Success is the repository's own Ready state for exactly this host and
+     * Agent; anything else reports the reason it failed instead of looking created.
+     */
+    override suspend fun createSession(hostId: Long, agent: AgentKind, cwd: String): String? {
+        val reported = repository.errors.value.size
+        repository.newSession(hostId, agent, cwd)
+        val opened = repository.activeSession.value
+        if (opened != null && opened.hostId == hostId && opened.agent == agent && repository.conversationState.value == AgentConversationState.Ready) return null
+        return repository.errors.value.drop(reported).lastOrNull()?.takeIf { it.isNotBlank() }
+            ?: "会话未能进入就绪状态（可能已被后续的会话切换替代）。"
     }
 
     override fun setTheme(value: String) {

@@ -115,8 +115,15 @@ class ProbeBridge(
             val allowedParams = when (action) {
                 "config.set" -> setOf("conversationId", "optionId")
                 "approvals.review" -> setOf("conversationId", "requestRef")
+                "interactions.review" -> setOf("conversationId", "requestRef")
+                "challenges.answer" -> setOf("challengeId")
                 "project.read" -> setOf("projectId")
-                "hosts.update", "hosts.delete", "detection.refresh" -> setOf("hostId")
+                "hosts.update", "hosts.delete", "detection.refresh", "hosts.refresh" -> setOf("hostId")
+                // A terminal command is asked for either the open conversation or one saved host, and its
+                // directory travels in the body because the bridge carries only string parameters.
+                "terminal.open", "terminal.command.start" -> setOf("conversationId", "hostId")
+                // The Agent and the working directory of a new conversation travel in params or in the body.
+                "conversations.create" -> setOf("hostId", "agent", "cwd")
                 in CONVERSATION_ACTIONS -> setOf("conversationId")
                 else -> emptySet()
             }
@@ -199,19 +206,30 @@ class ProbeBridge(
         const val PROJECT = "project-probe-1"
         val ACTIONS = setOf(
             "auth.read", "settings.client.read", "settings.client.write", "settings.read",
-            "conversations.list", "conversation.read", "messages.list", "messages.latest",
+            "conversations.list", "conversations.create", "conversation.read", "messages.list", "messages.before", "messages.latest",
             "runtime.ensure", "config.read", "config.set", "messages.send", "turn.cancel",
-            "approvals.list", "approvals.review", "runtime.visible", "commands.list", "usage.read",
+            "approvals.list", "approvals.review", "interactions.review", "runtime.visible", "commands.list", "usage.read",
             "artifacts.list", "projects.list", "project.read", "hosts.list", "hosts.create",
-            "hosts.update", "hosts.delete", "detection.refresh",
+            "hosts.update", "hosts.delete", "detection.refresh", "hosts.refresh",
+            "challenges.read", "challenges.answer", "terminal.open", "terminal.command.start",
             "assistants.list", "agents.list",
             "providers.list", "mcp.list", "skills.list", "cron.list", "teams.list", "adapters.list",
             "events.subscribe", "events.unsubscribe", "runtime.snapshot", "draft.load", "draft.save",
             "attachment.begin", "attachment.chunk", "attachment.finish", "attachment.abort",
         )
-        private val DEFAULT_CONVERSATION_ACTIONS = setOf("events.subscribe", "events.unsubscribe", "runtime.snapshot", "draft.load", "draft.save", "attachment.begin", "attachment.chunk", "attachment.finish", "attachment.abort")
+
+        /**
+         * Actions the bridge accepts without a conversation id: they name the conversation they address from the
+         * product's own state, and the two terminal routes may address one saved host instead, so the action layer
+         * decides the target — while a conversation id a request does carry is still checked here.
+         */
+        private val DEFAULT_CONVERSATION_ACTIONS = setOf(
+            "events.subscribe", "events.unsubscribe", "runtime.snapshot", "draft.load", "draft.save",
+            "attachment.begin", "attachment.chunk", "attachment.finish", "attachment.abort",
+            "terminal.open", "terminal.command.start",
+        )
         private val CONVERSATION_ACTIONS = ACTIONS.filter { action ->
-            action.substringBefore('.') in setOf("conversation", "messages", "runtime", "config", "turn", "approvals", "commands", "usage", "artifacts", "draft", "attachment", "events")
+            action.substringBefore('.') in setOf("conversation", "messages", "runtime", "config", "turn", "approvals", "commands", "usage", "artifacts", "draft", "attachment", "events", "terminal")
         }.toSet()
 
         fun isOrigin(value: String): Boolean = try {

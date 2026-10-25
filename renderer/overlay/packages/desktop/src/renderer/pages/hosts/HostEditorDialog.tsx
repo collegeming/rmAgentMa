@@ -1,0 +1,193 @@
+/**
+ * @license
+ * Copyright 2026 rmAgentMa contributors
+ * SPDX-License-Identifier: Apache-2.0
+ */
+import { HOST_OS_LINUX, HOST_OS_WINDOWS, type SavedHost } from '@/common/host/hostTransport';
+import { AionModal } from '@renderer/components/base';
+import { Button, Input, Radio } from '@arco-design/web-react';
+import React, { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { createHost, hostFailureText, updateHost } from './hostsApi';
+import {
+  DRAFT_PROBLEM_KEYS,
+  draftFromHost,
+  draftProblem,
+  emptyDraft,
+  hostFields,
+  validWslDistribution,
+  type HostDraft,
+} from './hostModel';
+
+type Props = {
+  visible: boolean;
+  /** The host being edited, or null when the editor creates a new one. */
+  host: SavedHost | null;
+  onClose: () => void;
+  onSaved: (saved: SavedHost) => void;
+};
+
+/** One labelled field; the whole row is the label, so a tap on the text reaches the control. */
+const field = (label: string, control: React.ReactNode) => (
+  <label className='flex flex-col gap-6px'>
+    <span className='text-13px leading-18px text-t-secondary'>{label}</span>
+    {control}
+  </label>
+);
+
+const HostEditorDialog: React.FC<Props> = ({ visible, host, onClose, onSaved }) => {
+  const { t } = useTranslation();
+  const [draft, setDraft] = useState<HostDraft>(emptyDraft);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    setDraft(host ? draftFromHost(host) : emptyDraft());
+    setFailure(null);
+    setSaving(false);
+  }, [visible, host]);
+
+  const patch = (values: Partial<HostDraft>) => setDraft((current) => ({ ...current, ...values }));
+  const distributionValid = validWslDistribution(draft.distribution.trim());
+
+  const save = async () => {
+    const blocked = draftProblem(draft);
+    if (blocked) {
+      setFailure(t(DRAFT_PROBLEM_KEYS[blocked.kind]));
+      return;
+    }
+    setSaving(true);
+    setFailure(null);
+    try {
+      const fields = hostFields(draft);
+      onSaved(host ? await updateHost(host.id, fields) : await createHost(fields));
+    } catch (error) {
+      setFailure(hostFailureText(error, t));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <AionModal
+      visible={visible}
+      onCancel={onClose}
+      maskClosable={false}
+      autoFocus={false}
+      style={{ width: 'min(560px, 94vw)' }}
+      header={{ title: host ? t('settings.hosts.editTitle') : t('settings.hosts.createTitle') }}
+      footer={
+        <div className='flex justify-end gap-10px'>
+          <Button className='min-w-80px' disabled={saving} onClick={onClose}>
+            {t('settings.hosts.cancel')}
+          </Button>
+          <Button type='primary' className='min-w-80px' loading={saving} disabled={saving} onClick={() => void save()}>
+            {saving ? t('settings.hosts.saving') : t('settings.hosts.save')}
+          </Button>
+        </div>
+      }
+    >
+      <div className='box-border flex flex-col gap-14px p-20px'>
+        {field(
+          t('settings.hosts.nickname'),
+          <Input
+            aria-label={t('settings.hosts.nickname')}
+            value={draft.nickname}
+            onChange={(value) => patch({ nickname: value })}
+          />
+        )}
+        {field(
+          t('settings.hosts.address'),
+          <Input
+            aria-label={t('settings.hosts.address')}
+            placeholder='192.168.1.10'
+            value={draft.hostname}
+            onChange={(value) => patch({ hostname: value })}
+          />
+        )}
+        {field(
+          t('settings.hosts.port'),
+          <Input
+            aria-label={t('settings.hosts.port')}
+            inputMode='numeric'
+            value={draft.port}
+            onChange={(value) => patch({ port: value })}
+          />
+        )}
+        {field(
+          t('settings.hosts.username'),
+          <Input
+            aria-label={t('settings.hosts.username')}
+            value={draft.username}
+            onChange={(value) => patch({ username: value })}
+          />
+        )}
+        {field(
+          t('settings.hosts.osType'),
+          <Radio.Group
+            aria-label={t('settings.hosts.osType')}
+            value={draft.osType}
+            onChange={(value: string) =>
+              patch({ osType: value, target: value === HOST_OS_LINUX ? 'native' : draft.target })
+            }
+          >
+            <Radio value={HOST_OS_LINUX}>{t('settings.hosts.osLinux')}</Radio>
+            <Radio value={HOST_OS_WINDOWS}>{t('settings.hosts.osWindows')}</Radio>
+          </Radio.Group>
+        )}
+        {field(
+          t('settings.hosts.agentTarget'),
+          draft.osType === HOST_OS_WINDOWS ? (
+            <div className='flex flex-col gap-8px'>
+              <Radio.Group
+                aria-label={t('settings.hosts.agentTarget')}
+                value={draft.target}
+                onChange={(value: 'native' | 'wsl') => patch({ target: value })}
+              >
+                {/* Windows itself has no entry in this app, so the option says so before it is picked. */}
+                <Radio value='native'>{t('settings.hosts.targetNativeUnsupported')}</Radio>
+                <Radio value='wsl'>{t('settings.hosts.targetWsl')}</Radio>
+              </Radio.Group>
+              {draft.target === 'native' ? (
+                <p className='m-0 text-12px leading-18px text-danger-6'>{t('settings.hosts.targetNativeHint')}</p>
+              ) : (
+                <>
+                  <Input
+                    aria-label={t('settings.hosts.wslDistribution')}
+                    placeholder='Ubuntu-22.04'
+                    value={draft.distribution}
+                    onChange={(value) => patch({ distribution: value })}
+                  />
+                  <p
+                    className={
+                      distributionValid
+                        ? 'm-0 text-12px leading-18px text-t-tertiary'
+                        : 'm-0 text-12px leading-18px text-danger-6'
+                    }
+                  >
+                    {t(
+                      distributionValid ? 'settings.hosts.wslDistributionHint' : 'settings.hosts.wslDistributionInvalid'
+                    )}
+                  </p>
+                </>
+              )}
+            </div>
+          ) : (
+            <div className='flex flex-col gap-4px'>
+              <span className='text-14px text-t-primary'>{t('settings.hosts.targetNative')}</span>
+              <span className='text-12px leading-18px text-t-tertiary'>{t('settings.hosts.targetLinuxHint')}</span>
+            </div>
+          )
+        )}
+        {failure && (
+          <p role='alert' className='m-0 break-words text-13px leading-18px text-danger-6'>
+            {failure}
+          </p>
+        )}
+      </div>
+    </AionModal>
+  );
+};
+
+export default HostEditorDialog;

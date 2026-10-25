@@ -17,10 +17,12 @@
 
 package org.connectbot.renderer
 
+import org.connectbot.agent.AgentChallenge
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.data.entity.Host
 import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
+import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.DirectoryListing
 
@@ -130,6 +132,60 @@ internal class FakeSource : RendererSource {
     override suspend fun respondPermission(event: AgentEvent, option: String): Boolean {
         responded += event to option
         return true
+    }
+
+    /** Every question answer a route handed over, and whether the repository still holds that instance pending. */
+    val answeredQuestions = mutableListOf<Pair<AgentEvent, String>>()
+    var questionAnswerable = true
+
+    override suspend fun respondQuestion(event: AgentEvent, answer: String): Boolean {
+        answeredQuestions += event to answer
+        return questionAnswerable
+    }
+
+    /** The challenge the product is waiting on, every answer handed over, and whether the id is still pending. */
+    var pendingChallenge: AgentChallenge? = null
+    var challengeAnswerable = true
+    val challengeAnswers = mutableListOf<Pair<String, String?>>()
+
+    override fun challenge(): AgentChallenge? = pendingChallenge
+
+    override fun respondChallenge(id: String, response: String?): Boolean {
+        challengeAnswers += id to response
+        if (!challengeAnswerable) return false
+        // A challenge that was answered stops being pending, exactly as the real one clears its flow.
+        if (pendingChallenge?.id == id) pendingChallenge = null
+        return true
+    }
+
+    /** How many times the earlier page was read, and what that read answers with instead of the loaded window. */
+    var earlierLoads = 0
+    var earlierEvents: List<AgentEvent>? = null
+    var earlierFailure: Exception? = null
+
+    /** What the window reports as still holding an even earlier page once [loadEarlier] ran. */
+    var hasEarlierAfterLoad = false
+
+    override suspend fun loadEarlier() {
+        earlierLoads++
+        earlierFailure?.let { throw it }
+        earlierEvents?.let { events = it }
+        hasEarlier = hasEarlierAfterLoad
+    }
+
+    /** The failure a conversation create reports, and the session the repository really came up with. */
+    var createFailure: String? = null
+    var created: AgentSession? = null
+    val createdConversations = mutableListOf<Triple<Long, AgentKind, String>>()
+
+    override suspend fun createSession(hostId: Long, agent: AgentKind, cwd: String): String? {
+        createdConversations += Triple(hostId, agent, cwd)
+        createFailure?.let { return it }
+        val opened = created ?: AgentSession(hostId = hostId, agent = agent, sessionId = "native-1", cwd = cwd)
+        session = opened
+        indexed = opened
+        active = true
+        return null
     }
 
     override fun setTheme(value: String) {

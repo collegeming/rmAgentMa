@@ -30,6 +30,7 @@ const ROUTES = [
   ['PUT', '/api/settings/client', 'settings.client.write'],
   ['GET', '/api/settings', 'settings.read'],
   ['GET', '/api/conversations', 'conversations.list'],
+  ['POST', '/api/conversations', 'conversations.create'],
   ['GET', '/api/conversations/:conversationId', 'conversation.read'],
   ['GET', '/api/conversations/:conversationId/messages', 'messages.list'],
   ['GET', '/api/conversations/:conversationId/messages/latest', 'messages.latest'],
@@ -44,8 +45,18 @@ const ROUTES = [
   ['GET', '/api/conversations/:conversationId/slash-commands', 'commands.list'],
   ['GET', '/api/conversations/:conversationId/usage', 'usage.read'],
   ['GET', '/api/conversations/:conversationId/artifacts', 'artifacts.list'],
+  // Escape hatches: the host opens the terminal, and builds the Agent's own TUI command itself.
+  ['POST', '/api/conversations/:conversationId/terminal', 'terminal.open'],
+  ['POST', '/api/conversations/:conversationId/terminal/command', 'terminal.command.start'],
   ['GET', '/api/projects', 'projects.list'],
   ['GET', '/api/projects/:projectId', 'project.read'],
+  ['GET', '/api/hosts', 'hosts.list'],
+  ['POST', '/api/hosts', 'hosts.create'],
+  ['PUT', '/api/hosts/:hostId', 'hosts.update'],
+  ['DELETE', '/api/hosts/:hostId', 'hosts.delete'],
+  ['POST', '/api/hosts/:hostId/detection/refresh', 'detection.refresh'],
+  ['POST', '/api/hosts/:hostId/terminal', 'terminal.open'],
+  ['POST', '/api/hosts/:hostId/terminal/command', 'terminal.command.start'],
   ['GET', '/api/assistants', 'assistants.list'],
   ['GET', '/api/agents/management', 'agents.list'],
   ['GET', '/api/providers', 'providers.list'],
@@ -228,6 +239,82 @@ export async function initializeHost(): Promise<void> {
   const reply = await transport.call('events.subscribe');
   if (!reply.ok) throw new Error('HOST_EVENTS_UNAVAILABLE');
 }
+
+/**
+ * The five saved-host actions this build declares, each with its route in ROUTES: `hosts.list`, `hosts.create`,
+ * `hosts.update`, `hosts.delete` and `detection.refresh`. Structured fields travel in the request body, because
+ * the bridge carries only string parameters.
+ */
+/** Operating system a saved host holds. */
+export const HOST_OS_LINUX = 'linux';
+export const HOST_OS_WINDOWS = 'windows';
+
+/** Agent target of a saved host: the host itself, or one WSL distribution of a Windows host. */
+export const AGENT_TARGET_NATIVE = 'native';
+export const AGENT_TARGET_WSL_PREFIX = 'wsl:';
+
+/** The probe verdicts the host itself derives for one Agent; the renderer adds only a not-probed reading. */
+export const HOST_PROBE_STATES = [
+  'available',
+  'not_installed',
+  'start_failed',
+  'no_protocol_capability',
+  'connect_failed',
+  'target_unsupported',
+  'unknown_failure',
+] as const;
+
+/** One Agent's verdict on one host, with the absolute executable and version the probe verified. */
+export type HostAgentProbe = {
+  id: string;
+  /** One of HOST_PROBE_STATES; an unrecognized value is read as a probe failure, never as a name. */
+  state: string;
+  executable: string;
+  version: string;
+  capabilities: Record<string, unknown> | null;
+  error: string;
+};
+
+/** What the product holds for one host: `checked` is false until some probe answered for it. */
+export type HostDetection = { checked: boolean; agents: HostAgentProbe[] };
+
+/** One saved SSH host, as `hosts.list`, `hosts.create` and `hosts.update` answer it. */
+export type SavedHost = {
+  /** The opaque `host-<id>` identity a project row carries too. */
+  id: string;
+  nickname: string;
+  hostname: string;
+  port: number;
+  username: string;
+  protocol: string;
+  os_type: string;
+  agent_target: string;
+  /** The shell context the Agent would run in: `posix`, `wsl:<distribution>` or `windows-native`. */
+  target: string;
+  target_supported: boolean;
+  detection: HostDetection;
+};
+
+/** The fields one create or update body carries; an update rewrites only the fields it names. */
+export type HostFields = {
+  nickname: string;
+  hostname: string;
+  port: number;
+  username: string;
+  os_type: string;
+  agent_target: string;
+};
+
+/** What `detection.refresh` answers: the target that was probed and the verdicts it produced. */
+export type HostDetectionRefresh = {
+  host_id: string;
+  target: string;
+  target_supported: boolean;
+  detection: HostDetection;
+};
+
+/** What `hosts.delete` answers once the host is gone. */
+export type HostDeletion = { deleted: boolean; host_id: string };
 
 const EXTRA_ACTIONS = new Set([
   'events.subscribe',

@@ -21,9 +21,11 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.assertj.core.api.Assertions.assertThat
+import org.connectbot.agent.AgentChallenge
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConfigBusyException
 import org.connectbot.agent.AgentZcodeConfig
@@ -709,6 +711,576 @@ class RendererActionsTest {
         assertThat(refused.getJSONObject("body").getString("code")).isEqualTo("INVALID_REQUEST")
     }
 
+    // ==================== Questions, challenges, history paging, terminal and refresh ====================
+
+    @Test
+    fun questionMessagesCarryTheAgentsOwnFormAndOnlyTheNewestOneIsAnswered() = runTest {
+        val question = questionEvent("ask-1", "使用哪个分支？", 6)
+        val source = openSource().apply { events = listOf(question) }
+        val actions = RendererActions(source)
+        val items = (actions.handle("messages.list", payload(conversation = true)).body as JSONObject).getJSONObject("data").getJSONArray("items")
+        assertThat(items.length()).isEqualTo(1)
+        val row = items.getJSONObject(0)
+        assertThat(row.getString("type")).isEqualTo("acp_question")
+        assertThat(row.getString("position")).isEqualTo("left")
+        val content = row.getJSONObject("content")
+        assertThat(content.getString("question_id")).isEqualTo("ask-1")
+        assertThat(content.getString("request_id")).isEqualTo("ask-1")
+        assertThat(content.getString("conversation_id")).isEqualTo(RENDERER_CONVERSATION)
+        assertThat(content.getString("message")).isEqualTo("使用哪个分支？")
+        assertThat(content.getBoolean("single_string")).isTrue()
+        assertThat(content.getBoolean("live")).isTrue()
+        assertThat(content.getBoolean("readonly")).isFalse()
+        assertThat(content.getString("state")).isEqualTo("waiting")
+        assertThat(content.getJSONObject("requested_schema").getString("type")).isEqualTo("object")
+        val field = content.getJSONArray("fields").getJSONObject(0)
+        assertThat(field.getString("name")).isEqualTo("branch")
+        assertThat(field.getString("label")).isEqualTo("分支")
+        assertThat(field.getString("type")).isEqualTo("string")
+        assertThat(field.getBoolean("required")).isTrue()
+        assertThat(field.getJSONArray("choices").getString(1)).isEqualTo("dev")
+
+        // A reference that is not the published question never reaches the agent.
+        val stale = actions.handle("interactions.review", payload(conversation = true, params = mapOf("requestRef" to "ask-9"), body = mapOf("answer" to "main")))
+        assertThat(stale.status).isEqualTo(409)
+        assertThat(codeOf(stale)).isEqualTo("NOT_PENDING")
+        // An answer the Agent's own schema does not accept is refused before anything is sent.
+        val wrong = actions.handle("interactions.review", payload(conversation = true, params = mapOf("requestRef" to "ask-1"), body = mapOf("answer" to "release")))
+        assertThat(wrong.status).isEqualTo(422)
+        assertThat(codeOf(wrong)).isEqualTo("INVALID_ANSWER")
+        // A different epoch means the renderer read a runtime that is no longer the live one.
+        val late = actions.handle("interactions.review", payload(conversation = true, params = mapOf("requestRef" to "ask-1"), body = mapOf("answer" to "dev", "epoch" to "epoch-9")))
+        assertThat(late.status).isEqualTo(409)
+        assertThat(codeOf(late)).isEqualTo("STALE_APPROVAL")
+        assertThat(source.answeredQuestions).isEmpty()
+
+        val accepted = actions.handle("interactions.review", payload(conversation = true, params = mapOf("requestRef" to "ask-1"), body = mapOf("answer" to "dev", "epoch" to "epoch-1")))
+        assertThat(accepted.status).isEqualTo(200)
+        assertThat(dataOf(accepted).getString("state")).isEqualTo("answered")
+        assertThat(dataOf(accepted).getString("question_id")).isEqualTo("ask-1")
+        assertThat(source.answeredQuestions.single().first).isSameAs(question)
+        assertThat(source.answeredQuestions.single().second).isEqualTo("dev")
+        // The answer is the user's own content and never travels back inside the answer payload.
+        assertThat((accepted.body as JSONObject).toString()).doesNotContain("dev")
+    }
+
+    @Test
+    fun aQuestionFromHistoryIsNeverAnswerable() = runTest {
+        val fromHistory = questionEvent("ask-old", "旧问题", 2)
+        // The repository does not hold this instance as pending any more, so its answer must not be reported as sent.
+        val refused = RendererActions(openSource().apply { events = listOf(fromHistory); questionAnswerable = false }).handle(
+            "interactions.review",
+            payload(conversation = true, params = mapOf("requestRef" to "ask-old"), body = mapOf("answer" to "main")),
+        )
+        assertThat(refused.status).isEqualTo(409)
+        assertThat(codeOf(refused)).isEqualTo("NOT_PENDING")
+
+        // Only the newest question is the one the route may answer; an older card is refused before the repository runs.
+        val two = openSource().apply { events = listOf(fromHistory, questionEvent("ask-new", "新问题", 9)) }
+        val older = RendererActions(two).handle(
+            "interactions.review",
+            payload(conversation = true, params = mapOf("requestRef" to "ask-old"), body = mapOf("answer" to "main")),
+        )
+        assertThat(older.status).isEqualTo(409)
+        assertThat(two.answeredQuestions).isEmpty()
+
+        // A question whose form this host cannot read is refused as unsupported instead of being answered blind.
+        val unreadable = openSource().apply { events = listOf(AgentEvent(type = "question", id = "ask-1", text = "无结构", historyKey = 3)) }
+        val unsupported = RendererActions(unreadable).handle(
+            "interactions.review",
+            payload(conversation = true, params = mapOf("requestRef" to "ask-1"), body = mapOf("answer" to "是的")),
+        )
+        assertThat(unsupported.status).isEqualTo(501)
+        assertThat(codeOf(unsupported)).isEqualTo("QUESTION_UNSUPPORTED")
+        assertThat(unreadable.answeredQuestions).isEmpty()
+
+        // Without an open conversation there is nothing pending to answer.
+        val missing = RendererActions(FakeSource()).handle(
+            "interactions.review",
+            payload(conversation = true, params = mapOf("requestRef" to "ask-1"), body = mapOf("answer" to "main")),
+        )
+        assertThat(missing.status).isEqualTo(404)
+        assertThat(codeOf(missing)).isEqualTo("CONVERSATION_NOT_FOUND")
+    }
+
+    @Test
+    fun anEventTheChatCannotDrawStillReachesTheRendererAsOneRawLine() = runTest {
+        val unknown = AgentEvent(
+            type = "future_update",
+            id = "e1",
+            title = "未来事件",
+            status = "streaming",
+            raw = buildJsonObject { put("payload", "值\u0007带控制字符") },
+            historyKey = 8,
+        )
+        val items = (RendererActions(openSource().apply { events = listOf(unknown) }).handle("messages.list", payload(conversation = true)).body as JSONObject)
+            .getJSONObject("data").getJSONArray("items")
+        assertThat(items.length()).isEqualTo(1)
+        val row = items.getJSONObject(0)
+        assertThat(row.getString("type")).isEqualTo("tips")
+        val content = row.getJSONObject("content")
+        assertThat(content.getString("type")).isEqualTo("info")
+        val line = content.getString("content")
+        assertThat(line).startsWith("[future_update]")
+        assertThat(line).contains("未来事件")
+        assertThat(line).contains("streaming")
+        assertThat(line).doesNotContain("\u0007")
+        assertThat(line.length).isLessThanOrEqualTo(1000)
+
+        // The rows the host reports through routes of their own stay out of the chat stream.
+        val control = openSource().apply {
+            events = listOf(
+                AgentEvent(type = "complete", status = "end_turn", historyKey = 1),
+                AgentEvent(type = "question_resolved", status = "resolved", historyKey = 2),
+                AgentEvent(type = "usage", raw = buildJsonObject { put("used", 3200) }, historyKey = 3),
+            )
+        }
+        assertThat((RendererActions(control).handle("messages.list", payload(conversation = true)).body as JSONObject).getJSONObject("data").getJSONArray("items").length()).isZero()
+    }
+
+    @Test
+    fun aChallengeIsReadWithoutItsAnswerAndHandedOverOnlyWhileItIsPending() = runTest {
+        val password = AgentChallenge(id = "ch-1", hostName = "工作机", kind = "password", message = "colle@example.test 的登录口令", secret = true, hostId = 7)
+        val source = FakeSource().apply {
+            hosts = listOf(this@RendererActionsTest.host)
+            pendingChallenge = password
+        }
+        val actions = RendererActions(source)
+        val read = actions.handle("challenges.read", payload())
+        assertThat(read.status).isEqualTo(200)
+        val challenge = dataOf(read).getJSONObject("challenge")
+        assertThat(challenge.getString("id")).isEqualTo("ch-1")
+        assertThat(challenge.getString("host_id")).isEqualTo("host-7")
+        assertThat(challenge.getString("host_name")).isEqualTo("工作机")
+        assertThat(challenge.getString("kind")).isEqualTo("password")
+        assertThat(challenge.getString("message")).isEqualTo("colle@example.test 的登录口令")
+        assertThat(challenge.getBoolean("secret")).isTrue()
+        // The read carries no credential: only what the user has to be asked and where the answer belongs.
+        assertThat(challenge.keys().asSequence().toList()).containsExactlyInAnyOrder("id", "host_id", "host_name", "kind", "message", "secret")
+
+        // No pending challenge is the truth of a connection that asks for nothing, not a failure.
+        val idle = RendererActions(FakeSource()).handle("challenges.read", payload())
+        assertThat(idle.status).isEqualTo(200)
+        assertThat(dataOf(idle).isNull("challenge")).isTrue()
+
+        // A host key confirmation is the same shape, without secret input, and its host id is absent once the host is gone.
+        val hostKey = AgentChallenge(id = "ch-2", hostName = "已删主机", kind = "host_key", message = "SHA256:abc", secret = false, hostId = 8)
+        val second = RendererActions(FakeSource().apply { pendingChallenge = hostKey }).handle("challenges.read", payload())
+        val hostKeyRow = dataOf(second).getJSONObject("challenge")
+        assertThat(hostKeyRow.getString("kind")).isEqualTo("host_key")
+        assertThat(hostKeyRow.getBoolean("secret")).isFalse()
+        assertThat(hostKeyRow.isNull("host_id")).isTrue()
+
+        // An id that is not the pending challenge is refused before anything is handed over.
+        val stale = actions.handle("challenges.answer", payload(params = mapOf("challengeId" to "ch-9"), body = mapOf("answer" to "秘密口令")))
+        assertThat(stale.status).isEqualTo(409)
+        assertThat(codeOf(stale)).isEqualTo("CHALLENGE_NOT_PENDING")
+        assertThat(source.challengeAnswers).isEmpty()
+
+        val answered = actions.handle("challenges.answer", payload(params = mapOf("challengeId" to "ch-1"), body = mapOf("answer" to "秘密口令")))
+        assertThat(answered.status).isEqualTo(200)
+        assertThat(dataOf(answered).getBoolean("answered")).isTrue()
+        assertThat(source.challengeAnswers).containsExactly("ch-1" to "秘密口令")
+        // The secret never travels back, and the challenge is not pending after it was answered.
+        assertThat((answered.body as JSONObject).toString()).doesNotContain("秘密口令")
+        assertThat(source.pendingChallenge).isNull()
+        val again = actions.handle("challenges.answer", payload(params = mapOf("challengeId" to "ch-1"), body = mapOf("answer" to "秘密口令")))
+        assertThat(again.status).isEqualTo(409)
+        assertThat(source.challengeAnswers).hasSize(1)
+
+        // A challenge answered while this request was in flight is reported as no longer pending, not as taken.
+        val raced = FakeSource().apply {
+            pendingChallenge = password
+            challengeAnswerable = false
+        }
+        val lost = RendererActions(raced).handle("challenges.answer", payload(params = mapOf("challengeId" to "ch-1"), body = mapOf("answer" to "秘密口令")))
+        assertThat(lost.status).isEqualTo(409)
+        assertThat(codeOf(lost)).isEqualTo("CHALLENGE_NOT_PENDING")
+
+        // An omitted or empty answer cancels, exactly as the Compose dialog's own cancel does; anything else is refused.
+        val cancelled = FakeSource().apply { pendingChallenge = password }
+        assertThat(RendererActions(cancelled).handle("challenges.answer", payload(params = mapOf("challengeId" to "ch-1"))).status).isEqualTo(200)
+        assertThat(cancelled.challengeAnswers).containsExactly("ch-1" to null)
+        val empty = FakeSource().apply { pendingChallenge = password }
+        assertThat(RendererActions(empty).handle("challenges.answer", payload(params = mapOf("challengeId" to "ch-1"), body = mapOf("answer" to ""))).status).isEqualTo(200)
+        assertThat(empty.challengeAnswers).containsExactly("ch-1" to null)
+        val invalid = RendererActions(FakeSource().apply { pendingChallenge = password }).handle(
+            "challenges.answer",
+            payload(params = mapOf("challengeId" to "ch-1"), body = mapOf("answer" to 42)),
+        )
+        assertThat(invalid.status).isEqualTo(422)
+        assertThat(codeOf(invalid)).isEqualTo("INVALID_ANSWER")
+    }
+
+    @Test
+    fun messagesBeforeLoadsOneOlderPageAndRefusesBeyondTheStartOfHistory() = runTest {
+        val current = listOf(AgentEvent(type = "user", text = "现在", historyKey = 9), AgentEvent(type = "content", text = "回答", historyKey = 10))
+        val older = listOf(AgentEvent(type = "user", text = "更早", historyKey = 3), AgentEvent(type = "content", text = "旧回答", historyKey = 4))
+        val source = openSource().apply {
+            events = current
+            hasEarlier = true
+            earlierEvents = older
+            hasEarlierAfterLoad = true
+        }
+        val actions = RendererActions(source)
+        // The cursor has to be a row the caller is holding, or the page below it would be a guess.
+        val unknown = actions.handle("messages.before", payload(conversation = true, query = mapOf("before" to "m404")))
+        assertThat(unknown.status).isEqualTo(422)
+        assertThat(codeOf(unknown)).isEqualTo("INVALID_CURSOR")
+        assertThat(source.earlierLoads).isZero()
+
+        val page = dataOf(actions.handle("messages.before", payload(conversation = true, query = mapOf("before" to "m9"))))
+        assertThat(source.earlierLoads).isEqualTo(1)
+        val items = page.getJSONArray("items")
+        assertThat(items.length()).isEqualTo(2)
+        assertThat(items.getJSONObject(0).getString("msg_id")).isEqualTo("m3")
+        assertThat(items.getJSONObject(1).getJSONObject("content").getString("content")).isEqualTo("旧回答")
+        // The page really is older history, and the newer part the caller still holds is what `has_more_after` names.
+        assertThat(page.getString("oldest_cursor")).isEqualTo("m3")
+        assertThat(page.getString("newest_cursor")).isEqualTo("m4")
+        assertThat(page.getBoolean("has_more_before")).isTrue()
+        assertThat(page.getBoolean("has_more_after")).isTrue()
+
+        // The start of history is a refusal, never an empty page that reads like an answer with no messages.
+        val end = RendererActions(openSource().apply { events = current; hasEarlier = false }).handle("messages.before", payload(conversation = true))
+        assertThat(end.status).isEqualTo(409)
+        assertThat(codeOf(end)).isEqualTo("HISTORY_EXHAUSTED")
+
+        // A page that cannot be read keeps its own failure instead of looking like the end of the conversation.
+        val failing = openSource().apply {
+            events = current
+            hasEarlier = true
+            earlierFailure = IOException("历史文件损坏")
+        }
+        val failed = RendererActions(failing).handle("messages.before", payload(conversation = true))
+        assertThat(failed.status).isEqualTo(500)
+        assertThat(codeOf(failed)).isEqualTo("HISTORY_LOAD_FAILED")
+        assertThat((failed.body as JSONObject).getString("error")).contains("历史文件损坏")
+        assertThat(failing.earlierLoads).isEqualTo(1)
+
+        // Only the ready conversation has pages to read, and no conversation at all answers with its own code.
+        val unready = RendererActions(openSource().apply { events = current; hasEarlier = true; active = false }).handle("messages.before", payload(conversation = true))
+        assertThat(unready.status).isEqualTo(409)
+        assertThat(codeOf(unready)).isEqualTo("CONVERSATION_NOT_OPEN")
+        assertThat(RendererActions(FakeSource()).handle("messages.before", payload(conversation = true)).status).isEqualTo(404)
+    }
+
+    @Test
+    fun aNewConversationAnswersTheNativeIdTheAgentAssigned() = runTest {
+        val source = FakeSource().apply {
+            hosts = listOf(savedHost)
+            created = AgentSession(hostId = 7, agent = AgentKind.KIMI, sessionId = "native-42", cwd = "/workspace/new")
+        }
+        val result = RendererActions(source).handle(
+            "conversations.create",
+            payload(params = mapOf("hostId" to "host-7"), body = mapOf("agent" to "kimi", "cwd" to "/workspace/new")),
+        )
+        assertThat(result.status).isEqualTo(200)
+        // The product's own create entry ran, with the host, the Agent and the absolute directory of the request.
+        assertThat(source.createdConversations).containsExactly(Triple(7L, AgentKind.KIMI, "/workspace/new"))
+        val createdRow = dataOf(result)
+        assertThat(createdRow.getString("session_id")).isEqualTo("native-42")
+        assertThat(createdRow.getString("id")).isEqualTo(RendererConversationId.of(AgentSession(hostId = 7, agent = AgentKind.KIMI, sessionId = "native-42", cwd = "/workspace/new")))
+        assertThat(createdRow.getString("project_id")).isEqualTo("host-7")
+        assertThat(createdRow.getString("agent")).isEqualTo("kimi")
+        assertThat(createdRow.getString("cwd")).isEqualTo("/workspace/new")
+        assertThat(createdRow.getBoolean("created")).isTrue()
+        assertThat(createdRow.getJSONObject("extra").getString("workspace")).isEqualTo("/workspace/new")
+        assertThat(createdRow.getJSONObject("runtime").getString("state")).isEqualTo("idle")
+
+        // The host, the Agent and the directory are each refused as themselves before anything is launched.
+        val missingHost = RendererActions(source).handle("conversations.create", payload(params = mapOf("hostId" to "host-9"), body = mapOf("agent" to "kimi", "cwd" to "/w")))
+        assertThat(missingHost.status).isEqualTo(404)
+        assertThat(codeOf(missingHost)).isEqualTo("HOST_NOT_FOUND")
+        val unknownAgent = RendererActions(source).handle("conversations.create", payload(params = mapOf("hostId" to "host-7"), body = mapOf("agent" to "gemini", "cwd" to "/w")))
+        assertThat(unknownAgent.status).isEqualTo(422)
+        assertThat(codeOf(unknownAgent)).isEqualTo("AGENT_UNKNOWN")
+        for (cwd in listOf("work/relative", "", "/w\n按回车")) {
+            val invalid = RendererActions(source).handle("conversations.create", payload(params = mapOf("hostId" to "host-7"), body = mapOf("agent" to "kimi", "cwd" to cwd)))
+            assertThat(invalid.status).describedAs(cwd).isEqualTo(422)
+            assertThat(codeOf(invalid)).describedAs(cwd).isEqualTo("INVALID_CWD")
+        }
+        assertThat(source.createdConversations).hasSize(1)
+
+        // A directory the host cannot use is reported with the repository's own reason, not as a created session.
+        val unreachable = FakeSource().apply {
+            hosts = listOf(savedHost)
+            createFailure = "目录不可用：working directory is not reachable: /missing"
+        }
+        val failed = RendererActions(unreachable).handle("conversations.create", payload(params = mapOf("hostId" to "host-7"), body = mapOf("agent" to "kimi", "cwd" to "/missing")))
+        assertThat(failed.status).isEqualTo(409)
+        assertThat(codeOf(failed)).isEqualTo("SESSION_CREATE_FAILED")
+        assertThat((failed.body as JSONObject).getString("error")).contains("/missing")
+
+        // An Agent that assigns no native id leaves the conversation without the identity later requests must name.
+        val anonymous = FakeSource().apply {
+            hosts = listOf(savedHost)
+            created = AgentSession(hostId = 7, agent = AgentKind.KIMI, sessionId = "", cwd = "/workspace/new")
+        }
+        val unknownId = RendererActions(anonymous).handle("conversations.create", payload(params = mapOf("hostId" to "host-7"), body = mapOf("agent" to "kimi", "cwd" to "/workspace/new")))
+        assertThat(unknownId.status).isEqualTo(409)
+        assertThat(codeOf(unknownId)).isEqualTo("SESSION_ID_UNKNOWN")
+    }
+
+    @Test
+    fun terminalOpenHandsOverTheCommandOfTheHostsOwnTarget() = runTest {
+        val source = FakeSource().apply {
+            hosts = listOf(savedHost)
+            sessions = listOf(this@RendererActionsTest.session)
+            session = this@RendererActionsTest.session
+            active = true
+        }
+        val open = RendererActions(source).handle("terminal.open", payload(conversation = true))
+        assertThat(open.status).isEqualTo(200)
+        val data = dataOf(open)
+        assertThat(data.getString("host_id")).isEqualTo("host-7")
+        assertThat(data.getString("host_name")).isEqualTo("工作机")
+        assertThat(data.getString("agent")).isEqualTo("kimi")
+        assertThat(data.getString("cwd")).isEqualTo("/workspace/app")
+        assertThat(data.getString("session_id")).isEqualTo("session-a")
+        assertThat(data.getString("conversation_id")).isEqualTo(RendererConversationId.of(this@RendererActionsTest.session))
+        assertThat(data.getString("target")).isEqualTo("posix")
+        // The command is the product's own terminal route command for this session, unchanged on a POSIX host.
+        assertThat(data.getString("command")).isEqualTo("cd -- '/workspace/app' && exec kimi --session 'session-a'")
+        // Nothing is launched here, and no credential leaves the host: the payload names the command alone.
+        assertThat(data.keys().asSequence().toList())
+            .doesNotContain("intent", "activity", "component", "password", "key", "secret", "token")
+
+        // A directory the caller typed is the directory the terminal is asked to start in.
+        val typed = dataOf(RendererActions(source).handle("terminal.open", payload(conversation = true, body = mapOf("cwd" to "/srv/app"))))
+        assertThat(typed.getString("cwd")).isEqualTo("/srv/app")
+        assertThat(typed.getString("command")).isEqualTo("cd -- '/srv/app' && exec kimi --session 'session-a'")
+
+        // The TUI route answers the same command for a conversation that is indexed but not open, because the
+        // TUI reads its session id from the index.
+        val indexedOnly = FakeSource().apply {
+            hosts = listOf(savedHost)
+            sessions = listOf(this@RendererActionsTest.session)
+        }
+        val tui = dataOf(
+            RendererActions(indexedOnly).handle(
+                "terminal.command.start",
+                payload(params = mapOf("conversationId" to RendererConversationId.of(this@RendererActionsTest.session))),
+            ),
+        )
+        assertThat(tui.getString("session_id")).isEqualTo("session-a")
+        assertThat(tui.getString("command")).isEqualTo("cd -- '/workspace/app' && exec kimi --session 'session-a'")
+
+        // A WSL host runs the same command through the Windows entry of its target.
+        val wslSession = this@RendererActionsTest.session.copy(hostId = 8)
+        val wsl = FakeSource().apply {
+            hosts = listOf(savedHost.copy(id = 8, nickname = "windows-box", osType = "windows", agentTarget = "wsl:Ubuntu-24.04"))
+            sessions = listOf(wslSession)
+        }
+        val wrapped = dataOf(RendererActions(wsl).handle("terminal.open", payload(params = mapOf("conversationId" to RendererConversationId.of(wslSession)))))
+        assertThat(wrapped.getString("target")).isEqualTo("wsl:Ubuntu-24.04")
+        assertThat(wrapped.getString("command")).startsWith("wsl.exe --distribution \"Ubuntu-24.04\"")
+
+        // A target this app has no shell entry for, and a directory nobody ever learned, each fail as themselves.
+        val windowsNative = FakeSource().apply {
+            hosts = listOf(savedHost.copy(id = 8, osType = "windows", agentTarget = "native"))
+            sessions = listOf(wslSession)
+        }
+        val unsupported = RendererActions(windowsNative).handle("terminal.open", payload(params = mapOf("conversationId" to RendererConversationId.of(wslSession))))
+        assertThat(unsupported.status).isEqualTo(501)
+        assertThat(codeOf(unsupported)).isEqualTo("TERMINAL_UNSUPPORTED")
+        val noDirectory = FakeSource().apply {
+            hosts = listOf(savedHost)
+            sessions = listOf(this@RendererActionsTest.session.copy(cwd = ""))
+        }
+        val unknownWorkspace = RendererActions(noDirectory).handle(
+            "terminal.open",
+            payload(params = mapOf("conversationId" to RendererConversationId.of(this@RendererActionsTest.session.copy(cwd = "")))),
+        )
+        assertThat(unknownWorkspace.status).isEqualTo(409)
+        assertThat(codeOf(unknownWorkspace)).isEqualTo("WORKSPACE_UNKNOWN")
+        assertThat(RendererActions(source).handle("terminal.open", payload(params = mapOf("conversationId" to "c1.7.6b696d69.73657373696f6e2d7a"))).status).isEqualTo(404)
+    }
+
+    @Test
+    fun aTerminalCommandNamesNoConversationTheProductDoesNotHold() = runTest {
+        // Nothing is open and the index holds nothing either, so there is no session id a command could resume.
+        for (action in listOf("terminal.open", "terminal.command.start")) {
+            val result = RendererActions(FakeSource()).handle(action, payload(conversation = true))
+            assertThat(result.status).describedAs(action).isEqualTo(404)
+            assertThat(codeOf(result)).describedAs(action).isEqualTo("CONVERSATION_NOT_FOUND")
+        }
+    }
+
+    @Test
+    fun aTerminalOnASavedHostUsesThatHostsAgentAndTheTypedDirectory() = runTest {
+        val installed = FakeSource().apply {
+            hosts = listOf(savedHost)
+            // Kimi is the Agent this host's probe found; the second row was ruled out and must not be chosen.
+            availability = listOf(availableRow(7, AgentKind.KIMI), missingRow(7, AgentKind.OPENCODE))
+        }
+        for (action in listOf("terminal.open", "terminal.command.start")) {
+            val result = RendererActions(installed).handle(action, payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to "/srv/app")))
+            assertThat(result.status).describedAs(action).isEqualTo(200)
+            val data = dataOf(result)
+            assertThat(data.getString("host_id")).describedAs(action).isEqualTo("host-7")
+            assertThat(data.getString("host_name")).describedAs(action).isEqualTo("工作机")
+            assertThat(data.getString("agent")).describedAs(action).isEqualTo("kimi")
+            assertThat(data.getString("cwd")).describedAs(action).isEqualTo("/srv/app")
+            assertThat(data.getString("target")).describedAs(action).isEqualTo("posix")
+            // A saved host has no session of its own, so the command starts the Agent and resumes nothing.
+            assertThat(data.getString("command")).describedAs(action).isEqualTo("cd -- '/srv/app' && exec kimi")
+            assertThat(data.keys().asSequence().toList())
+                .describedAs(action)
+                .doesNotContain("session_id", "conversation_id", "password", "key", "secret", "token")
+        }
+
+        // The conversation this product holds for that host is the Agent it already uses there, ahead of the order
+        // the probe rows would pick.
+        val chosen = AgentSession(hostId = 7, agent = AgentKind.OPENCODE, sessionId = "session-b", cwd = "/workspace/other")
+        val withConversation = FakeSource().apply {
+            hosts = listOf(savedHost)
+            sessions = listOf(chosen)
+            session = chosen
+            active = true
+            availability = listOf(availableRow(7, AgentKind.KIMI), availableRow(7, AgentKind.OPENCODE))
+        }
+        val opened = dataOf(RendererActions(withConversation).handle("terminal.open", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to "/srv/app"))))
+        assertThat(opened.getString("agent")).isEqualTo("opencode")
+        assertThat(opened.getString("command")).isEqualTo("cd -- '/srv/app' && exec opencode")
+
+        // A WSL host wraps the same command once for its own target.
+        val wsl = FakeSource().apply {
+            hosts = listOf(savedHost.copy(id = 8, nickname = "windows-box", osType = "windows", agentTarget = "wsl:Ubuntu-24.04"))
+            availability = listOf(availableRow(8))
+        }
+        val wrapped = dataOf(RendererActions(wsl).handle("terminal.command.start", payload(params = mapOf("hostId" to "host-8"), body = mapOf("cwd" to "/srv/app"))))
+        assertThat(wrapped.getString("target")).isEqualTo("wsl:Ubuntu-24.04")
+        assertThat(wrapped.getString("command")).startsWith("wsl.exe --distribution \"Ubuntu-24.04\"")
+    }
+
+    @Test
+    fun aHostWithoutAnAgentOrADirectoryRefusesToInventATerminalCommand() = runTest {
+        // Nothing was ever probed here, so no Agent on this host is known to be installed.
+        val unprobed = FakeSource().apply { hosts = listOf(savedHost) }
+        val noAgent = RendererActions(unprobed).handle("terminal.open", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to "/srv/app")))
+        assertThat(noAgent.status).isEqualTo(409)
+        assertThat(codeOf(noAgent)).isEqualTo("AGENT_UNAVAILABLE")
+
+        // A probe that ruled every Agent out leaves no installed Agent either, and a target the app cannot address
+        // is not an installed one.
+        val ruledOut = FakeSource().apply {
+            hosts = listOf(savedHost)
+            availability = listOf(missingRow(7, AgentKind.KIMI), targetUnsupportedRow(7, AgentKind.OPENCODE))
+        }
+        val none = RendererActions(ruledOut).handle("terminal.command.start", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to "/srv/app")))
+        assertThat(none.status).isEqualTo(409)
+        assertThat(codeOf(none)).isEqualTo("AGENT_UNAVAILABLE")
+
+        // A host-scoped command has no conversation to take a directory from, so one has to be named and usable.
+        val noDirectory = FakeSource().apply {
+            hosts = listOf(savedHost)
+            availability = listOf(availableRow(7))
+        }
+        for (cwd in listOf(null, "", "srv/app", "/srv\napp")) {
+            val result = RendererActions(noDirectory).handle("terminal.open", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to cwd)))
+            assertThat(result.status).describedAs("$cwd").isEqualTo(422)
+            assertThat(codeOf(result)).describedAs("$cwd").isEqualTo("INVALID_CWD")
+        }
+        val notText = RendererActions(noDirectory).handle("terminal.open", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to 42)))
+        assertThat(notText.status).isEqualTo(422)
+        assertThat(codeOf(notText)).isEqualTo("INVALID_CWD")
+
+        // An unnamed target and a host nobody saved are each refused as themselves.
+        val noTarget = RendererActions(noDirectory).handle("terminal.open", payload(body = mapOf("cwd" to "/srv/app")))
+        assertThat(noTarget.status).isEqualTo(422)
+        assertThat(codeOf(noTarget)).isEqualTo("TERMINAL_TARGET_UNKNOWN")
+        val unknownHost = RendererActions(noDirectory).handle("terminal.open", payload(params = mapOf("hostId" to "host-9"), body = mapOf("cwd" to "/srv/app")))
+        assertThat(unknownHost.status).isEqualTo(404)
+        assertThat(codeOf(unknownHost)).isEqualTo("HOST_NOT_FOUND")
+    }
+
+    @Test
+    fun hostsRefreshProbesTheHostAndReportsTheRefreshedIndex() = runTest {
+        val source = FakeSource().apply {
+            hosts = listOf(savedHost)
+            sessions = listOf(
+                this@RendererActionsTest.session,
+                this@RendererActionsTest.session.copy(sessionId = "session-b", cwd = "/workspace/b"),
+                AgentSession(hostId = 8, agent = AgentKind.KIMI, sessionId = "session-c", cwd = "/workspace/c"),
+            )
+            probeRows = mapOf(7L to listOf(availableRow(7)))
+        }
+        val result = RendererActions(source).handle("hosts.refresh", payload(params = mapOf("hostId" to "host-7")))
+        assertThat(result.status).isEqualTo(200)
+        // The repository's own refresh entry ran for this host, and it is the one that also rescans the index.
+        assertThat(source.probedHosts).containsExactly(7L)
+        val data = dataOf(result)
+        assertThat(data.getString("host_id")).isEqualTo("host-7")
+        assertThat(data.getBoolean("refreshed")).isTrue()
+        assertThat(data.getInt("sessions")).isEqualTo(2)
+        assertThat(data.getJSONObject("detection").getBoolean("checked")).isTrue()
+        assertThat(data.getJSONObject("detection").getJSONArray("agents").getJSONObject(0).getString("state")).isEqualTo("available")
+
+        val failing = FakeSource().apply {
+            hosts = listOf(savedHost)
+            detectionFailure = IOException("探测通道不可用")
+        }
+        val failed = RendererActions(failing).handle("hosts.refresh", payload(params = mapOf("hostId" to "host-7")))
+        assertThat(failed.status).isEqualTo(500)
+        assertThat(codeOf(failed)).isEqualTo("HOST_REFRESH_FAILED")
+        assertThat((failed.body as JSONObject).getString("error")).contains("探测通道不可用")
+        assertThat(RendererActions(FakeSource()).handle("hosts.refresh", payload(params = mapOf("hostId" to "host-7"))).status).isEqualTo(404)
+    }
+
+    @Test
+    fun theBridgeAcceptsTheNewRoutesAndKeepsTheirParameters() {
+        val bridge = ProbeBridge(projectId = null)
+        bridge.commit(ProbeBridge.ENTRY)
+        val seen = mutableListOf<String>()
+        val execute = { action: String, payload: JSONObject ->
+            val params = payload.getJSONObject("params")
+            seen += action + ":" + params.keys().asSequence().sorted().joinToString(",") { key -> "$key=${params.optString(key)}" }
+            ProbeResult(body = json("success" to true))
+        }
+        val handshake = bridge.receive(ProbeBridge.ORIGIN, true, bridgeRequest("host.handshake", "", "renderer-1", JSONObject()), execute)!!
+        val document = handshake.getJSONObject("body").getString("documentId")
+        var serial = 2
+        fun receive(action: String, params: JSONObject = JSONObject()): JSONObject = bridge.receive(ProbeBridge.ORIGIN, true, bridgeRequest(action, document, "renderer-${serial++}", params), execute)!!
+
+        assertThat(receive("challenges.read").getInt("status")).isEqualTo(200)
+        assertThat(receive("challenges.answer", JSONObject().put("challengeId", "ch-1")).getInt("status")).isEqualTo(200)
+        assertThat(receive("messages.before", JSONObject().put("conversationId", RENDERER_CONVERSATION)).getInt("status")).isEqualTo(200)
+        assertThat(receive("interactions.review", JSONObject().put("conversationId", RENDERER_CONVERSATION).put("requestRef", "ask-1")).getInt("status")).isEqualTo(200)
+        assertThat(receive("terminal.open", JSONObject().put("conversationId", RENDERER_CONVERSATION)).getInt("status")).isEqualTo(200)
+        assertThat(receive("terminal.command.start", JSONObject().put("conversationId", RENDERER_CONVERSATION)).getInt("status")).isEqualTo(200)
+        // The two terminal routes may address a saved host instead, and they travel without a conversation then.
+        assertThat(receive("terminal.open", JSONObject().put("hostId", "host-7")).getInt("status")).isEqualTo(200)
+        assertThat(receive("terminal.command.start", JSONObject().put("hostId", "host-7")).getInt("status")).isEqualTo(200)
+        assertThat(receive("hosts.refresh", JSONObject().put("hostId", "host-7")).getInt("status")).isEqualTo(200)
+        assertThat(receive("conversations.create", JSONObject().put("hostId", "host-7").put("agent", "kimi").put("cwd", "/w")).getInt("status")).isEqualTo(200)
+        // Every new route reached the action layer with exactly the parameters it documents.
+        assertThat(seen).containsExactly(
+            "challenges.read:",
+            "challenges.answer:challengeId=ch-1",
+            "messages.before:conversationId=$RENDERER_CONVERSATION",
+            "interactions.review:conversationId=$RENDERER_CONVERSATION,requestRef=ask-1",
+            "terminal.open:conversationId=$RENDERER_CONVERSATION",
+            "terminal.command.start:conversationId=$RENDERER_CONVERSATION",
+            "terminal.open:hostId=host-7",
+            "terminal.command.start:hostId=host-7",
+            "hosts.refresh:hostId=host-7",
+            "conversations.create:agent=kimi,cwd=/w,hostId=host-7",
+        )
+
+        // A conversation route of the new set still refuses an id the product could not have derived, and a route
+        // whose id the bridge checks refuses a parameter it never documented.
+        val wrongConversation = receive("terminal.open", JSONObject().put("conversationId", "conv-other"))
+        assertThat(wrongConversation.getInt("status")).isEqualTo(404)
+        assertThat(wrongConversation.getJSONObject("body").getString("code")).isEqualTo("CONVERSATION_NOT_FOUND")
+        val wrongParameter = receive("challenges.answer", JSONObject().put("hostId", "host-7"))
+        assertThat(wrongParameter.getInt("status")).isEqualTo(400)
+        assertThat(wrongParameter.getJSONObject("body").getString("code")).isEqualTo("INVALID_REQUEST")
+        val wrongTerminalParameter = receive("terminal.command.start", JSONObject().put("projectId", "host-7"))
+        assertThat(wrongTerminalParameter.getInt("status")).isEqualTo(400)
+        assertThat(wrongTerminalParameter.getJSONObject("body").getString("code")).isEqualTo("INVALID_REQUEST")
+    }
+
     /** One saved host with every identity column a rename or an address change must leave alone. */
     private val savedHost = Host(
         id = 7,
@@ -723,6 +1295,45 @@ class RendererActionsTest {
         pubkeyId = 42L,
         profileId = 3L,
         jumpHostId = 5L,
+    )
+
+    /**
+     * One question event shaped the way an ACP agent states it: the request id, the prompt and the schema the
+     * answer must satisfy. The Compose conversation form and this host project it with the same code.
+     */
+    private fun questionEvent(id: String, text: String, key: Long): AgentEvent = AgentEvent(
+        type = "question",
+        id = id,
+        text = text,
+        raw = buildJsonObject {
+            put(
+                "requestedSchema",
+                buildJsonObject {
+                    put("type", "object")
+                    put("required", buildJsonArray { add(JsonPrimitive("branch")) })
+                    put(
+                        "properties",
+                        buildJsonObject {
+                            put(
+                                "branch",
+                                buildJsonObject {
+                                    put("type", "string")
+                                    put("title", "分支")
+                                    put(
+                                        "enum",
+                                        buildJsonArray {
+                                            add(JsonPrimitive("main"))
+                                            add(JsonPrimitive("dev"))
+                                        },
+                                    )
+                                },
+                            )
+                        },
+                    )
+                },
+            )
+        },
+        historyKey = key,
     )
 
     private fun availableRow(hostId: Long, kind: AgentKind = AgentKind.KIMI): AgentAvailability = AgentAvailability(

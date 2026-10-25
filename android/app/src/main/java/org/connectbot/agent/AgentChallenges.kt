@@ -32,6 +32,8 @@ data class AgentChallenge(
     val kind: String,
     val message: String,
     val secret: Boolean = false,
+    /** Saved host this challenge was raised for, or 0 when the host behind it is unknown. */
+    val hostId: Long = 0L,
 )
 
 @Singleton
@@ -41,8 +43,8 @@ class AgentChallenges @Inject constructor() {
     val challenge = state.asStateFlow()
     private val pending = mutableMapOf<String, CompletableDeferred<String?>>()
 
-    suspend fun ask(hostName: String, kind: String, message: String, secret: Boolean = false): String = mutex.withLock {
-        val request = AgentChallenge(UUID.randomUUID().toString(), hostName, kind, message, secret)
+    suspend fun ask(hostName: String, kind: String, message: String, secret: Boolean = false, hostId: Long = 0L): String = mutex.withLock {
+        val request = AgentChallenge(UUID.randomUUID().toString(), hostName, kind, message, secret, hostId)
         val answer = CompletableDeferred<String?>()
         synchronized(pending) { pending[request.id] = answer }
         state.value = request

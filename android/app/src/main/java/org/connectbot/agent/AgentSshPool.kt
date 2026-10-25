@@ -431,7 +431,7 @@ class AgentSshPool @Inject constructor(
     }
 
     private suspend fun ask(host: Host, kind: String, message: String, secret: Boolean = false): String = try {
-        challenges.ask(host.nickname.ifBlank { host.hostname }, kind, message, secret)
+        challenges.ask(host.nickname.ifBlank { host.hostname }, kind, message, secret, host.id)
     } catch (e: AgentConnectionNeedsUser) {
         reconnect.block(host.id)
         throw e

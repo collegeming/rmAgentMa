@@ -1,6 +1,9 @@
 Modified by rmAgentMa contributors for the renderer probe.
 JSON modifications: packages/desktop/src/renderer/services/i18n/locales/en-US/messages.json;
-packages/desktop/src/renderer/services/i18n/locales/zh-CN/messages.json.
+packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json;
+packages/desktop/src/renderer/services/i18n/locales/zh-CN/messages.json;
+packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json;
+packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json.
 
 diff --git a/packages/desktop/src/common/adapter/browser.ts b/packages/desktop/src/common/adapter/browser.ts
 index bd872a3..cac061b 100644
@@ -4419,4 +4422,2355 @@ index 99e93b6..b37e8be 100644
 +
    it('uses legacy acp_model_info stream only before config options are available', async () => {
      ensureRuntimeInvokeMock.mockResolvedValue({ recovered: true, config_options: [], runtime: null });
+ 
+diff --git a/packages/desktop/src/renderer/components/layout/Router.tsx b/packages/desktop/src/renderer/components/layout/Router.tsx
+index e04746e..9d381b5 100644
+--- a/packages/desktop/src/renderer/components/layout/Router.tsx
++++ b/packages/desktop/src/renderer/components/layout/Router.tsx
+@@ -10,6 +10,7 @@
+ const AgentSettings = React.lazy(() => import('@renderer/pages/settings/AgentSettings'));
+ const AgentRepairPage = React.lazy(() => import('@renderer/pages/settings/AgentSettings/AgentRepairPage'));
+ const AssistantSettings = React.lazy(() => import('@renderer/pages/settings/AssistantSettings'));
++const HostsPage = React.lazy(() => import('@renderer/pages/hosts'));
+ const SkillsSettings = React.lazy(() => import('@renderer/pages/settings/SkillsSettings/SkillsHubSettings'));
+ const SkillDetailPage = React.lazy(() => import('@renderer/pages/settings/SkillsSettings/SkillDetailPage'));
+ const ToolsSettings = React.lazy(() => import('@renderer/pages/settings/ToolsSettings'));
+@@ -81,6 +82,7 @@
+           />
+           <Route path='/settings/model' element={withRouteFallback(ModeSettings)} />
+           <Route path='/assistants' element={withRouteFallback(AssistantSettings)} />
++          <Route path='/hosts' element={withRouteFallback(HostsPage)} />
+           {/* Assistants moved out of Settings to a top-level entry; keep a redirect
+               so old deep links / back-nav still land on the new page. */}
+           <Route path='/settings/assistants' element={<Navigate to='/assistants' replace />} />
+diff --git a/packages/desktop/src/renderer/components/layout/Sider/SiderNav/index.ts b/packages/desktop/src/renderer/components/layout/Sider/SiderNav/index.ts
+index 0d3b8cc..bd14080 100644
+--- a/packages/desktop/src/renderer/components/layout/Sider/SiderNav/index.ts
++++ b/packages/desktop/src/renderer/components/layout/Sider/SiderNav/index.ts
+@@ -1,4 +1,5 @@
+ export { default as SiderAssistantEntry } from './SiderAssistantEntry';
++export { default as SiderHostsEntry } from './SiderHostsEntry';
+ export { default as SiderScheduledEntry } from './SiderScheduledEntry';
+ export { default as SiderSearchEntry } from './SiderSearchEntry';
+ export { default as SiderToolbar } from './SiderToolbar';
+diff --git a/packages/desktop/src/renderer/components/layout/Sider/index.tsx b/packages/desktop/src/renderer/components/layout/Sider/index.tsx
+index 5cabf35..27b5b21 100644
+--- a/packages/desktop/src/renderer/components/layout/Sider/index.tsx
++++ b/packages/desktop/src/renderer/components/layout/Sider/index.tsx
+@@ -7,7 +7,7 @@
+ import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
+ import { blurActiveElement } from '@renderer/utils/ui/focus';
+ import { useThemeContext } from '@renderer/hooks/context/ThemeContext';
+-import { SiderToolbar, SiderSearchEntry, SiderScheduledEntry, SiderAssistantEntry } from './SiderNav';
++import { SiderToolbar, SiderSearchEntry, SiderScheduledEntry, SiderAssistantEntry, SiderHostsEntry } from './SiderNav';
+ import SiderFooter from './SiderFooter';
+ import TeamSiderSection from './TeamSiderSection';
+ import siderStyles from './Sider.module.css';
+@@ -109,6 +109,19 @@
+     }
+   };
+ 
++  const handleHostsClick = () => {
++    cleanupSiderTooltips();
++    blurActiveElement();
++    closePreview();
++    setIsBatchMode(false);
++    Promise.resolve(navigate('/hosts')).catch((error) => {
++      console.error('Navigation failed:', error);
++    });
++    if (onSessionClick) {
++      onSessionClick();
++    }
++  };
++
+   const handleQuickThemeToggle = () => {
+     void setTheme(theme === 'dark' ? 'light' : 'dark');
+   };
+@@ -208,6 +221,14 @@
+               siderTooltipProps={siderTooltipProps}
+               onClick={handleAssistantClick}
+             />
++            {/* Host page entry - the product's own host and Agent target management */}
++            <SiderHostsEntry
++              isMobile={isMobile}
++              isActive={pathname.startsWith('/hosts')}
++              collapsed={collapsed}
++              siderTooltipProps={siderTooltipProps}
++              onClick={handleHostsClick}
++            />
+             {/* Scheduled tasks nav entry - fixed above scroll */}
+             <SiderScheduledEntry
+               isMobile={isMobile}
+diff --git a/packages/desktop/src/renderer/services/feedback/resolveFeedbackModule.ts b/packages/desktop/src/renderer/services/feedback/resolveFeedbackModule.ts
+index 8f87574..762f9e0 100644
+--- a/packages/desktop/src/renderer/services/feedback/resolveFeedbackModule.ts
++++ b/packages/desktop/src/renderer/services/feedback/resolveFeedbackModule.ts
+@@ -21,6 +21,8 @@
+   ['/team', 'agent-team'],
+   ['/scheduled', 'scheduled-task'],
+   ['/assistants', 'assistant-preset'],
++  // The host page owns the Agent target and the probe verdicts of each saved host.
++  ['/hosts', 'agent-detection'],
+   ['/settings/agent', 'agent-detection'],
+   ['/settings/model', 'model-auth'],
+   ['/settings/skills', 'skills-plugin'],
+diff --git a/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts b/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
+index 677ae71..e66c331 100644
+--- a/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
++++ b/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
+@@ -2059,6 +2059,55 @@
+   | 'settings.healthCheck'
+   | 'settings.healthStatusCleared'
+   | 'settings.helpDocumentation'
++  | 'settings.hosts.add'
++  | 'settings.hosts.address'
++  | 'settings.hosts.addressRequired'
++  | 'settings.hosts.agentTarget'
++  | 'settings.hosts.cancel'
++  | 'settings.hosts.createTitle'
++  | 'settings.hosts.delete'
++  | 'settings.hosts.deleteConfirm'
++  | 'settings.hosts.description'
++  | 'settings.hosts.distributionRequired'
++  | 'settings.hosts.edit'
++  | 'settings.hosts.editTitle'
++  | 'settings.hosts.empty'
++  | 'settings.hosts.executable'
++  | 'settings.hosts.loadFailed'
++  | 'settings.hosts.nickname'
++  | 'settings.hosts.nicknameRequired'
++  | 'settings.hosts.osLinux'
++  | 'settings.hosts.osType'
++  | 'settings.hosts.osWindows'
++  | 'settings.hosts.port'
++  | 'settings.hosts.portInvalid'
++  | 'settings.hosts.probeAvailable'
++  | 'settings.hosts.probeConnectFailed'
++  | 'settings.hosts.probeNoProtocolCapability'
++  | 'settings.hosts.probeNotInstalled'
++  | 'settings.hosts.probeStartFailed'
++  | 'settings.hosts.probeTargetUnsupported'
++  | 'settings.hosts.probeUnchecked'
++  | 'settings.hosts.probeUnknownFailure'
++  | 'settings.hosts.reasonUnknown'
++  | 'settings.hosts.refresh'
++  | 'settings.hosts.refreshing'
++  | 'settings.hosts.requestFailed'
++  | 'settings.hosts.retry'
++  | 'settings.hosts.save'
++  | 'settings.hosts.saving'
++  | 'settings.hosts.targetLinuxHint'
++  | 'settings.hosts.targetNative'
++  | 'settings.hosts.targetNativeHint'
++  | 'settings.hosts.targetNativeUnsupported'
++  | 'settings.hosts.targetWsl'
++  | 'settings.hosts.title'
++  | 'settings.hosts.username'
++  | 'settings.hosts.version'
++  | 'settings.hosts.wslBadge'
++  | 'settings.hosts.wslDistribution'
++  | 'settings.hosts.wslDistributionHint'
++  | 'settings.hosts.wslDistributionInvalid'
+   | 'settings.imageGenSupportedTooltipAntigravity'
+   | 'settings.imageGenSupportedTooltipGemini'
+   | 'settings.imageGenSupportedTooltipOpenRouter'
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json b/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json
+index 63fe6cb..4bae78e 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json
+@@ -823,6 +823,57 @@
+   "noAvailableModels": "No available models",
+   "appDescription": "One desktop. Your AI agents, actually coworking.",
+   "helpDocumentation": "Help Documentation",
++  "hosts": {
++    "title": "Hosts",
++    "description": "The saved hosts this app can run an Agent on, and the Agent target each one uses.",
++    "add": "Add host",
++    "empty": "No hosts yet.",
++    "loadFailed": "The host list could not be read.",
++    "retry": "Retry",
++    "refresh": "Probe again",
++    "refreshing": "Probing…",
++    "edit": "Edit",
++    "delete": "Delete",
++    "deleteConfirm": "Delete {{nickname}}? Its saved key, indexed sessions and probe results go with it.",
++    "nickname": "Nickname",
++    "address": "Address",
++    "port": "Port",
++    "username": "Username",
++    "osType": "Operating system",
++    "agentTarget": "Agent target",
++    "osLinux": "Linux",
++    "osWindows": "Windows",
++    "targetNative": "This host",
++    "targetNativeUnsupported": "Windows itself (not supported)",
++    "targetNativeHint": "An Agent on Windows itself has no entry in this app yet, so this target cannot be saved.",
++    "targetLinuxHint": "A Linux host runs its Agent in its own shell.",
++    "targetWsl": "WSL distribution",
++    "wslDistribution": "WSL distribution name",
++    "wslDistributionHint": "The name WSL reports, for example Ubuntu-22.04.",
++    "wslDistributionInvalid": "Use the name WSL reports: letters, digits, spaces, dots, dashes and underscores only.",
++    "wslBadge": "WSL: {{distribution}}",
++    "probeAvailable": "Installed, protocol ready",
++    "probeNotInstalled": "Not installed: the host holds no runnable file for this Agent.",
++    "probeStartFailed": "Start failed: the Agent never completed a usable handshake.",
++    "probeNoProtocolCapability": "No protocol capability: the Agent answered without the capabilities this app needs.",
++    "probeConnectFailed": "Connection failed: the probe never reached the host or never produced a result.",
++    "probeTargetUnsupported": "Target not supported: Windows itself has no entry in this app, so pick a WSL distribution on that host.",
++    "probeUnknownFailure": "Probe failed: the reason is not one this build knows.",
++    "probeUnchecked": "Not probed yet",
++    "executable": "Executable: {{path}}",
++    "version": "Version: {{version}}",
++    "createTitle": "Add host",
++    "editTitle": "Edit host",
++    "save": "Save",
++    "cancel": "Cancel",
++    "saving": "Saving…",
++    "nicknameRequired": "Enter a nickname.",
++    "addressRequired": "Enter an address.",
++    "portInvalid": "Port must be a whole number between 1 and 65535.",
++    "distributionRequired": "Enter the WSL distribution name.",
++    "requestFailed": "The host refused this request ({{code}}): {{reason}}",
++    "reasonUnknown": "no reason given"
++  },
+   "updateLog": "Update Log",
+   "feedback": "Feedback",
+   "bugReport": "Report Issue",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
+index f2ffc1b..74d7f27 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
+@@ -823,6 +823,57 @@
+   "noAvailableModels": "暂无可用模型",
+   "appDescription": "One desktop. Your AI agents, actually coworking.",
+   "helpDocumentation": "帮助文档",
++  "hosts": {
++    "title": "主机",
++    "description": "本应用可运行 Agent 的主机，以及每台主机使用的 Agent 目标。",
++    "add": "添加主机",
++    "empty": "还没有主机。",
++    "loadFailed": "主机列表读取失败。",
++    "retry": "重试",
++    "refresh": "重新探测",
++    "refreshing": "正在探测…",
++    "edit": "编辑",
++    "delete": "删除",
++    "deleteConfirm": "删除 {{nickname}}？该主机保存的密钥、已索引的会话与探测结果也会一并删除。",
++    "nickname": "昵称",
++    "address": "地址",
++    "port": "端口",
++    "username": "用户名",
++    "osType": "操作系统",
++    "agentTarget": "Agent 目标",
++    "osLinux": "Linux",
++    "osWindows": "Windows",
++    "targetNative": "本机",
++    "targetNativeUnsupported": "Windows 本机（不支持）",
++    "targetNativeHint": "Windows 本机目标尚未实现，无法保存该组合。",
++    "targetLinuxHint": "Linux 主机的 Agent 运行在主机自身的 Shell 中。",
++    "targetWsl": "WSL 发行版",
++    "wslDistribution": "WSL 发行版名称",
++    "wslDistributionHint": "填写 WSL 报告的发行版名称，例如 Ubuntu-22.04。",
++    "wslDistributionInvalid": "请使用 WSL 报告的发行版名称：仅限字母、数字、空格、点、短横线和下划线。",
++    "wslBadge": "WSL：{{distribution}}",
++    "probeAvailable": "已安装，协议就绪",
++    "probeNotInstalled": "未安装：主机上找不到该 Agent 的运行文件。",
++    "probeStartFailed": "启动失败：Agent 未能完成可用的握手。",
++    "probeNoProtocolCapability": "无协议能力：Agent 已应答，但未声明本应用需要的协议能力。",
++    "probeConnectFailed": "连接失败：探测未连上主机或未取得探测结果。",
++    "probeTargetUnsupported": "不支持的目标：Windows 本机目标尚未实现，请在该主机上选择 WSL 发行版。",
++    "probeUnknownFailure": "探测失败：原因无法识别。",
++    "probeUnchecked": "尚未探测",
++    "executable": "可执行文件：{{path}}",
++    "version": "版本：{{version}}",
++    "createTitle": "添加主机",
++    "editTitle": "编辑主机",
++    "save": "保存",
++    "cancel": "取消",
++    "saving": "保存中…",
++    "nicknameRequired": "请填写昵称。",
++    "addressRequired": "请填写地址。",
++    "portInvalid": "端口必须是 1 到 65535 的整数。",
++    "distributionRequired": "请填写 WSL 发行版名称。",
++    "requestFailed": "宿主拒绝了这个请求（{{code}}）：{{reason}}",
++    "reasonUnknown": "未给出原因"
++  },
+   "updateLog": "更新日志",
+   "feedback": "意见反馈",
+   "bugReport": "反馈问题",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json b/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json
+index aebb9bd..f9a5e11 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json
+@@ -823,6 +823,57 @@
+   "noAvailableModels": "暫無可用模型",
+   "appDescription": "One desktop. Your AI agents, actually coworking.",
+   "helpDocumentation": "幫助文檔",
++  "hosts": {
++    "title": "主機",
++    "description": "本應用可執行 Agent 的主機，以及每部主機使用的 Agent 目標。",
++    "add": "新增主機",
++    "empty": "尚無主機。",
++    "loadFailed": "主機清單讀取失敗。",
++    "retry": "重試",
++    "refresh": "重新探測",
++    "refreshing": "正在探測…",
++    "edit": "編輯",
++    "delete": "刪除",
++    "deleteConfirm": "刪除 {{nickname}}？該主機儲存的金鑰、已索引的工作階段與探測結果也會一併刪除。",
++    "nickname": "暱稱",
++    "address": "位址",
++    "port": "連接埠",
++    "username": "使用者名稱",
++    "osType": "作業系統",
++    "agentTarget": "Agent 目標",
++    "osLinux": "Linux",
++    "osWindows": "Windows",
++    "targetNative": "本機",
++    "targetNativeUnsupported": "Windows 本機（不支援）",
++    "targetNativeHint": "Windows 本機目標尚未實作，無法儲存此組合。",
++    "targetLinuxHint": "Linux 主機的 Agent 在自己的 Shell 中執行。",
++    "targetWsl": "WSL 發行版",
++    "wslDistribution": "WSL 發行版名稱",
++    "wslDistributionHint": "填寫 WSL 回報的發行版名稱，例如 Ubuntu-22.04。",
++    "wslDistributionInvalid": "請使用 WSL 回報的發行版名稱：僅限字母、數字、空格、點、連字號與底線。",
++    "wslBadge": "WSL：{{distribution}}",
++    "probeAvailable": "已安裝，協定就緒",
++    "probeNotInstalled": "未安裝：主機上找不到該 Agent 的執行檔。",
++    "probeStartFailed": "啟動失敗：Agent 未能完成可用的交握。",
++    "probeNoProtocolCapability": "無協定能力：Agent 已回應，但未宣告本應用需要的協定能力。",
++    "probeConnectFailed": "連線失敗：探測未連上主機或未取得探測結果。",
++    "probeTargetUnsupported": "不支援的目標：Windows 本機目標尚未實作，請在該主機上選擇 WSL 發行版。",
++    "probeUnknownFailure": "探測失敗：原因無法識別。",
++    "probeUnchecked": "尚未探測",
++    "executable": "執行檔：{{path}}",
++    "version": "版本：{{version}}",
++    "createTitle": "新增主機",
++    "editTitle": "編輯主機",
++    "save": "儲存",
++    "cancel": "取消",
++    "saving": "儲存中…",
++    "nicknameRequired": "請填寫暱稱。",
++    "addressRequired": "請填寫位址。",
++    "portInvalid": "連接埠必須是 1 到 65535 的整數。",
++    "distributionRequired": "請填寫 WSL 發行版名稱。",
++    "requestFailed": "宿主拒絕了這個請求（{{code}}）：{{reason}}",
++    "reasonUnknown": "未提供原因"
++  },
+   "updateLog": "更新日誌",
+   "feedback": "意見反饋",
+   "bugReport": "反饋問題",
+diff --git a/tests/unit/feedback/resolveFeedbackModule.test.ts b/tests/unit/feedback/resolveFeedbackModule.test.ts
+index 1cdf69e..12bf7f6 100644
+--- a/tests/unit/feedback/resolveFeedbackModule.test.ts
++++ b/tests/unit/feedback/resolveFeedbackModule.test.ts
+@@ -21,6 +21,7 @@
+     ['/scheduled', 'scheduled-task'],
+     ['/scheduled/job-42', 'scheduled-task'],
+     ['/assistants', 'assistant-preset'],
++    ['/hosts', 'agent-detection'],
+     ['/settings/agent', 'agent-detection'],
+     ['/settings/agent/claude/repair', 'agent-detection'],
+     ['/settings/model', 'model-auth'],
+diff --git a/packages/desktop/src/renderer/components/layout/Layout.tsx b/packages/desktop/src/renderer/components/layout/Layout.tsx
+index 9a1c85b..962ee2d 100644
+--- a/packages/desktop/src/renderer/components/layout/Layout.tsx
++++ b/packages/desktop/src/renderer/components/layout/Layout.tsx
+@@ -11,7 +11,7 @@ import PwaPullToRefresh from '@/renderer/components/layout/PwaPullToRefresh';
+ import Titlebar from '@/renderer/components/layout/Titlebar';
+ import { Layout as ArcoLayout, Tooltip } from '@arco-design/web-react';
+ import classNames from 'classnames';
+-import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
++import React, { useCallback, useEffect, useRef, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+ import { setGlobalNavigate } from '@/renderer/utils/navigation';
+@@ -37,6 +37,7 @@ import { useDesktopTurnNotification } from '@renderer/hooks/system/notification/
+ import { cleanupSiderTooltips } from '@renderer/utils/ui/siderTooltip';
+ import { useConversationShortcuts } from '@renderer/hooks/ui/useConversationShortcuts';
+ import { isElectronDesktop } from '@renderer/utils/platform';
++import { isNativeHost } from '@/common/host/hostTransport';
+ import { IS_DISCONTINUED_BUILD } from '@/renderer/utils/discontinuedBuild';
+ import UpdateMigrationDialog from '@/renderer/components/settings/UpdateMigrationDialog';
+ import '@renderer/styles/layout.css';
+@@ -90,8 +91,6 @@ const useDebug = () => {
+   return { onClick };
+ };
+ 
+-const UpdateModal = React.lazy(() => import('@/renderer/components/settings/UpdateModal'));
+-
+ const DEFAULT_SIDER_WIDTH = 260;
+ const DESKTOP_COLLAPSED_WIDTH = 0;
+ // 桌面侧栏连续可调：下限 200；低于此值拖拽即吸附收起（消灭旧 130 死区）。
+@@ -103,6 +102,9 @@ const MOBILE_SIDER_MAX_WIDTH = 420;
+ 
+ const detectMobileViewportOrTouch = (): boolean => {
+   if (typeof window === 'undefined') return false;
++  // The native host is a phone: the layout stays in its phone form at every viewport width, so a wide
++  // (landscape) screen never turns the desktop explorer column or the desktop resize handles back on.
++  if (isNativeHost()) return true;
+   if (isElectronDesktop()) {
+     return window.innerWidth < 768;
+   }
+@@ -296,56 +298,6 @@ const Layout: React.FC<{
+     return () => unsubscribe();
+   }, []);
+ 
+-  // Handle tray events from main process / 处理来自主进程的托盘事件
+-  useEffect(() => {
+-    if (!isElectronDesktop()) return;
+-
+-    // Navigate to guid page when requested from tray / 托盘请求导航到 guid 页面
+-    const handleNavigateToGuid = () => {
+-      void navigate('/guid');
+-    };
+-
+-    // Navigate to conversation when requested from tray / 托盘请求导航到对话页面
+-    const handleNavigateToConversation = (event: CustomEvent<{ conversation_id: string }>) => {
+-      void navigate(`/conversation/${event.detail.conversation_id}`);
+-    };
+-
+-    // Open about dialog when requested from tray / 托盘请求打开关于对话框
+-    const handleOpenAbout = () => {
+-      // Navigate to settings/about page / 导航到设置/关于页面
+-      void navigate('/settings/about');
+-    };
+-
+-    // Handle pause all tasks request from tray / 托盘请求暂停所有任务
+-    const handlePauseAllTasks = async () => {
+-      const result = await ipcBridge.task.stopAll.invoke();
+-      if (result?.success) {
+-        // Navigate to settings page to show task status
+-        void navigate('/settings/system');
+-      }
+-    };
+-
+-    // Handle check update request from tray / 托盘请求检查更新
+-    const handleCheckUpdate = () => {
+-      window.dispatchEvent(new CustomEvent('aionui-open-update-modal', { detail: { source: 'tray' } }));
+-    };
+-
+-    // Listen for tray events / 监听托盘事件
+-    window.addEventListener('tray:navigate-to-guid', handleNavigateToGuid as EventListener);
+-    window.addEventListener('tray:navigate-to-conversation', handleNavigateToConversation as EventListener);
+-    window.addEventListener('tray:open-about', handleOpenAbout as EventListener);
+-    window.addEventListener('tray:pause-all-tasks', handlePauseAllTasks as EventListener);
+-    window.addEventListener('tray:check-update', handleCheckUpdate as EventListener);
+-
+-    return () => {
+-      window.removeEventListener('tray:navigate-to-guid', handleNavigateToGuid as EventListener);
+-      window.removeEventListener('tray:navigate-to-conversation', handleNavigateToConversation as EventListener);
+-      window.removeEventListener('tray:open-about', handleOpenAbout as EventListener);
+-      window.removeEventListener('tray:pause-all-tasks', handlePauseAllTasks as EventListener);
+-      window.removeEventListener('tray:check-update', handleCheckUpdate as EventListener);
+-    };
+-  }, [navigate]);
+-
+   const siderWidth = isMobile
+     ? Math.max(
+         MOBILE_SIDER_MIN_WIDTH,
+@@ -485,9 +437,6 @@ const Layout: React.FC<{
+               >
+                 <Outlet />
+                 <PwaPullToRefresh />
+-                <Suspense fallback={null}>
+-                  <UpdateModal />
+-                </Suspense>
+                 {IS_DISCONTINUED_BUILD && <UpdateMigrationDialog />}
+               </ArcoLayout.Content>
+               {/* Hoisted preview region (project conversations only). Structurally
+diff --git a/packages/desktop/src/renderer/components/layout/Router.tsx b/packages/desktop/src/renderer/components/layout/Router.tsx
+index 9d381b5..9259dfd 100644
+--- a/packages/desktop/src/renderer/components/layout/Router.tsx
++++ b/packages/desktop/src/renderer/components/layout/Router.tsx
+@@ -1,31 +1,18 @@
+ import React, { Suspense } from 'react';
+-import { HashRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
++import { HashRouter, Navigate, Route, Routes } from 'react-router-dom';
+ import AppLoader from '@renderer/components/layout/AppLoader';
+ import DocumentTitle from '@renderer/components/layout/DocumentTitle';
+ import { useCrossSessionRateLimitNotice } from '@/renderer/hooks/system/useCrossSessionRateLimitNotice';
+ import { useAuth } from '@renderer/hooks/context/AuthContext';
+-import { TEAM_MODE_ENABLED } from '@/common/config/constants';
+ const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
+ const Guid = React.lazy(() => import('@renderer/pages/guid'));
+-const AgentSettings = React.lazy(() => import('@renderer/pages/settings/AgentSettings'));
+-const AgentRepairPage = React.lazy(() => import('@renderer/pages/settings/AgentSettings/AgentRepairPage'));
+-const AssistantSettings = React.lazy(() => import('@renderer/pages/settings/AssistantSettings'));
+ const HostsPage = React.lazy(() => import('@renderer/pages/hosts'));
+-const SkillsSettings = React.lazy(() => import('@renderer/pages/settings/SkillsSettings/SkillsHubSettings'));
+-const SkillDetailPage = React.lazy(() => import('@renderer/pages/settings/SkillsSettings/SkillDetailPage'));
+-const ToolsSettings = React.lazy(() => import('@renderer/pages/settings/ToolsSettings'));
++const EscapeHatchSettings = React.lazy(() => import('@renderer/pages/settings/EscapeHatchSettings'));
+ const AppearanceSettings = React.lazy(() => import('@renderer/pages/settings/AppearanceSettings'));
+-const ModeSettings = React.lazy(() => import('@renderer/pages/settings/ModeSettings'));
+ const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemSettings'));
+-const WebuiSettings = React.lazy(() => import('@renderer/pages/settings/WebuiSettings'));
+ const PetSettings = React.lazy(() => import('@renderer/pages/settings/PetSettings'));
+ const ArchivedSettings = React.lazy(() => import('@renderer/pages/settings/ArchivedSettings'));
+-const ExtensionSettingsPage = React.lazy(() => import('@renderer/pages/settings/ExtensionSettingsPage'));
+ const LoginPage = React.lazy(() => import('@renderer/pages/login'));
+-const ComponentsShowcase = React.lazy(() => import('@renderer/pages/TestShowcase'));
+-const ScheduledTasksPage = React.lazy(() => import('@renderer/pages/cron/ScheduledTasksPage'));
+-const TaskDetailPage = React.lazy(() => import('@renderer/pages/cron/ScheduledTasksPage/TaskDetailPage'));
+-const TeamIndex = React.lazy(() => import('@renderer/pages/team'));
+ 
+ const withRouteFallback = (Component: React.LazyExoticComponent<React.ComponentType>) => (
+   <Suspense fallback={<AppLoader />}>
+@@ -33,16 +20,6 @@ const withRouteFallback = (Component: React.LazyExoticComponent<React.ComponentT
+   </Suspense>
+ );
+ 
+-/**
+- * Legacy `/settings/capabilities?tab=tools` deep links now map to the standalone
+- * Tools page; everything else (skills tab or no tab) lands on the Skills page.
+- */
+-const CapabilitiesRedirect: React.FC = () => {
+-  const { search } = useLocation();
+-  const tab = new URLSearchParams(search).get('tab');
+-  return <Navigate to={tab === 'tools' ? '/settings/tools' : '/settings/skills'} replace />;
+-};
+-
+ const ProtectedLayout: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
+   const { status, user } = useAuth();
+   // Mounted once for every authenticated route: the loop warning has to reach
+@@ -76,42 +53,21 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
+           <Route index element={<Navigate to='/guid' replace />} />
+           <Route path='/guid' element={withRouteFallback(Guid)} />
+           <Route path='/conversation/:id' element={withRouteFallback(Conversation)} />
+-          <Route
+-            path='/team/:id'
+-            element={TEAM_MODE_ENABLED ? withRouteFallback(TeamIndex) : <Navigate to='/guid' replace />}
+-          />
+-          <Route path='/settings/model' element={withRouteFallback(ModeSettings)} />
+-          <Route path='/assistants' element={withRouteFallback(AssistantSettings)} />
+           <Route path='/hosts' element={withRouteFallback(HostsPage)} />
+-          {/* Assistants moved out of Settings to a top-level entry; keep a redirect
+-              so old deep links / back-nav still land on the new page. */}
+-          <Route path='/settings/assistants' element={<Navigate to='/assistants' replace />} />
+-          <Route path='/settings/agent' element={withRouteFallback(AgentSettings)} />
+-          <Route path='/settings/agent/:id/repair' element={withRouteFallback(AgentRepairPage)} />
+-          {/* Skills and Tools are top-level settings entries. */}
+-          <Route path='/settings/skills' element={withRouteFallback(SkillsSettings)} />
+-          <Route path='/settings/skills/import-history' element={withRouteFallback(SkillsSettings)} />
+-          <Route path='/settings/skills/detail/:skillName' element={withRouteFallback(SkillDetailPage)} />
+-          <Route path='/settings/tools' element={withRouteFallback(ToolsSettings)} />
+-          {/* Legacy routes — the previous combined "Capabilities" page is now two pages. */}
+-          <Route path='/settings/capabilities' element={<CapabilitiesRedirect />} />
+-          <Route
+-            path='/settings/capabilities/skills/import-history'
+-            element={<Navigate to='/settings/skills/import-history' replace />}
+-          />
+-          <Route path='/settings/skills-hub' element={<Navigate to='/settings/skills' replace />} />
++          {/* A session is created host first, so the escape hatch addresses a saved host here. */}
++          <Route path='/settings/escape' element={withRouteFallback(EscapeHatchSettings)} />
+           <Route path='/settings/appearance' element={withRouteFallback(AppearanceSettings)} />
+           <Route path='/settings/display' element={<Navigate to='/settings/appearance' replace />} />
+-          <Route path='/settings/webui' element={withRouteFallback(WebuiSettings)} />
+           <Route path='/settings/pet' element={withRouteFallback(PetSettings)} />
+           <Route path='/settings/archived' element={withRouteFallback(ArchivedSettings)} />
+           <Route path='/settings/system' element={withRouteFallback(SystemSettings)} />
+           <Route path='/settings/about' element={withRouteFallback(SystemSettings)} />
+-          <Route path='/settings/ext/:tabId' element={withRouteFallback(ExtensionSettingsPage)} />
+-          <Route path='/settings' element={<Navigate to='/settings/agent' replace />} />
+-          <Route path='/test/components' element={withRouteFallback(ComponentsShowcase)} />
+-          <Route path='/scheduled' element={withRouteFallback(ScheduledTasksPage)} />
+-          <Route path='/scheduled/:job_id' element={withRouteFallback(TaskDetailPage)} />
++          <Route path='/settings' element={<Navigate to='/settings/escape' replace />} />
++          {/* Teams, Assistants, the provider/model page, local Agent installation, Skills, Tools/MCP,
++              WebUI and channels, extension settings, scheduled tasks and the component showcase are all
++              left out: each needs a desktop shell, this machine's own folders or the user's provider
++              credentials. Their upstream files stay for upgrades; an unknown path lands on the fallback
++              route below. */}
+         </Route>
+         <Route path='*' element={<Navigate to={status === 'authenticated' ? '/guid' : '/login'} replace />} />
+       </Routes>
+diff --git a/packages/desktop/src/renderer/components/layout/Sider/index.tsx b/packages/desktop/src/renderer/components/layout/Sider/index.tsx
+index 27b5b21..fcd5518 100644
+--- a/packages/desktop/src/renderer/components/layout/Sider/index.tsx
++++ b/packages/desktop/src/renderer/components/layout/Sider/index.tsx
+@@ -1,15 +1,13 @@
+ import classNames from 'classnames';
+-import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
++import React, { Suspense, useEffect, useRef, useState } from 'react';
+ import { useLocation, useNavigate } from 'react-router-dom';
+ import { usePreviewContext } from '@renderer/pages/conversation/Preview/context/PreviewContext';
+ import { cleanupSiderTooltips, getSiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
+-import { useAuth } from '@renderer/hooks/context/AuthContext';
+ import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
+ import { blurActiveElement } from '@renderer/utils/ui/focus';
+ import { useThemeContext } from '@renderer/hooks/context/ThemeContext';
+-import { SiderToolbar, SiderSearchEntry, SiderScheduledEntry, SiderAssistantEntry, SiderHostsEntry } from './SiderNav';
++import { SiderToolbar, SiderSearchEntry, SiderHostsEntry, SiderNewConversationEntry } from './SiderNav';
+ import SiderFooter from './SiderFooter';
+-import TeamSiderSection from './TeamSiderSection';
+ import siderStyles from './Sider.module.css';
+ 
+ const WorkspaceGroupedHistory = React.lazy(() => import('@renderer/pages/conversation/GroupedHistory'));
+@@ -27,14 +25,11 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
+   const { pathname, search, hash } = location;
+ 
+   const navigate = useNavigate();
+-  const { closePreview, clearPreviewForScope } = usePreviewContext();
+-  const { logout, status } = useAuth();
++  const { closePreview } = usePreviewContext();
+   const { theme, setTheme } = useThemeContext();
+   const [isBatchMode, setIsBatchMode] = useState(false);
+   const isSettings = pathname.startsWith('/settings');
+   const lastNonSettingsPathRef = useRef('/guid');
+-  const showLogout =
+-    typeof window !== 'undefined' && !(window as { electronAPI?: unknown }).electronAPI && status === 'authenticated';
+ 
+   useEffect(() => {
+     if (!pathname.startsWith('/settings')) {
+@@ -83,32 +78,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
+     setIsBatchMode(false);
+   };
+ 
+-  const handleScheduledClick = () => {
+-    cleanupSiderTooltips();
+-    blurActiveElement();
+-    closePreview();
+-    setIsBatchMode(false);
+-    Promise.resolve(navigate('/scheduled')).catch((error) => {
+-      console.error('Navigation failed:', error);
+-    });
+-    if (onSessionClick) {
+-      onSessionClick();
+-    }
+-  };
+-
+-  const handleAssistantClick = () => {
+-    cleanupSiderTooltips();
+-    blurActiveElement();
+-    closePreview();
+-    setIsBatchMode(false);
+-    Promise.resolve(navigate('/assistants')).catch((error) => {
+-      console.error('Navigation failed:', error);
+-    });
+-    if (onSessionClick) {
+-      onSessionClick();
+-    }
+-  };
+-
+   const handleHostsClick = () => {
+     cleanupSiderTooltips();
+     blurActiveElement();
+@@ -126,53 +95,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
+     void setTheme(theme === 'dark' ? 'light' : 'dark');
+   };
+ 
+-  const handleLogout = useCallback(async () => {
+-    cleanupSiderTooltips();
+-    blurActiveElement();
+-    // Hide the panel now so the UI responds immediately; the tabs themselves are
+-    // discarded after logout resolves, below.
+-    closePreview();
+-    try {
+-      await logout();
+-    } catch (error) {
+-      console.error('Logout failed:', error);
+-      return; // logout 失败时不执行后续操作
+-    }
+-    // Discard this account's tabs from memory.
+-    //
+-    // `clearAuthCache` (inside logout) already deletes the stored `preview-ui:`
+-    // keys, but PreviewProvider is mounted at the app root and does not unmount on
+-    // logout, so its state survives. The persist effect depends on [tabs,
+-    // activeTabId, isOpen] and is still live — so the next change of any of those
+-    // would write this account's tabs straight back to disk, undoing the very
+-    // cleanup that ran moments earlier and showing them to whoever logs in next.
+-    //
+-    // Done after `await logout()` rather than before: discarding first would throw
+-    // the tabs away even on a path that left the user signed in. `logout()` handles
+-    // its own request failure and clears auth in a `finally`, so reaching this line
+-    // means the account really is signed out.
+-    clearPreviewForScope();
+-    if (onSessionClick) {
+-      onSessionClick();
+-    }
+-  }, [closePreview, clearPreviewForScope, logout, onSessionClick]);
+-
+-  useEffect(() => {
+-    if (!showLogout) return;
+-
+-    const handleKeyDown = (event: KeyboardEvent) => {
+-      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === 'l') {
+-        event.preventDefault();
+-        handleLogout();
+-      }
+-    };
+-
+-    window.addEventListener('keydown', handleKeyDown);
+-    return () => {
+-      window.removeEventListener('keydown', handleKeyDown);
+-    };
+-  }, [handleLogout, showLogout]);
+-
+   const tooltipEnabled = collapsed && !isMobile;
+   const siderTooltipProps = getSiderTooltipProps(tooltipEnabled);
+ 
+@@ -213,13 +135,11 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
+                 onSessionClick={onSessionClick}
+               />
+             )}
+-            {/* Assistant nav entry - fixed above Scheduled */}
+-            <SiderAssistantEntry
++            {/* The conversation list's own new-conversation entry, beside the host it creates on */}
++            <SiderNewConversationEntry
+               isMobile={isMobile}
+-              isActive={pathname.startsWith('/assistants')}
+               collapsed={collapsed}
+               siderTooltipProps={siderTooltipProps}
+-              onClick={handleAssistantClick}
+             />
+             {/* Host page entry - the product's own host and Agent target management */}
+             <SiderHostsEntry
+@@ -229,14 +149,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
+               siderTooltipProps={siderTooltipProps}
+               onClick={handleHostsClick}
+             />
+-            {/* Scheduled tasks nav entry - fixed above scroll */}
+-            <SiderScheduledEntry
+-              isMobile={isMobile}
+-              isActive={pathname === '/scheduled'}
+-              collapsed={collapsed}
+-              siderTooltipProps={siderTooltipProps}
+-              onClick={handleScheduledClick}
+-            />
+             {/* Divider between fixed top nav and scrollable content area */}
+             <div
+               className={classNames(
+@@ -244,22 +156,10 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
+                 collapsed ? 'mx-6px' : 'mx-10px'
+               )}
+             />
+-            {/* Scrollable content: pinned → team (slot) → projects → conversations */}
++            {/* Scrollable content: pinned → projects → conversations */}
+             <div className={classNames('flex-1 min-h-0 overflow-y-auto', siderStyles.scrollArea)}>
+               <Suspense fallback={<div className='min-h-200px' />}>
+-                <WorkspaceGroupedHistory
+-                  {...workspaceHistoryProps}
+-                  afterPinnedContent={
+-                    <>
+-                      <TeamSiderSection
+-                        collapsed={collapsed}
+-                        pathname={pathname}
+-                        siderTooltipProps={siderTooltipProps}
+-                        onSessionClick={onSessionClick}
+-                      />
+-                    </>
+-                  }
+-                />
++                <WorkspaceGroupedHistory {...workspaceHistoryProps} />
+               </Suspense>
+             </div>
+           </div>
+@@ -274,8 +174,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
+         siderTooltipProps={siderTooltipProps}
+         onSettingsClick={handleSettingsClick}
+         onThemeToggle={handleQuickThemeToggle}
+-        showLogout={showLogout}
+-        onLogoutClick={handleLogout}
+       />
+     </div>
+   );
+diff --git a/packages/desktop/src/renderer/components/layout/Sider/SiderNav/index.ts b/packages/desktop/src/renderer/components/layout/Sider/SiderNav/index.ts
+index bd14080..4a0b52b 100644
+--- a/packages/desktop/src/renderer/components/layout/Sider/SiderNav/index.ts
++++ b/packages/desktop/src/renderer/components/layout/Sider/SiderNav/index.ts
+@@ -1,5 +1,6 @@
+ export { default as SiderAssistantEntry } from './SiderAssistantEntry';
+ export { default as SiderHostsEntry } from './SiderHostsEntry';
++export { default as SiderNewConversationEntry } from './SiderNewConversationEntry';
+ export { default as SiderScheduledEntry } from './SiderScheduledEntry';
+ export { default as SiderSearchEntry } from './SiderSearchEntry';
+ export { default as SiderToolbar } from './SiderToolbar';
+diff --git a/packages/desktop/src/renderer/components/layout/Titlebar/index.tsx b/packages/desktop/src/renderer/components/layout/Titlebar/index.tsx
+index 4272bc0..da6f429 100644
+--- a/packages/desktop/src/renderer/components/layout/Titlebar/index.tsx
++++ b/packages/desktop/src/renderer/components/layout/Titlebar/index.tsx
+@@ -8,13 +8,10 @@ import { ipcBridge } from '@/common';
+ import { TEAM_MODE_ENABLED } from '@/common/config/constants';
+ import ConversationSearchPopover from '@renderer/pages/conversation/GroupedHistory/ConversationSearchPopover';
+ import MobileConversationBrand from './MobileConversationBrand';
+-import WindowControls from '../WindowControls';
+ import { WORKSPACE_STATE_EVENT, dispatchWorkspaceToggleEvent } from '@renderer/utils/workspace/workspaceEvents';
+ import type { WorkspaceStateDetail } from '@renderer/utils/workspace/workspaceEvents';
+ import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
+ import { useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
+-import { useFeedback } from '@/renderer/hooks/context/FeedbackContext';
+-import { resolveFeedbackModule } from '@/renderer/services/feedback/resolveFeedbackModule';
+ import { isElectronDesktop, isMacOS } from '@/renderer/utils/platform';
+ import { IS_DISCONTINUED_BUILD } from '@/renderer/utils/discontinuedBuild';
+ import MigrationInviteCapsule from './MigrationInviteCapsule';
+@@ -24,49 +21,6 @@ interface TitlebarProps {
+   workspaceAvailable: boolean;
+ }
+ 
+-// Bug-report icon: a speech bubble with a centred "?" mark, reading as "report an
+-// issue". Drawn on a 48-unit viewBox with icon-park-like padding and taking the same
+-// `strokeWidth` as the neighbouring @icon-park icons / SidebarIcon, so its line weight
+-// and footprint match the rest of the titlebar toolbar exactly. (@icon-park doesn't
+-// ship this exact shape, so it's rendered inline.)
+-//
+-// The raw artwork fills less of the viewBox than @icon-park's glyphs do, so at the
+-// same `size` it reads optically smaller. Scale the artwork up about the centre to
+-// match their footprint, and divide the stroke by the same factor so the rendered
+-// line weight stays identical to the neighbouring icons.
+-const FEEDBACK_ICON_SCALE = 1.12;
+-// The bubble's tail drops to y≈41 (body is y6~38), pulling the optical centre below
+-// the viewBox midline, so the icon reads slightly low next to the vertically
+-// symmetric @icon-park neighbours. Nudge the whole glyph up a couple of viewBox
+-// units to bring its visual centre back onto the shared baseline.
+-const FEEDBACK_ICON_RISE = 2;
+-const FeedbackIcon: React.FC<{ size?: number; strokeWidth?: number }> = ({ size = 18, strokeWidth = 4 }) => (
+-  <svg
+-    width={size}
+-    height={size}
+-    viewBox='0 0 48 48'
+-    fill='none'
+-    stroke='currentColor'
+-    strokeWidth={strokeWidth / FEEDBACK_ICON_SCALE}
+-    strokeLinecap='round'
+-    strokeLinejoin='round'
+-    aria-hidden='true'
+-    focusable='false'
+-  >
+-    <g
+-      transform={`translate(0 -${FEEDBACK_ICON_RISE}) translate(24 24) scale(${FEEDBACK_ICON_SCALE}) translate(-24 -24)`}
+-    >
+-      {/* Speech bubble with a tail dropping to the bottom-left. Sized to nearly fill
+-          the viewBox so it reads at the same scale as the neighbouring icons. */}
+-      <path d='M24 6C34 6 42 13 42 22C42 31 34 38 24 38C21.7 38 19.5 37.7 17.5 37.2L7 41L10 32C7.5 29 6 25.3 6 22C6 13 14 6 24 6Z' />
+-      {/* Question mark hook + stem, centred at x=24 inside the bubble cavity. */}
+-      <path d='M18.5 17.5C18.5 14 21 12 24 12C27 12 29.5 14 29.5 17C29.5 20.5 26.5 21.5 25 23.5C24 24.8 24 25.5 24 27' />
+-      {/* Dot below the stem, drawn as a zero-length round-capped segment. */}
+-      <path d='M24 31.5L24 31.55' />
+-    </g>
+-  </svg>
+-);
+-
+ // Claude-desktop-style sidebar toggle icon: a rounded rectangle with a vertical divider
+ // near the left edge, indicating a collapsible side panel. Rendered as inline SVG since
+ // @icon-park doesn't ship this exact shape.
+@@ -104,7 +58,6 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
+   const [mobileCenterOffset, setMobileCenterOffset] = useState(0);
+   const layout = useLayoutContext();
+   const navigationHistory = useNavigationHistory();
+-  const { openFeedback } = useFeedback();
+   const location = useLocation();
+   const navigate = useNavigate();
+   const containerRef = useRef<HTMLDivElement | null>(null);
+@@ -131,8 +84,6 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
+ 
+   const isDesktopRuntime = isElectronDesktop();
+   const isMacRuntime = isDesktopRuntime && isMacOS();
+-  // Windows/Linux 显示自定义窗口按钮；macOS 在标题栏给工作区一个切换入口
+-  const showWindowControls = isDesktopRuntime && !isMacRuntime;
+   // Keep the workspace entry in the titlebar on every platform.
+   const showWorkspaceButton = workspaceAvailable;
+ 
+@@ -140,7 +91,6 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
+     ? t('common.expandMore', { defaultValue: 'Expand workspace' })
+     : t('common.collapse', { defaultValue: 'Collapse workspace' });
+   const backToChatTooltip = t('common.back', { defaultValue: 'Back to Chat' });
+-  const feedbackTooltip = t('conversation.welcome.quickActionFeedback', { defaultValue: 'Report Issue' });
+   const isSettingsRoute = location.pathname.startsWith('/settings');
+   const iconSize = 18;
+   // Desktop uses slimmer strokes to match macOS-native chrome aesthetics;
+@@ -410,15 +360,6 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
+       <div ref={toolbarRef} className='app-titlebar__toolbar'>
+         {layout?.isMobile && <div id='app-titlebar-actions-slot' className='app-titlebar__actions-slot' />}
+         {IS_DISCONTINUED_BUILD && <MigrationInviteCapsule />}
+-        <button
+-          type='button'
+-          className={classNames('app-titlebar__button', layout?.isMobile && 'app-titlebar__button--mobile')}
+-          onClick={() => void openFeedback({ autoScreenshot: true, module: resolveFeedbackModule(location.pathname) })}
+-          aria-label={feedbackTooltip}
+-          title={feedbackTooltip}
+-        >
+-          <FeedbackIcon size={iconSize} strokeWidth={desktopIconStroke} />
+-        </button>
+         {showWorkspaceButton && (
+           <button
+             type='button'
+@@ -433,7 +374,6 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
+             )}
+           </button>
+         )}
+-        {showWindowControls && <WindowControls />}
+       </div>
+     </div>
+   );
+diff --git a/packages/desktop/src/renderer/components/layout/Titlebar/titlebar.css b/packages/desktop/src/renderer/components/layout/Titlebar/titlebar.css
+index 26c0712..364057f 100644
+--- a/packages/desktop/src/renderer/components/layout/Titlebar/titlebar.css
++++ b/packages/desktop/src/renderer/components/layout/Titlebar/titlebar.css
+@@ -13,10 +13,6 @@
+   z-index: 10;
+ }
+ 
+-.app-titlebar--desktop {
+-  -webkit-app-region: drag;
+-}
+-
+ .app-titlebar--mobile {
+   height: 48px;
+   min-height: 48px;
+diff --git a/packages/desktop/src/renderer/components/settings/SettingsModal/contents/AboutModalContent.tsx b/packages/desktop/src/renderer/components/settings/SettingsModal/contents/AboutModalContent.tsx
+index babf7fc..31ddf94 100644
+--- a/packages/desktop/src/renderer/components/settings/SettingsModal/contents/AboutModalContent.tsx
++++ b/packages/desktop/src/renderer/components/settings/SettingsModal/contents/AboutModalContent.tsx
+@@ -11,7 +11,6 @@ import { useTranslation } from 'react-i18next';
+ import classNames from 'classnames';
+ import { useSettingsViewMode } from '../settingsViewContext';
+ import { isElectronDesktop, openExternalUrl } from '@/renderer/utils/platform';
+-import FeedbackReportModal from './FeedbackReportModal';
+ import { ipcBridge } from '@/common';
+ import { getIncludePrerelease, runUpdateCheck } from '@/renderer/components/settings/checkForUpdatesShared';
+ import { UPDATE_AVAILABLE_EVENT } from '@/renderer/components/settings/useUpdateNotificationController';
+@@ -41,7 +40,6 @@ const AboutModalContent: React.FC = () => {
+   const isElectron = isElectronDesktop();
+ 
+   const [includePrerelease, setIncludePrerelease] = useState(false);
+-  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+   const [updateReadyState, setLocalUpdateReadyState] = useState<UpdateReadyState>(() => getUpdateReadyState());
+   const [checking, setChecking] = useState(false);
+ 
+@@ -120,11 +118,6 @@ const AboutModalContent: React.FC = () => {
+       url: 'https://github.com/iOfficeAI/AionUi/releases',
+       icon: <Right theme='outline' size='16' className='rtl-mirror' />,
+     },
+-    {
+-      title: t('settings.bugReport'),
+-      onClick: () => setShowFeedbackModal(true),
+-      icon: <Right theme='outline' size='16' className='rtl-mirror' />,
+-    },
+     {
+       title: t('settings.contactMe'),
+       url: 'https://x.com/WailiVery',
+@@ -225,7 +218,6 @@ const AboutModalContent: React.FC = () => {
+           </div>
+         </div>
+       </div>
+-      <FeedbackReportModal visible={showFeedbackModal} onCancel={() => setShowFeedbackModal(false)} />
+     </div>
+   );
+ };
+diff --git a/packages/desktop/src/renderer/components/settings/SettingsModal/contents/SystemModalContent/index.tsx b/packages/desktop/src/renderer/components/settings/SettingsModal/contents/SystemModalContent/index.tsx
+index 147babe..5ba807b 100644
+--- a/packages/desktop/src/renderer/components/settings/SettingsModal/contents/SystemModalContent/index.tsx
++++ b/packages/desktop/src/renderer/components/settings/SettingsModal/contents/SystemModalContent/index.tsx
+@@ -355,6 +355,10 @@ const SystemModalContent: React.FC = () => {
+     }
+   }, [systemInfo, form]);
+ 
++  // Switches that only exist in the Electron shell: the tray, start-on-boot and the GPU override all
++  // configure that shell, so they are left out of the list rather than left inert.
++  const HIDDEN_DESKTOP_PREFERENCES = new Set(['startOnBoot', 'closeToTray', 'hardwareAcceleration']);
++
+   const preferenceItems = [
+     { key: 'language', label: t('settings.language'), component: <LanguageSwitcher /> },
+     {
+@@ -450,7 +454,7 @@ const SystemModalContent: React.FC = () => {
+       description: t('settings.crossSessionMessageDesc'),
+       component: <Switch checked={crossSessionMessageEnabled} onChange={handleCrossSessionMessageChange} />,
+     },
+-  ];
++  ].filter((item) => !HIDDEN_DESKTOP_PREFERENCES.has(item.key));
+ 
+   const saveDirConfigValidate = (_values: { workDir: string; logDir: string }): Promise<unknown> => {
+     return new Promise((resolve, reject) => {
+diff --git a/packages/desktop/src/renderer/hooks/system/useDeepLink.ts b/packages/desktop/src/renderer/hooks/system/useDeepLink.ts
+index ce3407c..92a28ef 100644
+--- a/packages/desktop/src/renderer/hooks/system/useDeepLink.ts
++++ b/packages/desktop/src/renderer/hooks/system/useDeepLink.ts
+@@ -24,50 +24,32 @@ export type DeepLinkAddProviderDetail = {
+ };
+ 
+ /** Pending deep link data for the add-provider action. Read-once: consumed by ModelModalContent on mount. */
+-let pendingDeepLinkData: DeepLinkAddProviderDetail | null = null;
++const pendingDeepLinkData: DeepLinkAddProviderDetail | null = null;
+ 
+ /**
+  * Consume (read and clear) pending deep link data.
+- * Returns the data if present, or null. Subsequent calls return null until new data arrives.
++ * Returns the data if present, or null. No link fills it any more — the reader
++ * stays so its call site keeps compiling and can never receive a key from a URL.
+  */
+-export const consumePendingDeepLink = (): DeepLinkAddProviderDetail | null => {
+-  const data = pendingDeepLinkData;
+-  pendingDeepLinkData = null;
+-  return data;
+-};
++export const consumePendingDeepLink = (): DeepLinkAddProviderDetail | null => pendingDeepLinkData;
+ 
+ /**
+  * Allowed route patterns for the navigate deep link action.
+  * Only routes matching these patterns are permitted.
+  */
+-const ALLOWED_NAVIGATE_PATTERNS = [/^\/team\/[^/]+$/, /^\/conversation\/[^/]+$/];
++const ALLOWED_NAVIGATE_PATTERNS = [/^\/conversation\/[^/]+$/];
+ 
+ /**
+  * Hook to listen for aionui:// deep link events from main process.
+- * Routes 'add-provider' action to the model settings page.
+  * Routes 'navigate' action to the specified route (whitelist-validated).
+- * The pre-fill data is stored in a module-level variable and consumed
+- * by ModelModalContent on mount via consumePendingDeepLink().
++ * The 'add-provider' action is gone: it carried a provider API key inside the
++ * link itself, and this build never takes a credential from a URL.
+  */
+ export const useDeepLink = () => {
+   const navigate = useNavigate();
+ 
+   const handler = useCallback(
+     (payload: DeepLinkPayload) => {
+-      // Support both formats: "add-provider" and "provider/add" (one-api style)
+-      if (payload.action === 'add-provider' || payload.action === 'provider/add') {
+-        pendingDeepLinkData = {
+-          base_url: payload.params.base_url,
+-          api_key: payload.params.api_key || payload.params.key,
+-          name: payload.params.name,
+-          platform: payload.params.platform,
+-        };
+-
+-        // Navigate to model settings page; ModelModalContent will pick up the pending data
+-        void navigate('/settings/model');
+-        return;
+-      }
+-
+       if (payload.action === 'navigate') {
+         const route = payload.params.route;
+         if (!route) {
+diff --git a/packages/desktop/src/renderer/pages/conversation/components/ChatConversation.tsx b/packages/desktop/src/renderer/pages/conversation/components/ChatConversation.tsx
+index 43dcaa7..01fa26d 100644
+--- a/packages/desktop/src/renderer/pages/conversation/components/ChatConversation.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/components/ChatConversation.tsx
+@@ -38,6 +38,7 @@ import { isLegacyReadOnlyConversationType } from '../utils/conversationRuntime';
+ import { resolveConversationBackend } from '../utils/conversationAssistantIdentity';
+ import LegacyReadOnlyConversation from '../platforms/legacy/LegacyReadOnlyConversation';
+ import SingleChatEmptyState from './SingleChatEmptyState';
++import { EscapeHatchTrigger } from '@renderer/host/EscapeHatch';
+ import { useActiveLease } from '../hooks/useActiveLease';
+ // import SkillRuleGenerator from './components/SkillRuleGenerator'; // Temporarily hidden
+ 
+@@ -411,6 +412,16 @@ const ChatConversation: React.FC<{
+         </div>
+       )}
+       {modelSelector && <div className='shrink-0'>{modelSelector}</div>}
++      {/* Escape hatch: the session's own host and working directory, so a terminal is one tap away when
++          the chat surface cannot do what the user needs. */}
++      {conversation && (
++        <div className='shrink-0'>
++          <EscapeHatchTrigger
++            target={{ conversationId: conversation.id }}
++            defaultCwd={(conversation.extra as { workspace?: string } | undefined)?.workspace ?? null}
++          />
++        </div>
++      )}
+       {conversation && conversation.type === 'acp' && !isMobile && !isLegacyReadOnlyConversation && (
+         <div className='shrink-0'>
+           <AcpRuntimeRestartButton
+diff --git a/packages/desktop/src/renderer/pages/conversation/components/ChatHistory.tsx b/packages/desktop/src/renderer/pages/conversation/components/ChatHistory.tsx
+index f5b7391..b89c9c7 100644
+--- a/packages/desktop/src/renderer/pages/conversation/components/ChatHistory.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/components/ChatHistory.tsx
+@@ -230,7 +230,11 @@ const ChatHistory: React.FC<{ onSessionClick?: () => void; collapsed?: boolean }
+           {!isEditing && (
+             <div
+               className={classNames(
+-                'absolute end-0px top-0px h-full w-70px items-center justify-end hidden group-hover:flex !collapsed-hidden pe-12px'
++                'absolute end-0px top-0px h-full w-70px items-center justify-end !collapsed-hidden pe-12px',
++                // 手机上不存在悬停：这些行内操作常显，否则改名/删除永远点不到。
++                // No hover exists on a phone: these row actions stay visible, or rename and delete would be
++                // unreachable there.
++                isMobile ? 'flex' : 'hidden group-hover:flex'
+               )}
+               style={{
+                 backgroundImage: isSelected
+diff --git a/packages/desktop/src/renderer/pages/conversation/explorer/ExplorerPanel.tsx b/packages/desktop/src/renderer/pages/conversation/explorer/ExplorerPanel.tsx
+index 8e9a530..950dd8f 100644
+--- a/packages/desktop/src/renderer/pages/conversation/explorer/ExplorerPanel.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/explorer/ExplorerPanel.tsx
+@@ -218,8 +218,12 @@ export const ExplorerPanel: React.FC<ExplorerPanelProps> = ({
+       // its identity on a custom MIME so a drop can tell it apart from an OS-file
+       // drop (which carries `Files`). Pe roots are bindings, not entries — not
+       // draggable.
++      //
++      // 桌面手势：手机上拖动更可能是滚动，且移动/复制一律发生在远端主机上，因此本构建不提供拖拽移动。
++      // A desktop gesture: on a phone a drag is more likely a scroll, and every move/copy would land on a
++      // remote host — so this build offers no drag-to-move.
+       const dragProps =
+-        onTransfer && !isRoot
++        onTransfer && !isRoot && isElectronDesktop()
+           ? {
+               draggable: true,
+               onDragStart: (e: React.DragEvent) => {
+diff --git a/packages/desktop/src/renderer/pages/conversation/GroupedHistory/ConversationRow.tsx b/packages/desktop/src/renderer/pages/conversation/GroupedHistory/ConversationRow.tsx
+index cfbd805..712c9d7 100644
+--- a/packages/desktop/src/renderer/pages/conversation/GroupedHistory/ConversationRow.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/GroupedHistory/ConversationRow.tsx
+@@ -11,6 +11,7 @@ import { usePresetAssistantInfo } from '@/renderer/hooks/agent/usePresetAssistan
+ import { CronJobIndicator } from '@/renderer/pages/cron';
+ import { resolveConversationLeadingMark } from '@/renderer/pages/conversation/utils/conversationAssistantIdentity';
+ import { cleanupSiderTooltips, getSiderTooltipProps } from '@/renderer/utils/ui/siderTooltip';
++import { useLongPress } from '@renderer/host/longPress';
+ import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
+ import { Checkbox, Dropdown, Menu, Spin, Tooltip } from '@arco-design/web-react';
+ import {
+@@ -133,9 +134,7 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
+     onConversationClick(conversation);
+   };
+ 
+-  const handleRowContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
+-    event.preventDefault();
+-    event.stopPropagation();
++  const openRowMenu = () => {
+     cleanupSiderTooltips();
+     if (batchMode) {
+       return;
+@@ -143,6 +142,16 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
+     onOpenMenu(conversation);
+   };
+ 
++  const handleRowContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
++    event.preventDefault();
++    event.stopPropagation();
++    openRowMenu();
++  };
++
++  // 手机上按不出右键，长按打开同一张菜单。
++  // A phone has no right button, so a held finger opens the same menu.
++  const longPressHandlers = useLongPress(openRowMenu);
++
+   // Waiting on the user takes visual precedence over the generating spinner: a
+   // paused turn still streams frames that mark it "generating", so without this
+   // the distinct icon would never win.
+@@ -182,6 +191,7 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
+         )}
+         onClick={handleRowClick}
+         onContextMenu={handleRowContextMenu}
++        {...longPressHandlers}
+       >
+         {batchMode && (
+           <span
+diff --git a/packages/desktop/src/renderer/pages/conversation/Preview/components/PreviewPanel/PreviewContextMenu.tsx b/packages/desktop/src/renderer/pages/conversation/Preview/components/PreviewPanel/PreviewContextMenu.tsx
+index fda8081..62a7b55 100644
+--- a/packages/desktop/src/renderer/pages/conversation/Preview/components/PreviewPanel/PreviewContextMenu.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/Preview/components/PreviewPanel/PreviewContextMenu.tsx
+@@ -122,12 +122,6 @@ interface PreviewContextMenuProps {
+    * Copy the tab's workspace-relative path
+    */
+   onCopyRelativePath: (tabId: string) => void;
+-
+-  /**
+-   * 在系统文件管理器中打开该文件所在目录
+-   * Show the tab's file in the OS file manager
+-   */
+-  onRevealInFolder: (tabId: string) => void;
+ }
+ 
+ /**
+@@ -165,9 +159,8 @@ const MenuDivider: React.FC = () => <div className='h-1px bg-border-1 my-4px mx-
+  * 预览面板右键菜单组件
+  * Preview panel context menu component
+  *
+- * 提供关闭当前/左侧/右侧/其他/未修改/全部 Tab，以及复制路径、定位文件的功能
+- * Provides closing this/left/right/other/unmodified/all tabs, copying paths, and
+- * locating the file on disk
++ * 提供关闭当前/左侧/右侧/其他/未修改/全部 Tab，以及复制路径的功能
++ * Provides closing this/left/right/other/unmodified/all tabs and copying paths
+  */
+ const PreviewContextMenu: React.FC<PreviewContextMenuProps> = ({
+   contextMenu,
+@@ -182,7 +175,6 @@ const PreviewContextMenu: React.FC<PreviewContextMenuProps> = ({
+   onCloseAll,
+   onCopyPath,
+   onCopyRelativePath,
+-  onRevealInFolder,
+ }) => {
+   const { t } = useTranslation();
+   const contextMenuRef = useRef<HTMLDivElement>(null);
+@@ -361,13 +353,6 @@ const PreviewContextMenu: React.FC<PreviewContextMenuProps> = ({
+         disabled={!currentTab?.canCopyRelativePath}
+         onSelect={select(() => onCopyRelativePath(tabId))}
+       />
+-
+-      {/* 打开文件所在目录 / Show in folder */}
+-      <MenuItem
+-        label={t('preview.openLocation')}
+-        disabled={!currentTab?.canRevealInFolder}
+-        onSelect={select(() => onRevealInFolder(tabId))}
+-      />
+     </div>,
+     document.body
+   );
+diff --git a/packages/desktop/src/renderer/pages/conversation/Preview/components/PreviewPanel/PreviewPanel.tsx b/packages/desktop/src/renderer/pages/conversation/Preview/components/PreviewPanel/PreviewPanel.tsx
+index 40d0983..6ca52f5 100644
+--- a/packages/desktop/src/renderer/pages/conversation/Preview/components/PreviewPanel/PreviewPanel.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/Preview/components/PreviewPanel/PreviewPanel.tsx
+@@ -563,34 +563,11 @@ const PreviewPanel: React.FC = () => {
+     [tabs, reportCopy]
+   );
+ 
+-  // 在系统文件管理器中定位该文件（Finder / 资源管理器）。
++  // 在系统文件管理器中定位该文件（Finder / 资源管理器）已从本构建移除：远端主机上的
++  // 路径在这台手机上没有任何本机文件管理器可以打开，菜单项随之删除。
+   //
+-  // 与复制路径同样的两条路：项目文件交后端 resolve 后 showItemInFolder，前端已有
+-  // 绝对路径的直接走 shell 通道。URL 走不到这里 —— canRevealInFolder 已把浏览器
+-  // tab 排除，这里的 `url` 分支只是把这条不变量写进代码，而不是靠调用方自觉。
+-  //
+-  // Locate the file in the OS file manager (Finder / Explorer). Same two routes as
+-  // copy-path: a project file is resolved backend-side and revealed there, while a
+-  // path the renderer already holds goes straight through the shell channel. A URL
+-  // never reaches this — canRevealInFolder excludes browser tabs — and the `url`
+-  // branch below states that invariant in code rather than trusting callers.
+-  const handleRevealInFolder = useCallback(
+-    (tabId: string) => {
+-      const tab = tabs.find((item) => item.id === tabId);
+-      const absolute = tab ? previewTabPaths(tab).absolute : undefined;
+-      if (!absolute || !isElectronDesktop()) return;
+-
+-      const failed = () => messageApi.error(t('preview.openLocationFailed'));
+-      if (absolute.kind === 'filePath') {
+-        void ipcBridge.shell.showItemInFolder.invoke(absolute.value).catch(failed);
+-        return;
+-      }
+-      if (absolute.kind === 'projectRef') {
+-        void ipcBridge.fs.reveal.invoke({ pe_id: absolute.pe_id, relative_path: absolute.relative_path }).catch(failed);
+-      }
+-    },
+-    [tabs, messageApi, t]
+-  );
++  // Locating a file in the OS file manager is gone from this build: a path on a remote host has no local
++  // file manager to open it in, so the menu entry is removed rather than left inert.
+ 
+   // 收起面板：只改可见性，tab 留着照常持久化 —— 但仍要过 dirty 确认，
+   // 否则「收起」会变成一条静默丢弃未保存内容的路径。
+@@ -1289,7 +1266,6 @@ const PreviewPanel: React.FC = () => {
+           onCloseAll={handleCloseAll}
+           onCopyPath={handleCopyPath}
+           onCopyRelativePath={handleCopyRelativePath}
+-          onRevealInFolder={handleRevealInFolder}
+         />
+       </div>
+     </PreviewToolbarExtrasProvider>
+diff --git a/packages/desktop/src/renderer/pages/conversation/Preview/components/PreviewPanel/PreviewTabs.tsx b/packages/desktop/src/renderer/pages/conversation/Preview/components/PreviewPanel/PreviewTabs.tsx
+index df8735e..7c132aa 100644
+--- a/packages/desktop/src/renderer/pages/conversation/Preview/components/PreviewPanel/PreviewTabs.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/Preview/components/PreviewPanel/PreviewTabs.tsx
+@@ -7,6 +7,7 @@
+ import { iconColors } from '@/renderer/styles/colors';
+ import { Close, Plus } from '@icon-park/react';
+ import { IconFullscreen, IconFullscreenExit, IconShrink } from '@arco-design/web-react/icon';
++import { createLongPressHandlers } from '@renderer/host/longPress';
+ import React from 'react';
+ import { useTranslation } from 'react-i18next';
+ import type { TabFadeState } from '../../hooks/useTabOverflow';
+@@ -209,6 +210,20 @@ const PreviewTabs: React.FC<PreviewTabsProps> = ({
+                 style={{ maxWidth: `${MAX_TAB_WIDTH_PX}px` }}
+                 onClick={() => onSwitchTab(tab.id)}
+                 onContextMenu={(e) => onContextMenu(e, tab.id)}
++                // 长按打开同一张菜单：手机上按不出右键，长按是这条菜单唯一的入口。
++                // A held finger opens the same menu: a phone has no right button, so the hold is the only
++                // way into this menu there.
++                {...createLongPressHandlers(({ x, y }) =>
++                  onContextMenu(
++                    {
++                      clientX: x,
++                      clientY: y,
++                      preventDefault: () => {},
++                      stopPropagation: () => {},
++                    } as React.MouseEvent,
++                    tab.id
++                  )
++                )}
+                 // 中键关闭 / Middle-click to close.
+                 //
+                 // 走 onCloseTab 而不是直接关，所以未保存的 tab 仍会先弹确认——中键
+diff --git a/packages/desktop/src/renderer/pages/guid/components/QuickActionButtons.tsx b/packages/desktop/src/renderer/pages/guid/components/QuickActionButtons.tsx
+index aa32b38..4e7b599 100644
+--- a/packages/desktop/src/renderer/pages/guid/components/QuickActionButtons.tsx
++++ b/packages/desktop/src/renderer/pages/guid/components/QuickActionButtons.tsx
+@@ -2,81 +2,32 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+-import { webui } from '@/common/adapter/ipcBridge';
+-import { Earth } from '@icon-park/react';
+-import React, { useCallback, useEffect, useState } from 'react';
++import { Star } from '@icon-park/react';
++import React, { useCallback, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+-import { useNavigate } from 'react-router-dom';
+ import styles from '../index.module.css';
+ 
+ type QuickActionButtonsProps = {
+   onOpenLink: (url: string) => void;
+-  onOpenBugReport: () => void;
+   inactiveBorderColor: string;
+   activeShadow: string;
+ };
+ 
+-type WebuiQuickStatus = 'checking' | 'running' | 'stopped' | 'error';
++/** 上游项目地址：保留署名，也方便用户反馈上游问题 / The upstream project, kept for attribution. */
++const UPSTREAM_REPOSITORY_URL = 'https://github.com/iOfficeAI/AionUi';
+ 
+-const WEBUI_STATUS_CACHE_TTL_MS = 3000;
+-let webuiStatusCache: {
+-  quickStatus: WebuiQuickStatus;
+-  at: number;
+-} | null = null;
+-
+-const QuickActionButtons: React.FC<QuickActionButtonsProps> = ({
+-  onOpenLink,
+-  onOpenBugReport,
+-  inactiveBorderColor,
+-  activeShadow,
+-}) => {
++/**
++ * 首页快捷操作。标签常显而不是悬停才展开 —— 手机上没有悬停，悬停展开等于标签永远看不到。
++ *
++ * The home page's quick actions. The label stays visible instead of expanding on hover: a phone has no
++ * hover, so hover-to-expand would leave the label permanently unseen.
++ */
++const QuickActionButtons: React.FC<QuickActionButtonsProps> = ({ onOpenLink, inactiveBorderColor, activeShadow }) => {
+   const { t } = useTranslation();
+-  const navigate = useNavigate();
+-  const [hoveredQuickAction, setHoveredQuickAction] = useState<'bugReport' | 'repo' | 'webui' | null>(null);
+-  const [webuiQuickStatus, setWebuiQuickStatus] = useState<WebuiQuickStatus>('checking');
+-
+-  useEffect(() => {
+-    let alive = true;
+-    const loadStatus = async () => {
+-      const now = Date.now();
+-      if (webuiStatusCache && now - webuiStatusCache.at < WEBUI_STATUS_CACHE_TTL_MS) {
+-        setWebuiQuickStatus(webuiStatusCache.quickStatus);
+-        return;
+-      }
+-
+-      try {
+-        const result = await webui.getStatus.invoke();
+-        if (!alive) return;
+-        if (result) {
+-          const quickStatus: WebuiQuickStatus = result.running ? 'running' : 'stopped';
+-          setWebuiQuickStatus(quickStatus);
+-          webuiStatusCache = { quickStatus, at: Date.now() };
+-          return;
+-        }
+-        setWebuiQuickStatus('error');
+-        webuiStatusCache = { quickStatus: 'error', at: Date.now() };
+-      } catch {
+-        if (!alive) return;
+-        setWebuiQuickStatus('error');
+-        webuiStatusCache = { quickStatus: 'error', at: Date.now() };
+-      }
+-    };
+-
+-    void loadStatus();
+-
+-    const unsubscribe = webui.statusChanged.on((payload) => {
+-      const nextQuickStatus: WebuiQuickStatus = payload.running ? 'running' : 'stopped';
+-      setWebuiQuickStatus(nextQuickStatus);
+-      webuiStatusCache = { quickStatus: nextQuickStatus, at: Date.now() };
+-    });
+-
+-    return () => {
+-      alive = false;
+-      unsubscribe();
+-    };
+-  }, []);
++  const [hovered, setHovered] = useState(false);
+ 
+   const quickActionStyle = useCallback(
+     (isActive: boolean) => ({
+@@ -88,107 +39,25 @@ const QuickActionButtons: React.FC<QuickActionButtonsProps> = ({
+     [activeShadow, inactiveBorderColor]
+   );
+ 
+-  const handleOpenWebUI = useCallback(() => {
+-    void navigate('/settings/webui');
+-  }, [navigate]);
+-
+-  const webuiStatusLabel =
+-    webuiQuickStatus === 'running'
+-      ? t('settings.webui.running', { defaultValue: 'Running' })
+-      : webuiQuickStatus === 'checking'
+-        ? t('settings.webui.starting', { defaultValue: 'Checking' })
+-        : webuiQuickStatus === 'error'
+-          ? t('settings.webui.operationFailed', { defaultValue: 'Unavailable' })
+-          : t('settings.webui.enable', { defaultValue: 'Start' });
+-  const webuiIconColor =
+-    webuiQuickStatus === 'running'
+-      ? 'rgb(var(--success-6))'
+-      : webuiQuickStatus === 'checking'
+-        ? 'rgb(var(--primary-6))'
+-        : webuiQuickStatus === 'error'
+-          ? 'var(--color-text-3)'
+-          : 'var(--color-text-4)';
+-
+   return (
+     <div
+       className={`absolute left-50% -translate-x-1/2 flex flex-col justify-center items-center ${styles.guidQuickActions}`}
+     >
+       <div className='flex justify-center items-center gap-24px'>
+         <div
+-          className='group inline-flex items-center justify-center h-36px min-w-36px max-w-36px px-0 rd-999px bg-fill-0 cursor-pointer overflow-hidden whitespace-nowrap hover:max-w-170px hover:px-14px hover:justify-start hover:gap-8px transition-[max-width,padding,border-radius,box-shadow] duration-420 ease-in-out'
+-          style={quickActionStyle(hoveredQuickAction === 'bugReport')}
+-          onMouseEnter={() => setHoveredQuickAction('bugReport')}
+-          onMouseLeave={() => setHoveredQuickAction(null)}
+-          onClick={onOpenBugReport}
+-        >
+-          <svg
+-            className='flex-shrink-0 text-[var(--color-text-3)] group-hover:text-[#2C7FFF] transition-colors duration-300'
+-            width='20'
+-            height='20'
+-            viewBox='0 0 20 20'
+-            fill='none'
+-            xmlns='http://www.w3.org/2000/svg'
+-          >
+-            <path
+-              d='M6.58335 16.6674C8.17384 17.4832 10.0034 17.7042 11.7424 17.2905C13.4814 16.8768 15.0155 15.8555 16.0681 14.4108C17.1208 12.9661 17.6229 11.1929 17.4838 9.41082C17.3448 7.6287 16.5738 5.95483 15.3099 4.69085C14.0459 3.42687 12.372 2.6559 10.5899 2.51687C8.80776 2.37784 7.03458 2.8799 5.58987 3.93256C4.14516 4.98523 3.12393 6.51928 2.71021 8.25828C2.29648 9.99729 2.51747 11.8269 3.33335 13.4174L1.66669 18.334L6.58335 16.6674Z'
+-              stroke='currentColor'
+-              strokeWidth='1.66667'
+-              strokeLinecap='round'
+-              strokeLinejoin='round'
+-            />
+-          </svg>
+-          <span className='opacity-0 max-w-0 overflow-hidden text-14px text-[var(--color-text-2)] group-hover:opacity-100 group-hover:max-w-128px transition-all duration-360 ease-in-out'>
+-            {t('conversation.welcome.quickActionFeedback')}
+-          </span>
+-        </div>
+-        <div
+-          className='group inline-flex items-center justify-center h-36px min-w-36px max-w-36px px-0 rd-999px bg-fill-0 cursor-pointer overflow-hidden whitespace-nowrap hover:max-w-150px hover:px-14px hover:justify-start hover:gap-8px transition-[max-width,padding,border-radius,box-shadow] duration-420 ease-in-out'
+-          style={quickActionStyle(hoveredQuickAction === 'repo')}
+-          onMouseEnter={() => setHoveredQuickAction('repo')}
+-          onMouseLeave={() => setHoveredQuickAction(null)}
+-          onClick={() => onOpenLink('https://github.com/iOfficeAI/AionUi')}
++          className='group inline-flex items-center justify-center h-36px gap-8px px-14px rd-999px bg-fill-0 cursor-pointer whitespace-nowrap transition-[border-radius,box-shadow] duration-420 ease-in-out'
++          style={quickActionStyle(hovered)}
++          onMouseEnter={() => setHovered(true)}
++          onMouseLeave={() => setHovered(false)}
++          onClick={() => onOpenLink(UPSTREAM_REPOSITORY_URL)}
+         >
+-          <svg
++          <Star
++            theme='outline'
++            size={20}
++            fill='currentColor'
+             className='flex-shrink-0 text-[var(--color-text-3)] group-hover:text-[#FE9900] transition-colors duration-300'
+-            width='20'
+-            height='20'
+-            viewBox='0 0 20 20'
+-            fill='none'
+-            xmlns='http://www.w3.org/2000/svg'
+-          >
+-            <path
+-              d='M9.60416 1.91176C9.64068 1.83798 9.6971 1.77587 9.76704 1.73245C9.83698 1.68903 9.91767 1.66602 9.99999 1.66602C10.0823 1.66602 10.163 1.68903 10.233 1.73245C10.3029 1.77587 10.3593 1.83798 10.3958 1.91176L12.3208 5.81093C12.4476 6.06757 12.6348 6.2896 12.8663 6.45797C13.0979 6.62634 13.3668 6.73602 13.65 6.77759L17.955 7.40759C18.0366 7.41941 18.1132 7.45382 18.1762 7.50693C18.2393 7.56003 18.2862 7.62972 18.3117 7.7081C18.3372 7.78648 18.3402 7.87043 18.3205 7.95046C18.3007 8.03048 18.259 8.10339 18.2 8.16093L15.0867 11.1926C14.8813 11.3927 14.7277 11.6397 14.639 11.9123C14.5503 12.1849 14.5292 12.475 14.5775 12.7576L15.3125 17.0409C15.3269 17.1225 15.3181 17.2064 15.2871 17.2832C15.2561 17.3599 15.2041 17.4264 15.1371 17.4751C15.0701 17.5237 14.9908 17.5526 14.9082 17.5583C14.8256 17.5641 14.7431 17.5465 14.67 17.5076L10.8217 15.4843C10.5681 15.3511 10.286 15.2816 9.99958 15.2816C9.71318 15.2816 9.43106 15.3511 9.17749 15.4843L5.32999 17.5076C5.25694 17.5463 5.17449 17.5637 5.09204 17.5578C5.00958 17.5519 4.93043 17.5231 4.86357 17.4744C4.79672 17.4258 4.74485 17.3594 4.71387 17.2828C4.68289 17.2061 4.67404 17.1223 4.68833 17.0409L5.42249 12.7584C5.47099 12.4757 5.44998 12.1854 5.36128 11.9126C5.27257 11.6398 5.11883 11.3927 4.91333 11.1926L1.79999 8.16176C1.74049 8.10429 1.69832 8.03126 1.6783 7.95099C1.65827 7.87072 1.66119 7.78644 1.68673 7.70775C1.71226 7.62906 1.75938 7.55913 1.82272 7.50591C1.88607 7.4527 1.96308 7.41834 2.04499 7.40676L6.34916 6.77759C6.63271 6.73634 6.90199 6.62681 7.13381 6.45842C7.36564 6.29002 7.55308 6.06782 7.67999 5.81093L9.60416 1.91176Z'
+-              stroke='currentColor'
+-              strokeWidth='1.66667'
+-              strokeLinecap='round'
+-              strokeLinejoin='round'
+-            />
+-          </svg>
+-          <span className='opacity-0 max-w-0 overflow-hidden text-14px text-[var(--color-text-2)] group-hover:opacity-100 group-hover:max-w-120px transition-all duration-360 ease-in-out'>
+-            {t('conversation.welcome.quickActionStar')}
+-          </span>
+-        </div>
+-        <div
+-          className='group inline-flex items-center justify-center h-36px min-w-36px max-w-36px px-0 rd-999px bg-fill-0 cursor-pointer overflow-hidden whitespace-nowrap hover:max-w-200px hover:px-14px hover:justify-start hover:gap-8px transition-[max-width,padding,border-radius,box-shadow] duration-420 ease-in-out'
+-          style={quickActionStyle(hoveredQuickAction === 'webui')}
+-          onMouseEnter={() => setHoveredQuickAction('webui')}
+-          onMouseLeave={() => setHoveredQuickAction(null)}
+-          onClick={handleOpenWebUI}
+-        >
+-          <div className='relative w-20px h-20px flex-shrink-0 leading-none'>
+-            <div className='absolute inset-0 flex items-center justify-center'>
+-              <Earth
+-                theme='outline'
+-                size={20}
+-                fill='currentColor'
+-                className='block transition-colors duration-360'
+-                style={{ color: webuiIconColor }}
+-              />
+-            </div>
+-          </div>
+-          <span className='opacity-0 max-w-0 overflow-hidden text-14px text-[var(--color-text-2)] group-hover:opacity-100 group-hover:max-w-160px transition-all duration-360 ease-in-out'>
+-            {t('settings.webui', { defaultValue: 'WebUI' })} · {webuiStatusLabel}
+-          </span>
++          />
++          <span className='text-14px text-[var(--color-text-2)]'>{t('conversation.welcome.quickActionStar')}</span>
+         </div>
+       </div>
+     </div>
+diff --git a/packages/desktop/src/renderer/pages/guid/GuidPage.tsx b/packages/desktop/src/renderer/pages/guid/GuidPage.tsx
+index 78d80d6..c1e6f19 100644
+--- a/packages/desktop/src/renderer/pages/guid/GuidPage.tsx
++++ b/packages/desktop/src/renderer/pages/guid/GuidPage.tsx
+@@ -21,7 +21,6 @@ import GuidActionRow from './components/GuidActionRow';
+ import GuidInputCard from './components/GuidInputCard';
+ import GuidModelSelector from './components/GuidModelSelector';
+ import QuickActionButtons from './components/QuickActionButtons';
+-import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
+ import { useGuidAssistantSelection } from './hooks/useGuidAssistantSelection';
+ import { useGuidInput } from './hooks/useGuidInput';
+ import { useGuidModelSelection } from './hooks/useGuidModelSelection';
+@@ -61,7 +60,6 @@ const GuidPage: React.FC = () => {
+   const { activeBorderColor, inactiveBorderColor, activeShadow } = useInputFocusRing();
+ 
+   const localeKey = resolveLocaleKey(i18n.language);
+-  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+ 
+   // Open external link
+   const openLink = useCallback(async (url: string) => {
+@@ -734,11 +732,9 @@ const GuidPage: React.FC = () => {
+ 
+         <QuickActionButtons
+           onOpenLink={openLink}
+-          onOpenBugReport={() => setShowFeedbackModal(true)}
+           inactiveBorderColor={inactiveBorderColor}
+           activeShadow={activeShadow}
+         />
+-        <FeedbackReportModal visible={showFeedbackModal} onCancel={() => setShowFeedbackModal(false)} />
+       </div>
+     </ConfigProvider>
+   );
+diff --git a/packages/desktop/src/renderer/pages/settings/components/SettingsPageWrapper.tsx b/packages/desktop/src/renderer/pages/settings/components/SettingsPageWrapper.tsx
+index ed38def..593f238 100644
+--- a/packages/desktop/src/renderer/pages/settings/components/SettingsPageWrapper.tsx
++++ b/packages/desktop/src/renderer/pages/settings/components/SettingsPageWrapper.tsx
+@@ -7,7 +7,6 @@ import {
+ } from '@/renderer/components/settings/SettingsModal/settingsViewContext';
+ import { isElectronDesktop, resolveExtensionAssetUrl } from '@/renderer/utils/platform';
+ import { type IExtensionSettingsTab } from '@/common/adapter/ipcBridge';
+-import { useExtensionSettingsTabs } from '@/renderer/hooks/system/useExtensionSettingsTabs';
+ import {
+   Cat,
+   Communication,
+@@ -20,12 +19,13 @@ import {
+   Puzzle,
+   Robot,
+   System,
++  Terminal,
+   Toolkit,
+ } from '@icon-park/react';
+ import { useTranslation } from 'react-i18next';
+ import { useLocation, useNavigate } from 'react-router-dom';
+ import { useExtI18n } from '@/renderer/hooks/system/useExtI18n';
+-import { BUILTIN_TAB_IDS, LEGACY_ANCHOR_REMAP } from './SettingsSider';
++import { BUILTIN_TAB_IDS, HIDDEN_SETTINGS_TABS, LEGACY_ANCHOR_REMAP, NO_EXTENSION_TABS } from './SettingsSider';
+ import './settings.css';
+ 
+ interface SettingsPageWrapperProps {
+@@ -40,6 +40,12 @@ type TranslateFn = (key: string, options?: { defaultValue?: string }) => string;
+ 
+ export function getBuiltinSettingsNavItems(isDesktop: boolean, t: TranslateFn): NavItem[] {
+   const builtinMap: Record<string, NavItem> = {
++    escape: {
++      id: 'escape',
++      label: t('settings.escape.title'),
++      icon: <Terminal theme='outline' size='16' />,
++      path: 'escape',
++    },
+     model: { id: 'model', label: t('settings.model'), icon: <LinkCloud theme='outline' size='16' />, path: 'model' },
+     assistants: {
+       id: 'assistants',
+@@ -88,7 +94,7 @@ export function getBuiltinSettingsNavItems(isDesktop: boolean, t: TranslateFn):
+     about: { id: 'about', label: t('settings.about'), icon: <Info theme='outline' size='16' />, path: 'about' },
+   };
+ 
+-  return BUILTIN_TAB_IDS.map((id) => builtinMap[id]);
++  return BUILTIN_TAB_IDS.filter((id) => !HIDDEN_SETTINGS_TABS.has(id)).map((id) => builtinMap[id]);
+ }
+ 
+ const SettingsPageWrapper: React.FC<SettingsPageWrapperProps> = ({ children, className, contentClassName }) => {
+@@ -99,7 +105,7 @@ const SettingsPageWrapper: React.FC<SettingsPageWrapperProps> = ({ children, cla
+   const { t } = useTranslation();
+   const isDesktop = isElectronDesktop();
+ 
+-  const extensionTabs = useExtensionSettingsTabs();
++  const extensionTabs = NO_EXTENSION_TABS;
+ 
+   const { resolveExtTabName } = useExtI18n();
+ 
+@@ -173,9 +179,11 @@ const SettingsPageWrapper: React.FC<SettingsPageWrapperProps> = ({ children, cla
+     className
+   );
+ 
++  // A phone keeps the full width it has: the wide caps (and the page-provided ones) belong to a desktop
++  // window, and a landscape phone would otherwise pin the page to a width it cannot show.
+   const contentClass = classNames(
+-    'settings-page-content mx-auto w-full md:max-w-1024px py-14px md:py-32px',
+-    contentClassName
++    'settings-page-content mx-auto w-full py-14px md:py-32px',
++    isMobile ? 'max-w-full' : ['md:max-w-1024px', contentClassName]
+   );
+ 
+   const navigateToTab = React.useCallback(
+diff --git a/packages/desktop/src/renderer/pages/settings/components/SettingsSider.tsx b/packages/desktop/src/renderer/pages/settings/components/SettingsSider.tsx
+index b225647..2b3febe 100644
+--- a/packages/desktop/src/renderer/pages/settings/components/SettingsSider.tsx
++++ b/packages/desktop/src/renderer/pages/settings/components/SettingsSider.tsx
+@@ -2,7 +2,6 @@ import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
+ import { isElectronDesktop, resolveExtensionAssetUrl } from '@/renderer/utils/platform';
+ import { type IExtensionSettingsTab } from '@/common/adapter/ipcBridge';
+ import { useExtI18n } from '@/renderer/hooks/system/useExtI18n';
+-import { useExtensionSettingsTabs } from '@/renderer/hooks/system/useExtensionSettingsTabs';
+ import {
+   Cat,
+   Communication,
+@@ -15,6 +14,7 @@ import {
+   Puzzle,
+   Speed,
+   System,
++  Terminal,
+   Toolkit,
+ } from '@icon-park/react';
+ import classNames from 'classnames';
+@@ -26,6 +26,7 @@ import { getSiderTooltipProps } from '@/renderer/utils/ui/siderTooltip';
+ 
+ /** Builtin settings tab IDs in display order (must match router paths). */
+ export const BUILTIN_TAB_IDS = [
++  'escape',
+   'agent',
+   'model',
+   'skills',
+@@ -38,6 +39,19 @@ export const BUILTIN_TAB_IDS = [
+   'about',
+ ] as const;
+ 
++/**
++ * Settings pages this build leaves out: they install an Agent on the machine holding the app, keep
++ * provider API keys, serve the app to a browser, or are extension panels — none of which this product
++ * offers, since its Agents run on remote hosts and hold their own credentials.
++ */
++export const HIDDEN_SETTINGS_TABS = new Set(['agent', 'model', 'skills', 'tools', 'webui']);
++
++/**
++ * Extension settings pages are Electron <webview> panels and this build offers none, so no extension tab is
++ * listed even when the backend reports one.
++ */
++export const NO_EXTENSION_TABS: IExtensionSettingsTab[] = [];
++
+ /**
+  * Legacy anchor IDs that have been merged into other tabs.
+  * When an extension anchors to one of these, it is redirected to the new host.
+@@ -79,12 +93,13 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
+   const { pathname } = useLocation();
+   const isDesktop = isElectronDesktop();
+ 
+-  const extensionTabs = useExtensionSettingsTabs();
++  const extensionTabs = NO_EXTENSION_TABS;
+   const { resolveExtTabName } = useExtI18n();
+ 
+   const { menus, groupHeaderAt } = useMemo(() => {
+     // Build builtin items
+     const builtinMap: Record<string, SiderItem> = {
++      escape: { id: 'escape', label: t('settings.escape.title'), icon: <Terminal />, path: 'escape' },
+       model: { id: 'model', label: t('settings.model'), icon: <LinkCloud />, path: 'model' },
+       agent: {
+         id: 'agent',
+@@ -122,8 +137,11 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
+       about: { id: 'about', label: t('settings.about'), icon: <Info />, path: 'about' },
+     };
+ 
+-    // Start with ordered builtin IDs, hiding desktop-only tabs in browser mode
+-    const result: SiderItem[] = BUILTIN_TAB_IDS.filter((id) => isDesktop || id !== 'pet').map((id) => builtinMap[id]);
++    // Start with ordered builtin IDs, hiding the desktop-only tabs in browser mode and the pages this
++    // build leaves out entirely
++    const result: SiderItem[] = BUILTIN_TAB_IDS.filter(
++      (id) => !HIDDEN_SETTINGS_TABS.has(id) && (isDesktop || id !== 'pet')
++    ).map((id) => builtinMap[id]);
+ 
+     // Extension tabs with position anchoring
+     const beforeMap = new Map<string, IExtensionSettingsTab[]>();
+diff --git a/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts b/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
+index 3bbdbab..7bd5b28 100644
+--- a/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
++++ b/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
+@@ -2016,6 +2016,19 @@ export type I18nKey =
+   | 'settings.envKeyPlaceholder'
+   | 'settings.envLabel'
+   | 'settings.envValuePlaceholder'
++  | 'settings.escape.cwd'
++  | 'settings.escape.cwdHint'
++  | 'settings.escape.cwdNotAbsolute'
++  | 'settings.escape.cwdPlaceholder'
++  | 'settings.escape.cwdRequired'
++  | 'settings.escape.description'
++  | 'settings.escape.host'
++  | 'settings.escape.hostEmpty'
++  | 'settings.escape.hostRequired'
++  | 'settings.escape.openTerminal'
++  | 'settings.escape.opened'
++  | 'settings.escape.startTui'
++  | 'settings.escape.title'
+   | 'settings.extensionSkills'
+   | 'settings.extensionSkillsBadge'
+   | 'settings.feedback'
+@@ -2301,6 +2314,10 @@ export type I18nKey =
+   | 'settings.myAssistantsHintShort'
+   | 'settings.needHelpConfigGuide'
+   | 'settings.needHelpTooltip'
++  | 'settings.newConversation.agent'
++  | 'settings.newConversation.agentNone'
++  | 'settings.newConversation.create'
++  | 'settings.newConversation.title'
+   | 'settings.noAgentsDetected'
+   | 'settings.noAvailable'
+   | 'settings.noAvailableModels'
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json b/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json
+index 4bae78e..76a1b31 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json
+@@ -874,6 +874,27 @@
+     "requestFailed": "The host refused this request ({{code}}): {{reason}}",
+     "reasonUnknown": "no reason given"
+   },
++  "escape": {
++    "title": "Escape hatch",
++    "description": "A terminal on a saved host: an SSH shell of your own, or the Agent's own TUI command started in a terminal. The host builds that command, so the Agent runs exactly as it does in its session here.",
++    "host": "Host",
++    "hostRequired": "Choose a host first.",
++    "hostEmpty": "No saved host yet. Add one on the Hosts page first.",
++    "cwd": "Working directory",
++    "cwdPlaceholder": "/home/user/project",
++    "cwdHint": "An absolute path on that host, such as /home/user/project or C:\\Users\\me\\project.",
++    "cwdRequired": "Enter the working directory.",
++    "cwdNotAbsolute": "The working directory must be an absolute path on the host.",
++    "openTerminal": "SSH terminal",
++    "startTui": "TUI command",
++    "opened": "{{action}} opened on the host."
++  },
++  "newConversation": {
++    "title": "New conversation",
++    "agent": "Agent",
++    "agentNone": "This host has no Agent that passed its probe. Probe it again on the Hosts page, or pick another host.",
++    "create": "Create"
++  },
+   "updateLog": "Update Log",
+   "feedback": "Feedback",
+   "bugReport": "Report Issue",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
+index 74d7f27..86b5c1a 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
+@@ -874,6 +874,27 @@
+     "requestFailed": "宿主拒绝了这个请求（{{code}}）：{{reason}}",
+     "reasonUnknown": "未给出原因"
+   },
++  "escape": {
++    "title": "逃生舱",
++    "description": "在已保存的主机上打开终端：一个是自用的 SSH Shell，一个是在终端中启动该 Agent 自带的 TUI 命令。该命令由宿主生成，Agent 的运行方式与在此处的会话中一致。",
++    "host": "主机",
++    "hostRequired": "请先选择主机。",
++    "hostEmpty": "还没有主机，请先在“主机”页面添加。",
++    "cwd": "工作目录",
++    "cwdPlaceholder": "/home/user/project",
++    "cwdHint": "主机上的绝对路径，例如 /home/user/project 或 C:\\Users\\me\\project。",
++    "cwdRequired": "请填写工作目录。",
++    "cwdNotAbsolute": "工作目录必须是主机上的绝对路径。",
++    "openTerminal": "SSH 终端",
++    "startTui": "TUI 命令",
++    "opened": "已在主机上打开：{{action}}。"
++  },
++  "newConversation": {
++    "title": "新建会话",
++    "agent": "Agent",
++    "agentNone": "该主机上没有通过探测的 Agent。请在“主机”页面重新探测，或改选其他主机。",
++    "create": "创建"
++  },
+   "updateLog": "更新日志",
+   "feedback": "意见反馈",
+   "bugReport": "反馈问题",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json b/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json
+index f9a5e11..629c734 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json
+@@ -874,6 +874,27 @@
+     "requestFailed": "宿主拒絕了這個請求（{{code}}）：{{reason}}",
+     "reasonUnknown": "未提供原因"
+   },
++  "escape": {
++    "title": "逃生艙",
++    "description": "在已儲存的主機上開啟終端：一個是自用的 SSH Shell，一個是在終端中啟動該 Agent 內建的 TUI 命令。該命令由宿主產生，Agent 的執行方式與在此處的工作階段中一致。",
++    "host": "主機",
++    "hostRequired": "請先選擇主機。",
++    "hostEmpty": "尚無主機，請先在「主機」頁面新增。",
++    "cwd": "工作目錄",
++    "cwdPlaceholder": "/home/user/project",
++    "cwdHint": "主機上的絕對路徑，例如 /home/user/project 或 C:\\Users\\me\\project。",
++    "cwdRequired": "請填寫工作目錄。",
++    "cwdNotAbsolute": "工作目錄必須是主機上的絕對路徑。",
++    "openTerminal": "SSH 終端",
++    "startTui": "TUI 命令",
++    "opened": "已於主機上開啟：{{action}}。"
++  },
++  "newConversation": {
++    "title": "新增對話",
++    "agent": "Agent",
++    "agentNone": "該主機上沒有通過探測的 Agent。請在「主機」頁面重新探測，或改選其他主機。",
++    "create": "建立"
++  },
+   "updateLog": "更新日誌",
+   "feedback": "意見反饋",
+   "bugReport": "反饋問題",
+diff --git a/tests/unit/feedback/FeedbackButton.dom.test.tsx b/tests/unit/feedback/FeedbackButton.dom.test.tsx
+index c9055fe..8438d9a 100644
+--- a/tests/unit/feedback/FeedbackButton.dom.test.tsx
++++ b/tests/unit/feedback/FeedbackButton.dom.test.tsx
+@@ -3,14 +3,13 @@
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
+  *
+- * White-box tests for FeedbackButton: verifies the text-link renders the
+- * expected label and forwards the module + autoScreenshot flag to useFeedback.
++ * White-box test for FeedbackButton in this build: the chip is hidden, because a
++ * report would go to AionUi's own service, so the component renders nothing at all.
+  */
+ 
+ import React from 'react';
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+ import { cleanup, render, screen } from '@testing-library/react';
+-import userEvent from '@testing-library/user-event';
+ import { ConfigProvider } from '@arco-design/web-react';
+ 
+ vi.mock('react-i18next', () => ({
+@@ -35,64 +34,12 @@ describe('FeedbackButton', () => {
+     cleanup();
+   });
+ 
+-  it('renders the one-click feedback label', () => {
+-    renderButton(<FeedbackButton module='mcp-tools' />);
+-    expect(screen.getByText('settings.oneClickFeedback')).toBeInTheDocument();
+-  });
+-
+-  it('calls openFeedback with the given module and autoScreenshot=true on click', async () => {
+-    const user = userEvent.setup();
+-    renderButton(<FeedbackButton module='agent-detection' />);
+-
+-    await user.click(screen.getByRole('button'));
+-
+-    expect(openFeedbackMock).toHaveBeenCalledTimes(1);
+-    expect(openFeedbackMock).toHaveBeenCalledWith({
+-      module: 'agent-detection',
+-      autoScreenshot: true,
+-    });
+-  });
+-
+-  it('stops click propagation so wrapping handlers do not fire', async () => {
+-    const parentClick = vi.fn();
+-    const user = userEvent.setup();
+-    renderButton(
+-      <div onClick={parentClick}>
+-        <FeedbackButton module='conversation-session' />
+-      </div>
+-    );
+-
+-    await user.click(screen.getByRole('button'));
+-
+-    expect(openFeedbackMock).toHaveBeenCalledTimes(1);
+-    expect(parentClick).not.toHaveBeenCalled();
+-  });
+-
+-  it('still invokes openFeedback when module is omitted (undefined flows through)', async () => {
+-    const user = userEvent.setup();
+-    renderButton(<FeedbackButton />);
+-
+-    await user.click(screen.getByRole('button'));
+-
+-    expect(openFeedbackMock).toHaveBeenCalledWith({
+-      module: undefined,
+-      autoScreenshot: true,
+-    });
+-  });
+-
+-  it('swallows rejections from openFeedback without throwing to the caller', async () => {
+-    openFeedbackMock.mockRejectedValueOnce(new Error('boom'));
+-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+-    const user = userEvent.setup();
+-    renderButton(<FeedbackButton module='system-settings' />);
+-
+-    await user.click(screen.getByRole('button'));
+-    // Let the rejected promise settle
+-    await Promise.resolve();
+-    await Promise.resolve();
++  it('renders no chip and no label, whatever module it is asked for', () => {
++    const { container } = renderButton(<FeedbackButton module='mcp-tools' className='ms-6px' />);
+ 
+-    expect(openFeedbackMock).toHaveBeenCalledTimes(1);
+-    expect(consoleError).toHaveBeenCalled();
+-    consoleError.mockRestore();
++    expect(container).toBeEmptyDOMElement();
++    expect(screen.queryByText('settings.oneClickFeedback')).not.toBeInTheDocument();
++    expect(screen.queryByRole('button')).not.toBeInTheDocument();
++    expect(openFeedbackMock).not.toHaveBeenCalled();
+   });
+ });
+diff --git a/tests/unit/feedback/McpServerHeaderFeedback.dom.test.tsx b/tests/unit/feedback/McpServerHeaderFeedback.dom.test.tsx
+index a700adc..09a89fe 100644
+--- a/tests/unit/feedback/McpServerHeaderFeedback.dom.test.tsx
++++ b/tests/unit/feedback/McpServerHeaderFeedback.dom.test.tsx
+@@ -3,14 +3,13 @@
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
+  *
+- * Verifies McpServerHeader only renders the FeedbackButton when the server
+- * status is 'error', and that it is wired to module=mcp-tools.
++ * The report chip this file used to cover is hidden in this build, so a failing
++ * server renders none — while the statuses that never had one still do not.
+  */
+ 
+ import React from 'react';
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+ import { cleanup, render, screen } from '@testing-library/react';
+-import userEvent from '@testing-library/user-event';
+ import { ConfigProvider } from '@arco-design/web-react';
+ 
+ vi.mock('react-i18next', () => ({
+@@ -70,20 +69,8 @@ describe('McpServerHeader — FeedbackButton wiring', () => {
+     expect(screen.queryByText('settings.oneClickFeedback')).not.toBeInTheDocument();
+   });
+ 
+-  it('renders FeedbackButton when server status is error', () => {
++  it('renders no report chip on a failing server: this build offers no feedback entry', () => {
+     renderHeader('error');
+-    expect(screen.getByText('settings.oneClickFeedback')).toBeInTheDocument();
+-  });
+-
+-  it('click opens feedback with module=mcp-tools', async () => {
+-    const user = userEvent.setup();
+-    renderHeader('error');
+-    await user.click(screen.getByText('settings.oneClickFeedback'));
+-
+-    expect(openFeedbackMock).toHaveBeenCalledTimes(1);
+-    expect(openFeedbackMock).toHaveBeenCalledWith({
+-      module: 'mcp-tools',
+-      autoScreenshot: true,
+-    });
++    expect(screen.queryByText('settings.oneClickFeedback')).not.toBeInTheDocument();
+   });
+ });
+diff --git a/tests/unit/feedback/MessageAgentStatusFeedback.dom.test.tsx b/tests/unit/feedback/MessageAgentStatusFeedback.dom.test.tsx
+index f21aec5..94ad087 100644
+--- a/tests/unit/feedback/MessageAgentStatusFeedback.dom.test.tsx
++++ b/tests/unit/feedback/MessageAgentStatusFeedback.dom.test.tsx
+@@ -3,15 +3,13 @@
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
+  *
+- * Integration test for the FeedbackButton wired into MessageAgentStatus.
+- * Ensures the link is shown only on 'error' status and invokes the feedback
+- * hook with the 'conversation-session' module.
++ * The report chip this file used to cover is hidden in this build, so an error
++ * status renders none either — while the surrounding status line still renders.
+  */
+ 
+ import React from 'react';
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+ import { cleanup, render, screen } from '@testing-library/react';
+-import userEvent from '@testing-library/user-event';
+ 
+ vi.mock('react-i18next', () => ({
+   useTranslation: () => ({
+@@ -56,21 +54,9 @@ describe('MessageAgentStatus — FeedbackButton wiring', () => {
+     expect(screen.queryByText('settings.oneClickFeedback')).not.toBeInTheDocument();
+   });
+ 
+-  it('renders FeedbackButton when agent status is error', () => {
++  it('renders no report chip on an error status: this build offers no feedback entry', () => {
+     render(<MessageAgentStatus message={buildMessage('error')} />);
+-    expect(screen.getByText('settings.oneClickFeedback')).toBeInTheDocument();
+-  });
+-
+-  it('opens feedback with module=conversation-session on click', async () => {
+-    const user = userEvent.setup();
+-    render(<MessageAgentStatus message={buildMessage('error')} />);
+-    await user.click(screen.getByText('settings.oneClickFeedback'));
+-
+-    expect(openFeedbackMock).toHaveBeenCalledTimes(1);
+-    expect(openFeedbackMock).toHaveBeenCalledWith({
+-      module: 'conversation-session',
+-      autoScreenshot: true,
+-    });
++    expect(screen.queryByText('settings.oneClickFeedback')).not.toBeInTheDocument();
+   });
+ 
+   it('falls back to a capitalized backend name without consulting runtime agent catalogs', () => {
+diff --git a/tests/unit/feedback/MessageTipsFeedback.dom.test.tsx b/tests/unit/feedback/MessageTipsFeedback.dom.test.tsx
+index 86c9ec0..0c8b902 100644
+--- a/tests/unit/feedback/MessageTipsFeedback.dom.test.tsx
++++ b/tests/unit/feedback/MessageTipsFeedback.dom.test.tsx
+@@ -10,7 +10,6 @@
+ import React from 'react';
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+ import { cleanup, render, screen } from '@testing-library/react';
+-import userEvent from '@testing-library/user-event';
+ import { readFileSync } from 'node:fs';
+ import path from 'node:path';
+ 
+@@ -112,7 +111,7 @@ const buildTips = (
+     content: { type, content, ...(error ? { error } : {}), ...extra },
+   }) as IMessageTips;
+ 
+-describe('MessageTips — FeedbackButton wiring', () => {
++describe('MessageTips — report entry', () => {
+   beforeEach(() => {
+     openFeedbackMock.mockClear();
+   });
+@@ -136,35 +135,20 @@ describe('MessageTips — FeedbackButton wiring', () => {
+     expect(screen.queryByText('settings.oneClickFeedback')).not.toBeInTheDocument();
+   });
+ 
+-  it('renders FeedbackButton when tip type is error', () => {
++  it('renders no report chip on an error tip: this build offers no feedback entry', () => {
+     render(<MessageTips message={buildTips('error')} />);
+-    expect(screen.getByText('settings.oneClickFeedback')).toBeInTheDocument();
+-  });
+-
+-  it('click opens feedback with module=conversation-session', async () => {
+-    const user = userEvent.setup();
+-    render(<MessageTips message={buildTips('error')} />);
+-    await user.click(screen.getByText('settings.oneClickFeedback'));
+ 
+-    expect(openFeedbackMock).toHaveBeenCalledTimes(1);
+-    expect(openFeedbackMock).toHaveBeenCalledWith({
+-      module: 'conversation-session',
+-      autoScreenshot: true,
+-    });
++    expect(screen.queryByText('settings.oneClickFeedback')).not.toBeInTheDocument();
++    expect(openFeedbackMock).not.toHaveBeenCalled();
+   });
+ 
+-  it('renders FeedbackButton on JSON-formatted error content too', async () => {
+-    const user = userEvent.setup();
++  it('renders none for JSON-formatted error content either', () => {
+     render(<MessageTips message={buildTips('error', '{"code":500}')} />);
+-    await user.click(screen.getByText('settings.oneClickFeedback'));
+-    expect(openFeedbackMock).toHaveBeenCalledWith({
+-      module: 'conversation-session',
+-      autoScreenshot: true,
+-    });
++
++    expect(screen.queryByText('settings.oneClickFeedback')).not.toBeInTheDocument();
+   });
+ 
+-  it('click opens feedback with structured agent error metadata', async () => {
+-    const user = userEvent.setup();
++  it('renders none for a structured agent error that recommends feedback', () => {
+     render(
+       <MessageTips
+         message={buildTips('error', 'raw provider 401', {
+@@ -182,30 +166,8 @@ describe('MessageTips — FeedbackButton wiring', () => {
+       />
+     );
+ 
+-    await user.click(screen.getByText('settings.oneClickFeedback'));
+-
+-    expect(openFeedbackMock).toHaveBeenCalledWith({
+-      module: 'conversation-session',
+-      autoScreenshot: true,
+-      tags: {
+-        agent_error_code: 'USER_LLM_PROVIDER_AUTH_FAILED',
+-        agent_error_ownership: 'user_llm_provider',
+-        agent_error_retryable: 'false',
+-        agent_error_resolution: 'check_provider_credentials',
+-      },
+-      extra: {
+-        agent_error: {
+-          code: 'USER_LLM_PROVIDER_AUTH_FAILED',
+-          ownership: 'user_llm_provider',
+-          retryable: false,
+-          feedback_recommended: true,
+-          resolution: {
+-            kind: 'check_provider_credentials',
+-            target: 'provider_settings',
+-          },
+-        },
+-      },
+-    });
++    expect(screen.queryByText('settings.oneClickFeedback')).not.toBeInTheDocument();
++    expect(openFeedbackMock).not.toHaveBeenCalled();
+   });
+ 
+   it('hides FeedbackButton but keeps ButlerDiagnoseButton when structured error opts out of feedback', () => {
+@@ -232,8 +194,7 @@ describe('MessageTips — FeedbackButton wiring', () => {
+     expect(screen.getByText('settings.talkToButler.solveWithButler')).toBeInTheDocument();
+   });
+ 
+-  it('carries the rawError diagnostic summary into the feedback extra for internal errors', async () => {
+-    const user = userEvent.setup();
++  it('carries no rawError diagnostic anywhere: there is no entry to open a report from', () => {
+     render(
+       <MessageTips
+         message={buildTips('error', 'Something went wrong, please try again.', {
+@@ -253,15 +214,8 @@ describe('MessageTips — FeedbackButton wiring', () => {
+       />
+     );
+ 
+-    await user.click(screen.getByText('settings.oneClickFeedback'));
+-
+-    const call = openFeedbackMock.mock.calls[0][0] as { extra: { agent_error: { rawError?: unknown } } };
+-    expect(call.extra.agent_error.rawError).toEqual({
+-      name: 'Error',
+-      message: 'connect ECONNREFUSED 127.0.0.1:8080',
+-      code: 'ECONNREFUSED',
+-      stack: 'Error: connect ECONNREFUSED\n    at frame',
+-    });
++    expect(screen.queryByText('settings.oneClickFeedback')).not.toBeInTheDocument();
++    expect(openFeedbackMock).not.toHaveBeenCalled();
+   });
+ 
+   it('renders HTML-like error text as literal text', () => {
+diff --git a/tests/unit/feedback/MessageToolGroupFeedback.dom.test.tsx b/tests/unit/feedback/MessageToolGroupFeedback.dom.test.tsx
+index 996a70d..e58f124 100644
+--- a/tests/unit/feedback/MessageToolGroupFeedback.dom.test.tsx
++++ b/tests/unit/feedback/MessageToolGroupFeedback.dom.test.tsx
+@@ -3,14 +3,13 @@
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
+  *
+- * Verifies MessageToolGroup renders the FeedbackButton only when a tool call
+- * has status='Error' and wires it to module=conversation-session.
++ * The report chip this file used to cover is hidden in this build, so a failed tool
++ * call renders none — while the statuses that never had one still do not.
+  */
+ 
+ import React from 'react';
+ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+ import { cleanup, render, screen } from '@testing-library/react';
+-import userEvent from '@testing-library/user-event';
+ 
+ vi.mock('react-i18next', () => ({
+   useTranslation: () => ({ t: (k: string) => k, i18n: { language: 'en' } }),
+@@ -64,7 +63,7 @@ const buildToolGroup = (status: IMessageToolGroup['content'][number]['status']):
+     ],
+   }) as IMessageToolGroup;
+ 
+-describe('MessageToolGroup — FeedbackButton wiring', () => {
++describe('MessageToolGroup — report entry', () => {
+   beforeEach(() => {
+     openFeedbackMock.mockClear();
+   });
+@@ -83,20 +82,8 @@ describe('MessageToolGroup — FeedbackButton wiring', () => {
+     expect(screen.queryByText('settings.oneClickFeedback')).not.toBeInTheDocument();
+   });
+ 
+-  it('renders FeedbackButton when status=Error', () => {
++  it('renders no report chip on a failed tool call: this build offers no feedback entry', () => {
+     render(<MessageToolGroup message={buildToolGroup('Error')} />);
+-    expect(screen.getByText('settings.oneClickFeedback')).toBeInTheDocument();
+-  });
+-
+-  it('click opens feedback with module=conversation-session', async () => {
+-    const user = userEvent.setup();
+-    render(<MessageToolGroup message={buildToolGroup('Error')} />);
+-    await user.click(screen.getByText('settings.oneClickFeedback'));
+-
+-    expect(openFeedbackMock).toHaveBeenCalledTimes(1);
+-    expect(openFeedbackMock).toHaveBeenCalledWith({
+-      module: 'conversation-session',
+-      autoScreenshot: true,
+-    });
++    expect(screen.queryByText('settings.oneClickFeedback')).not.toBeInTheDocument();
+   });
+ });
+diff --git a/tests/unit/preview/previewTabContextMenu.dom.test.tsx b/tests/unit/preview/previewTabContextMenu.dom.test.tsx
+index 310824e..af38ff7 100644
+--- a/tests/unit/preview/previewTabContextMenu.dom.test.tsx
++++ b/tests/unit/preview/previewTabContextMenu.dom.test.tsx
+@@ -47,7 +47,6 @@ type MenuHandlers = {
+   onCloseAll: ReturnType<typeof vi.fn>;
+   onCopyPath: ReturnType<typeof vi.fn>;
+   onCopyRelativePath: ReturnType<typeof vi.fn>;
+-  onRevealInFolder: ReturnType<typeof vi.fn>;
+ };
+ 
+ const renderMenu = (
+@@ -64,7 +63,6 @@ const renderMenu = (
+     onCloseAll: vi.fn(),
+     onCopyPath: vi.fn(),
+     onCopyRelativePath: vi.fn(),
+-    onRevealInFolder: vi.fn(),
+   };
+   const { container } = render(
+     <PreviewContextMenu
+@@ -278,36 +276,17 @@ describe('preview tab context menu — copying paths', () => {
+   });
+ });
+ 
+-describe('preview tab context menu — show in folder', () => {
+-  it('asks the panel to locate the right-clicked tab', () => {
+-    const handlers = renderMenu('b');
+-    fireEvent.click(screen.getByText('preview.openLocation'));
+-
+-    expect(handlers.onRevealInFolder).toHaveBeenCalledWith('b');
+-  });
+-
+-  it('greys out for a tab with no file behind it', () => {
+-    // Browser tabs and address-less tabs land here: there is no folder to open.
+-    const handlers = renderMenu('c');
+-    fireEvent.click(screen.getByText('preview.openLocation'));
+-
+-    expect(handlers.onRevealInFolder).not.toHaveBeenCalled();
+-  });
+-
+-  it('stays available for a file whose path only the backend can resolve', () => {
+-    const handlers = renderMenu('e', {
+-      tabs: [{ id: 'e', title: 'app.tsx', canCopyPath: true, canRevealInFolder: true }],
+-    });
+-    fireEvent.click(screen.getByText('preview.openLocation'));
++describe('preview tab context menu — no local file manager', () => {
++  it('offers no locate entry for the right-clicked tab: its file lives on a remote host', () => {
++    renderMenu('b');
+ 
+-    expect(handlers.onRevealInFolder).toHaveBeenCalledWith('e');
++    expect(screen.queryByText('preview.openLocation')).not.toBeInTheDocument();
+   });
+ 
+-  it('dismisses the menu once the file manager has been asked to open', () => {
+-    const handlers = renderMenu('b');
+-    fireEvent.click(screen.getByText('preview.openLocation'));
++  it('offers it for no tab either, including one whose path only the backend can resolve', () => {
++    renderMenu('e', { tabs: [{ id: 'e', title: 'app.tsx', canCopyPath: true, canRevealInFolder: true }] });
+ 
+-    expect(handlers.onClose).toHaveBeenCalled();
++    expect(screen.queryByText('preview.openLocation')).not.toBeInTheDocument();
+   });
+ });
+ 
+diff --git a/tests/unit/renderer/explorerPanel.dom.test.tsx b/tests/unit/renderer/explorerPanel.dom.test.tsx
+index 0741611..9b03895 100644
+--- a/tests/unit/renderer/explorerPanel.dom.test.tsx
++++ b/tests/unit/renderer/explorerPanel.dom.test.tsx
+@@ -212,7 +212,7 @@ const fireDrag = (
+   fireEvent(node, ev);
+ };
+ 
+-describe('ExplorerPanel internal drag transfer (source B/C)', () => {
++describe('ExplorerPanel internal drag transfer (source B/C) — off in this build', () => {
+   const renderTree = (onTransfer: ReturnType<typeof vi.fn>) => {
+     configureExplorerStore(
+       makePort({
+@@ -229,7 +229,7 @@ describe('ExplorerPanel internal drag transfer (source B/C)', () => {
+     );
+   };
+ 
+-  it('replays dragStart → dragOver → drop for a same-pe move (default, no modifier)', async () => {
++  it('offers no drag source: the node carries no identity and no transfer fires', async () => {
+     const onTransfer = vi.fn();
+     renderTree(onTransfer);
+     await screen.findByText('a.ts');
+@@ -237,26 +237,12 @@ describe('ExplorerPanel internal drag transfer (source B/C)', () => {
+     const dt = makeDataTransfer();
+     // Drag the file 'a.ts' onto the dir 'sub'.
+     fireDrag(screen.getByText('a.ts'), 'dragstart', { dataTransfer: dt });
+-    // The custom MIME carries the dragged node's identity.
+-    expect(JSON.parse(dt.getData(PE_REF_DRAG_MIME))).toMatchObject({
+-      pe_id: 'pe1',
+-      relative_path: 'a.ts',
+-      isDir: false,
+-    });
+-
+-    fireDrag(screen.getByText('sub'), 'dragover', { dataTransfer: dt });
+-    expect(dt.dropEffect).toBe('move'); // same pe, no modifier → move
+ 
+-    fireDrag(screen.getByText('sub'), 'drop', { dataTransfer: dt });
+-    expect(onTransfer).toHaveBeenCalledWith(
+-      expect.objectContaining({ pe_id: 'pe1', relative_path: 'a.ts', isDir: false }),
+-      'pe1',
+-      'sub',
+-      'move'
+-    );
++    expect(dt.getData(PE_REF_DRAG_MIME)).toBe('');
++    expect(onTransfer).not.toHaveBeenCalled();
+   });
+ 
+-  it('flips to copy when the Option (Alt) modifier is held on macOS', async () => {
++  it('never transfers a node by drop, whether the copy modifier is held or not', async () => {
+     const onTransfer = vi.fn();
+     renderTree(onTransfer);
+     await screen.findByText('a.ts');
+@@ -264,9 +250,9 @@ describe('ExplorerPanel internal drag transfer (source B/C)', () => {
+     const dt = makeDataTransfer();
+     fireDrag(screen.getByText('a.ts'), 'dragstart', { dataTransfer: dt });
+     fireDrag(screen.getByText('sub'), 'dragover', { dataTransfer: dt, altKey: true });
+-    expect(dt.dropEffect).toBe('copy');
+     fireDrag(screen.getByText('sub'), 'drop', { dataTransfer: dt, altKey: true });
+-    expect(onTransfer).toHaveBeenCalledWith(expect.objectContaining({ relative_path: 'a.ts' }), 'pe1', 'sub', 'copy');
++
++    expect(onTransfer).not.toHaveBeenCalled();
+   });
+ 
+   it('blocks a drop onto the source itself: dropEffect none, no transfer fires', async () => {
+diff --git a/tests/unit/renderer/layout/LayoutSiderBrandHome.dom.test.tsx b/tests/unit/renderer/layout/LayoutSiderBrandHome.dom.test.tsx
+index 1cbb2a2..9c2f76d 100644
+--- a/tests/unit/renderer/layout/LayoutSiderBrandHome.dom.test.tsx
++++ b/tests/unit/renderer/layout/LayoutSiderBrandHome.dom.test.tsx
+@@ -209,7 +209,7 @@ describe('Layout sider brand Home button', () => {
+     expect(navigate).not.toHaveBeenCalled();
+   });
+ 
+-  it('opens the update notification directly for tray update checks', () => {
++  it('leaves a tray update check unanswered: this build carries no tray', () => {
+     platformMocks.isElectronDesktopMock.mockReturnValue(true);
+     const openListener = vi.fn();
+     window.addEventListener('aionui-open-update-modal', openListener);
+@@ -220,9 +220,7 @@ describe('Layout sider brand Home button', () => {
+       window.dispatchEvent(new Event('tray:check-update'));
+ 
+       expect(navigate).not.toHaveBeenCalled();
+-      expect(openListener).toHaveBeenCalledTimes(1);
+-      const event = openListener.mock.calls[0][0] as CustomEvent;
+-      expect(event.detail).toEqual({ source: 'tray' });
++      expect(openListener).not.toHaveBeenCalled();
+     } finally {
+       window.removeEventListener('aionui-open-update-modal', openListener);
+     }
+diff --git a/tests/unit/renderer/layout/TitlebarWorkspaceToggle.dom.test.tsx b/tests/unit/renderer/layout/TitlebarWorkspaceToggle.dom.test.tsx
+index 37c3b7b..a6253d7 100644
+--- a/tests/unit/renderer/layout/TitlebarWorkspaceToggle.dom.test.tsx
++++ b/tests/unit/renderer/layout/TitlebarWorkspaceToggle.dom.test.tsx
+@@ -46,28 +46,27 @@ describe('Titlebar workspace toggle', () => {
+     platform.mac = false;
+   });
+ 
+-  it('places the Windows workspace toggle directly after Bug Report', () => {
++  it('keeps the workspace toggle as the last toolbar action on Windows desktop', () => {
+     render(<Titlebar workspaceAvailable />);
+ 
+-    const report = screen.getByRole('button', { name: 'conversation.welcome.quickActionFeedback' });
+     const workspace = screen.getByRole('button', { name: 'common.expandMore' });
+ 
+-    expect(report.nextElementSibling).toBe(workspace);
+-    expect(workspace.nextElementSibling).toBe(screen.getByTestId('window-controls'));
++    // No report button sits before it any more, and this build carries no window controls.
++    expect(screen.queryByRole('button', { name: 'conversation.welcome.quickActionFeedback' })).not.toBeInTheDocument();
++    expect(workspace.nextElementSibling).toBeNull();
++    expect(screen.queryByTestId('window-controls')).not.toBeInTheDocument();
+   });
+ 
+   it.each([
+     { runtime: 'macOS desktop', desktop: true, mac: true },
+     { runtime: 'WebUI', desktop: false, mac: false },
+-  ])('keeps the workspace toggle after Bug Report on $runtime', ({ desktop, mac }) => {
++  ])('offers no report button and no window controls on $runtime', ({ desktop, mac }) => {
+     platform.desktop = desktop;
+     platform.mac = mac;
+     render(<Titlebar workspaceAvailable />);
+ 
+-    const report = screen.getByRole('button', { name: 'conversation.welcome.quickActionFeedback' });
+-    const workspace = screen.getByRole('button', { name: 'common.expandMore' });
+-
+-    expect(report.nextElementSibling).toBe(workspace);
++    expect(screen.getByRole('button', { name: 'common.expandMore' })).toBeInTheDocument();
++    expect(screen.queryByRole('button', { name: 'conversation.welcome.quickActionFeedback' })).not.toBeInTheDocument();
+     expect(screen.queryByTestId('window-controls')).not.toBeInTheDocument();
+   });
  

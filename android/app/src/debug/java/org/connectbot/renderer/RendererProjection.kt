@@ -21,6 +21,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import org.connectbot.agent.probeStateOf
 import org.connectbot.data.entity.Host
+import org.connectbot.ui.screens.agents.projectQuestion
 import org.json.JSONArray
 import org.json.JSONObject
 import org.rmagentma.core.AgentAvailability
@@ -50,6 +51,20 @@ private const val WORKSPACE_UNREACHABLE = "host_unreachable"
 
 /** Prefix of the opaque id one saved host carries as a project and as a row of the hosts page. */
 private const val HOST_PREFIX = "host-"
+
+/** Content kind of a tip row that carries text the chat has no shape of its own for. */
+private const val TIP_INFO = "info"
+
+/**
+ * Events the chat draws nothing for because the host reports them through routes of their own: the turn boundary
+ * reaches the renderer as `turn.completed`, context usage through `usage.read`, and a resolved interaction is the
+ * product's own bookkeeping row for something the chat already drew while it was pending. Everything else becomes
+ * a readable raw line instead of vanishing.
+ */
+private val SILENT_TYPES = setOf("complete", "permission_resolved", "question_resolved", "usage")
+
+/** One raw line is bounded because the Agent wrote its text; it is a row, not a payload dump. */
+private const val RAW_LINE_UNITS = 1_000
 
 /**
  * Renders product state into the payload shapes the packaged renderer reads. Everything here is a pure
@@ -248,8 +263,12 @@ internal object RendererProjection {
         messages.lastOrNull { it.optString("type") == type }
     }
 
-    /** Cursor page over the loaded window. Cursors are the same stable message ids the items carry. */
-    fun page(items: List<JSONObject>, limit: Int, before: String?, after: String?, hasEarlier: Boolean): JSONObject {
+    /**
+     * Cursor page over the loaded window. Cursors are the same stable message ids the items carry. [hasLater] names
+     * the case a page was read out of the middle of a history whose newer part the caller already holds, so the
+     * answer states there is more below this page instead of claiming the page is the end.
+     */
+    fun page(items: List<JSONObject>, limit: Int, before: String?, after: String?, hasEarlier: Boolean, hasLater: Boolean = false): JSONObject {
         var start = 0
         var end = items.size
         if (!before.isNullOrEmpty()) {
@@ -266,7 +285,7 @@ internal object RendererProjection {
             "oldest_cursor" to bounded.firstOrNull()?.optString("id"),
             "newest_cursor" to bounded.lastOrNull()?.optString("id"),
             "has_more_before" to (hasEarlier || window.size > bounded.size),
-            "has_more_after" to (end < items.size),
+            "has_more_after" to (hasLater || end < items.size),
         )
     }
 
@@ -396,8 +415,9 @@ internal object RendererProjection {
     private fun intOrNull(source: JSONObject, key: String): Int? = (source.opt(key) as? Number)?.toInt()
 
     /**
-     * Messages of the loaded window, in window order. A row is skipped only when the renderer has nothing to
-     * draw for it, so an update it cannot show is never dressed up as chat history.
+     * Messages of the loaded window, in window order. Every event of the window becomes a row: one the renderer can
+     * draw as itself, and one it cannot as a single readable raw line, so no update the agent sent is dropped. Only
+     * the events the host reports through routes of their own carry no row.
      */
     fun messages(events: List<AgentEvent>, conversationId: String, epoch: String, turnId: String?): List<JSONObject> = events.mapNotNull { message(it, conversationId, epoch, turnId) }
 
@@ -430,12 +450,74 @@ internal object RendererProjection {
             "permission" -> base.put("type", "acp_permission").put("position", "left")
                 .put("content", permission(event, conversationId, epoch, turnId))
 
+            "question" -> base.put("type", "acp_question").put("position", "left")
+                .put("content", question(event, conversationId, epoch, turnId))
+
             "error" -> base.put("type", "tips").put("position", "center")
                 .put("content", json("content" to event.text, "type" to "error"))
 
-            else -> return null
+            // The turn boundary reaches the renderer as `turn.completed`, and a resolved interaction is the
+            // product's own bookkeeping row: those are the only events the chat draws nothing for. Every other
+            // event still becomes one readable raw line, so nothing the agent sent vanishes without a trace.
+            in SILENT_TYPES -> return null
+
+            else -> base.put("type", "tips").put("position", "center")
+                .put("content", json("content" to rawLine(event), "type" to TIP_INFO))
         }
         return base
+    }
+
+    /**
+     * Live question card: the request identity, the options and the fields the Agent really asked for, and the
+     * schema an answer has to satisfy — projected by the same code the Compose conversation form uses. Answering
+     * stays a separate act: the repository re-checks that this exact event is still the pending question, so a
+     * question read back from history can never be answered from this card.
+     */
+    fun question(event: AgentEvent, conversationId: String, epoch: String, turnId: String?): JSONObject {
+        val form = projectQuestion(event.raw)
+        val fields = JSONArray()
+        form.fields.forEach { field ->
+            fields.put(
+                json(
+                    "name" to field.name,
+                    "label" to field.label,
+                    "type" to field.type,
+                    "required" to field.required,
+                    "choices" to array(*field.choices.toTypedArray()),
+                ),
+            )
+        }
+        val options = JSONArray()
+        event.options.forEach { option -> options.put(json("option_id" to option.id, "name" to option.label)) }
+        return json(
+            "session_id" to conversationId,
+            "conversation_id" to conversationId,
+            // The opaque reference an answer must quote is this event's own request id.
+            "question_id" to event.id,
+            "request_id" to event.id,
+            "epoch" to epoch,
+            "turn_id" to turnId,
+            "title" to event.title,
+            "message" to event.text,
+            "options" to options,
+            "fields" to fields,
+            "single_string" to form.singleString,
+            // The schema travels as the Agent stated it; a question without one is visible but not answerable.
+            "requested_schema" to (event.raw?.asObject()?.opt("requestedSchema") ?: JSONObject.NULL),
+            "live" to true,
+            "readonly" to false,
+            "state" to "waiting",
+        )
+    }
+
+    /**
+     * One readable line for an event the chat has no row for. Control characters are folded to spaces so the text
+     * cannot break out of the row that draws it, and the line stays bounded because the Agent wrote it.
+     */
+    private fun rawLine(event: AgentEvent): String {
+        val detail = event.raw?.toString().orEmpty().ifEmpty { event.text }
+        val line = listOf("[${event.type}]", event.title, event.status, detail).filter { it.isNotBlank() }.joinToString(" ")
+        return line.map { if (it.isISOControl()) ' ' else it }.joinToString("").take(RAW_LINE_UNITS)
     }
 
     private fun toolUpdate(event: AgentEvent): JSONObject {
