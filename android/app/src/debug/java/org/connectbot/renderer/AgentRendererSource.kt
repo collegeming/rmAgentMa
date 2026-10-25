@@ -31,11 +31,13 @@ import org.connectbot.agent.AgentIndexStore
 import org.connectbot.agent.AgentRepository
 import org.connectbot.agent.AgentSshPool
 import org.connectbot.data.HostRepository
+import org.connectbot.data.entity.Host
 import org.connectbot.di.CoroutineDispatchers
 import org.connectbot.util.PreferenceConstants
 import org.connectbot.util.ThemeMode
 import org.json.JSONArray
 import org.json.JSONObject
+import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.DirectoryListing
@@ -214,6 +216,23 @@ class AgentRendererSource @Inject constructor(
      */
     override suspend fun listWorkspace(hostId: Long, directory: String): DirectoryListing =
         RemoteDirectoryListing(dispatchers.io).list(pool.hostSession(hostId, interactive = false), directory)
+
+    /** Hosts are created, renamed and removed through the same repository the Compose host editor writes to. */
+    override suspend fun hostByNickname(nickname: String): Host? = hosts.findHost(mapOf("nickname" to nickname))
+
+    override suspend fun saveHost(host: Host): Host = hosts.saveHost(host)
+
+    override suspend fun deleteHost(host: Host) = hosts.deleteHost(host)
+
+    /**
+     * One probe through the repository's own refresh entry. That run writes each executable it verified into
+     * `AgentDetectionStore` for the host's current target and keeps the previously detected path when the probe
+     * never reached the host, so the rows answered here are exactly the verdicts the product now holds.
+     */
+    override suspend fun refreshDetection(hostId: Long): List<AgentAvailability> {
+        repository.refresh(hostId)
+        return repository.availability.value.filter { it.hostId == hostId }
+    }
 
     private fun theme(): String = ThemeMode.fromString(preferences.getString(PreferenceConstants.THEME_MODE, null)).name.lowercase()
 

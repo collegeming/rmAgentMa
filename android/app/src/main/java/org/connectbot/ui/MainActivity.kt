@@ -19,6 +19,7 @@ package org.connectbot.ui
 
 import android.Manifest
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Intent
 import android.content.ServiceConnection
@@ -75,6 +76,19 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val STATE_SELECTED_URI = "selectedUri"
         const val DISCONNECT_ACTION = "org.connectbot.action.DISCONNECT"
+
+        /**
+         * Renderer failure code the debug renderer host hands back when it cannot serve its surface. The
+         * activity that receives it keeps the Compose fallback and shows the code rather than entering the
+         * renderer again, so a failing renderer cannot restart itself in a loop.
+         */
+        const val EXTRA_RENDERER_FAILURE = "org.connectbot.extra.RENDERER_FAILURE"
+
+        /** Failure code for a handover the product itself cannot perform. */
+        private const val RENDERER_UNRESOLVED = "renderer_unresolved"
+
+        // Resolved by class name because the renderer host only exists in the debug source set.
+        private const val RENDERER_HOST_ACTIVITY = "org.connectbot.renderer.RendererHostActivity"
     }
 
     internal lateinit var appViewModel: AppViewModel
@@ -83,6 +97,7 @@ class MainActivity : AppCompatActivity() {
     private var notificationSessionId: String? = null
     private var notificationReconnect = false
     private var pendingHostConnection: Host? by mutableStateOf(null)
+    private var rendererFailureCode: String? by mutableStateOf(null)
 
     // Holds the host waiting for permission result; not compose state so it doesn't trigger navigation.
     private var hostAwaitingPermission: Host? = null
@@ -135,6 +150,9 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
 
         appViewModel = ViewModelProvider(this)[AppViewModel::class.java]
+
+        // A renderer failure brings this activity back with the code its fallback banner shows.
+        rendererFailureCode = intent?.getStringExtra(EXTRA_RENDERER_FAILURE)
 
         if (savedInstanceState == null) {
             requestedUri = intent?.data
@@ -317,8 +335,26 @@ class MainActivity : AppCompatActivity() {
                     createShortcutAndFinish(host, color, iconStyle)
                 },
                 onNavigateToConsole = onNavigateToConsole,
+                onHandOverToRenderer = { handOverToRenderer() },
+                rendererFailureCode = rendererFailureCode,
+                onRetryRenderer = { rendererFailureCode = null },
             )
         }
+    }
+
+    /**
+     * Hands the main path to the packaged renderer, which lives in the debug source set only. The Compose
+     * shell stays composed as the fallback whenever the handover itself is impossible.
+     */
+    private fun handOverToRenderer() {
+        try {
+            startActivity(Intent().setClassName(this, RENDERER_HOST_ACTIVITY))
+        } catch (e: ActivityNotFoundException) {
+            Timber.e(e, "Renderer host activity is not declared; staying on the Compose shell")
+            rendererFailureCode = RENDERER_UNRESOLVED
+            return
+        }
+        finish()
     }
 
     override fun onNewIntent(intent: Intent) {

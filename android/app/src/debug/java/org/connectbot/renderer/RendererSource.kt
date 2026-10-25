@@ -108,4 +108,27 @@ interface RendererSource {
      * verdict about a directory nobody read.
      */
     suspend fun listWorkspace(hostId: Long, directory: String): DirectoryListing
+
+    /**
+     * The saved host whose nickname is [nickname], whatever protocol it carries, or null. The nickname column is
+     * unique across every host, so this is the conflict a create or a rename has to be checked against.
+     */
+    suspend fun hostByNickname(nickname: String): Host?
+
+    /**
+     * Inserts a host whose id is 0 and updates one whose id is set, through the product's own repository, so a
+     * changed address rewrites that row alone: its id, key association, profile and known hosts stay untouched.
+     */
+    suspend fun saveHost(host: Host): Host
+
+    /** Deletes [host] through the product's own repository, which also drops its saved credential. */
+    suspend fun deleteHost(host: Host)
+
+    /**
+     * Probes [hostId]'s Agent target once through the repository's own refresh entry — the same run the Agents
+     * screen performs, which writes what it verified into `AgentDetectionStore` — and answers with the verdicts
+     * this process now holds for that host. A probe that never reached the host keeps the path it detected
+     * before instead of inventing one.
+     */
+    suspend fun refreshDetection(hostId: Long): List<AgentAvailability>
 }

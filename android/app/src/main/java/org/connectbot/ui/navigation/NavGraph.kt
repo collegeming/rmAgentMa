@@ -57,7 +57,7 @@ fun ConnectBotNavHost(
     navController: NavHostController,
     onNavigateToConsole: (Host) -> Unit,
     modifier: Modifier = Modifier,
-    startDestination: String = NavDestinations.AGENTS,
+    startDestination: String = NavDestinations.HOST_LIST,
     makingShortcut: Boolean = false,
     onSelectShortcut: (Host, String?, IconStyle) -> Unit = { _, _, _ -> },
 ) {

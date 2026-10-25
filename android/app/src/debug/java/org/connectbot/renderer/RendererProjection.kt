@@ -19,6 +19,7 @@ package org.connectbot.renderer
 
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
+import org.connectbot.agent.probeStateOf
 import org.connectbot.data.entity.Host
 import org.json.JSONArray
 import org.json.JSONObject
@@ -31,6 +32,7 @@ import org.rmagentma.core.AgentSession
 import org.rmagentma.core.AgentSessionConfig
 import org.rmagentma.core.DirectoryListing
 import org.rmagentma.core.DirectoryListingProblem
+import org.rmagentma.core.remoteTargetOf
 import org.rmagentma.rendererhost.array
 import org.rmagentma.rendererhost.json
 
@@ -45,6 +47,9 @@ private const val WORKSPACE_DISCONNECTED = "disconnected"
 
 /** Reason code of a workspace whose host could not be reached at all, so no directory was ever read. */
 private const val WORKSPACE_UNREACHABLE = "host_unreachable"
+
+/** Prefix of the opaque id one saved host carries as a project and as a row of the hosts page. */
+private const val HOST_PREFIX = "host-"
 
 /**
  * Renders product state into the payload shapes the packaged renderer reads. Everything here is a pure
@@ -111,7 +116,56 @@ internal object RendererProjection {
         )
     }
 
-    fun projectId(hostId: Long): String = "host-$hostId"
+    fun projectId(hostId: Long): String = HOST_PREFIX + hostId
+
+    /** The host id an opaque `host-<id>` name carries; anything else names no saved host. */
+    fun hostId(value: String): Long? {
+        val parsed = value.takeIf { it.startsWith(HOST_PREFIX) }?.removePrefix(HOST_PREFIX)?.toLongOrNull()
+        return parsed?.takeIf { it > 0 }
+    }
+
+    /**
+     * One saved host as the hosts page reads it: the row itself plus the probe verdict this host already holds.
+     * A row is never dressed up as probed — `detection` says whether any probe answered for it — and the shell
+     * context the Agent would run in is named by the target, so a Windows host reads as the target it really is.
+     */
+    fun hostRow(host: Host, availability: List<AgentAvailability>): JSONObject {
+        val target = remoteTargetOf(host.osType, host.agentTarget)
+        return json(
+            "id" to projectId(host.id),
+            "nickname" to host.nickname,
+            "hostname" to host.hostname,
+            "port" to host.port,
+            "username" to host.username,
+            "protocol" to host.protocol,
+            "os_type" to host.osType,
+            "agent_target" to host.agentTarget,
+            "target" to target.id,
+            "target_supported" to target.supported,
+            "detection" to detection(availability.filter { it.hostId == host.id }),
+        )
+    }
+
+    fun hostRows(hosts: List<Host>, availability: List<AgentAvailability>): JSONArray = array(*hosts.map { hostRow(it, availability) }.toTypedArray())
+
+    /**
+     * What the product holds for one host: `checked` is false until some probe answered for it, and each Agent
+     * that did answer carries its own state, the absolute executable and version it was found at, and the
+     * capabilities it declared — an unrecognized probe code keeps no invented state.
+     */
+    fun detection(rows: List<AgentAvailability>): JSONObject = json(
+        "checked" to rows.isNotEmpty(),
+        "agents" to array(*rows.map(::agentRow).toTypedArray()),
+    )
+
+    private fun agentRow(row: AgentAvailability): JSONObject = json(
+        "id" to row.kind.wireName,
+        "state" to probeStateOf(row, refreshing = false).name.lowercase(),
+        "executable" to row.executable,
+        "version" to row.version,
+        "capabilities" to row.capabilities?.asObject(),
+        "error" to row.error,
+    )
 
     /**
      * Storage key of one conversation's draft: the identity the product itself resumes the session by, so a

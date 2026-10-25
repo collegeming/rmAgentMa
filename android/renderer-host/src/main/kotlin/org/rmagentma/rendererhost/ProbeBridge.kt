@@ -116,6 +116,7 @@ class ProbeBridge(
                 "config.set" -> setOf("conversationId", "optionId")
                 "approvals.review" -> setOf("conversationId", "requestRef")
                 "project.read" -> setOf("projectId")
+                "hosts.update", "hosts.delete", "detection.refresh" -> setOf("hostId")
                 in CONVERSATION_ACTIONS -> setOf("conversationId")
                 else -> emptySet()
             }
@@ -201,7 +202,9 @@ class ProbeBridge(
             "conversations.list", "conversation.read", "messages.list", "messages.latest",
             "runtime.ensure", "config.read", "config.set", "messages.send", "turn.cancel",
             "approvals.list", "approvals.review", "runtime.visible", "commands.list", "usage.read",
-            "artifacts.list", "projects.list", "project.read", "assistants.list", "agents.list",
+            "artifacts.list", "projects.list", "project.read", "hosts.list", "hosts.create",
+            "hosts.update", "hosts.delete", "detection.refresh",
+            "assistants.list", "agents.list",
             "providers.list", "mcp.list", "skills.list", "cron.list", "teams.list", "adapters.list",
             "events.subscribe", "events.unsubscribe", "runtime.snapshot", "draft.load", "draft.save",
             "attachment.begin", "attachment.chunk", "attachment.finish", "attachment.abort",

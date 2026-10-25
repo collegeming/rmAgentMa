@@ -244,6 +244,10 @@
     <string name="agent_view_tui">TUI</string>
     <!-- Opens the packaged renderer host; only a debug build carrying the verified renderer assets shows it. -->
     <string name="agent_view_renderer">渲染器</string>
+    <!-- Fallback shell: the renderer did not take over the main path; %1$s is the failure code it reported. -->
+    <string name="renderer_fallback_notice">渲染器不可用（故障码：%1$s），已回退到主机列表。</string>
+    <!-- Fallback shell: hand the main path to the renderer again. -->
+    <string name="renderer_fallback_retry">重试渲染器</string>
     <!-- Explains that the TUI runs as its own SSH session in the terminal. -->
     <string name="agent_tui_notice">TUI 会以独立的 SSH 会话在终端中打开，使用本会话的 Agent 与工作目录。</string>
     <!-- Warnings that the ACP process of this conversation may keep the same session open. -->

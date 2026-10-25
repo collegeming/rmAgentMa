@@ -18,6 +18,7 @@
 package org.connectbot.renderer
 
 import android.annotation.SuppressLint
+import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.Handler
@@ -40,11 +41,13 @@ import androidx.webkit.WebViewFeature
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.runBlocking
 import org.connectbot.R
+import org.connectbot.ui.MainActivity
 import org.json.JSONObject
 import org.rmagentma.rendererhost.ProbeAssets
 import org.rmagentma.rendererhost.ProbeBridge
 import org.rmagentma.rendererhost.ProbeResult
 import org.rmagentma.rendererhost.json
+import timber.log.Timber
 import java.util.concurrent.Executors
 import javax.inject.Inject
 
@@ -53,9 +56,26 @@ import javax.inject.Inject
  * every action from the product's own repositories instead of synthetic data: the conversation list is the
  * product's session index, selecting a row opens it through the same repository switch the Compose chat uses,
  * and actions the product cannot serve fail with a stable code.
+ *
+ * A renderer that cannot serve its surface never exits silently: it restarts [MainActivity] with one of the
+ * stable failure codes below, and that activity reopens the Compose fallback with the code and its retry entry.
  */
 @AndroidEntryPoint
 class RendererHostActivity : ComponentActivity() {
+    companion object {
+        /** Packaged renderer assets are absent or their manifest cannot be read. */
+        const val FAILURE_ASSETS_MISSING = "renderer_assets_missing"
+
+        /** This system WebView lacks the web message bridge the renderer needs. */
+        const val FAILURE_BRIDGE_UNSUPPORTED = "renderer_bridge_unsupported"
+
+        /** The renderer's entry document failed to load. */
+        const val FAILURE_LOAD_FAILED = "renderer_load_failed"
+
+        /** The WebView render process holding the renderer exited. */
+        const val FAILURE_RENDER_PROCESS_GONE = "renderer_gone"
+    }
+
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
     private lateinit var container: LinearLayout
@@ -78,6 +98,10 @@ class RendererHostActivity : ComponentActivity() {
     @Volatile
     private var closed = false
 
+    // One failure decides the exit: a second report from the dying WebView must not restart the shell twice.
+    @Volatile
+    private var leaving = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -94,8 +118,8 @@ class RendererHostActivity : ComponentActivity() {
             main.post {
                 when {
                     closed -> Unit
-                    assets == null -> status(R.string.renderer_assets_missing)
-                    !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) -> status(R.string.renderer_bridge_unsupported)
+                    assets == null -> fail(FAILURE_ASSETS_MISSING)
+                    !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) -> fail(FAILURE_BRIDGE_UNSUPPORTED)
                     else -> openRenderer(assets)
                 }
             }
@@ -122,7 +146,11 @@ class RendererHostActivity : ComponentActivity() {
         view.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse {
                 if (request.method != "GET" || !ProbeBridge.isOrigin("${request.url.scheme}://${request.url.encodedAuthority}")) return ProbeAssets.failure()
-                return loader.shouldInterceptRequest(request.url) ?: ProbeAssets.failure()
+                val response = loader.shouldInterceptRequest(request.url)
+                // The document itself must come out of the packaged manifest: a path the manifest does not list
+                // is a load this host cannot serve, and the shell states that instead of showing a 404 body.
+                if (request.isForMainFrame && (response == null || response.statusCode >= 400)) main.post { fail(FAILURE_LOAD_FAILED) }
+                return response ?: ProbeAssets.failure()
             }
 
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = !request.isForMainFrame || !ProbeBridge.isEntry(request.url.toString())
@@ -144,7 +172,7 @@ class RendererHostActivity : ComponentActivity() {
 
             override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
                 dispose(view)
-                status(R.string.renderer_gone)
+                fail(FAILURE_RENDER_PROCESS_GONE)
                 return true
             }
         }
@@ -232,6 +260,20 @@ class RendererHostActivity : ComponentActivity() {
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
             },
         )
+    }
+
+    /**
+     * Leaves the renderer with one stable code instead of a dead surface: the restarted activity shows that
+     * code on the Compose fallback together with its retry entry.
+     */
+    private fun fail(code: String) {
+        if (leaving || closed) return
+        leaving = true
+        Timber.w("Renderer host failed: %s", code)
+        startActivity(
+            Intent(this, MainActivity::class.java).putExtra(MainActivity.EXTRA_RENDERER_FAILURE, code),
+        )
+        finish()
     }
 
     override fun onDestroy() {

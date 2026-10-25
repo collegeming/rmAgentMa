@@ -20,9 +20,16 @@ package org.connectbot.renderer
 import kotlinx.coroutines.CancellationException
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConfigBusyException
+import org.connectbot.data.entity.Host
 import org.json.JSONArray
 import org.json.JSONObject
+import org.rmagentma.core.AGENT_TARGET_NATIVE
+import org.rmagentma.core.AGENT_TARGET_WSL_PREFIX
 import org.rmagentma.core.AgentSession
+import org.rmagentma.core.HOST_OS_LINUX
+import org.rmagentma.core.HOST_OS_WINDOWS
+import org.rmagentma.core.remoteTargetOf
+import org.rmagentma.core.validWslDistribution
 import org.rmagentma.rendererhost.ProbeFailure
 import org.rmagentma.rendererhost.ProbeLimits
 import org.rmagentma.rendererhost.ProbeResult
@@ -44,6 +51,8 @@ internal class RendererActions(private val source: RendererSource) {
             dispatch(action, params, query, body)
         } catch (failure: ProbeFailure) {
             fail(failure.status, failure.code, failure.code)
+        } catch (invalid: InvalidHost) {
+            fail(422, "HOST_INVALID", invalid.reason)
         } catch (error: Exception) {
             fail(500, "HANDLE_FAILED", "无法处理该请求：${error.message ?: error.javaClass.simpleName}")
         }
@@ -70,6 +79,11 @@ internal class RendererActions(private val source: RendererSource) {
         "usage.read" -> usage(params.optString("conversationId"))
         "projects.list" -> success(RendererProjection.projects(source.snapshot().hosts))
         "project.read" -> readProject(params)
+        "hosts.list" -> listHosts()
+        "hosts.create" -> createHost(body)
+        "hosts.update" -> updateHost(params, body)
+        "hosts.delete" -> deleteHost(params)
+        "detection.refresh" -> refreshDetection(params)
         "assistants.list" -> success(RendererProjection.assistants(source.snapshot().availability))
         "agents.list" -> success(RendererProjection.agents(source.snapshot().availability))
         "adapters.list" -> success(RendererProjection.adapters(source.snapshot().availability))
@@ -442,6 +456,200 @@ internal class RendererActions(private val source: RendererSource) {
         return open ?: indexed
     }
 
+    /**
+     * The product's own saved hosts, each with whatever probe verdict it already holds. These are the SSH hosts
+     * an Agent can run on — the same rows the renderer already draws as projects — so a host of another protocol
+     * is not listed here, and a row nobody probed says so instead of looking installed.
+     */
+    private suspend fun listHosts(): ProbeResult {
+        val snapshot = source.snapshot()
+        val items = RendererProjection.hostRows(snapshot.hosts, snapshot.availability)
+        return success(json("items" to items, "total" to items.length(), "has_more" to false))
+    }
+
+    /**
+     * Creates one saved host from the fields of the request body. Structured fields travel in the body because the
+     * bridge carries only string parameters; nickname and address are required, everything else takes the value a
+     * new SSH host is created with. The nickname column is unique across every host, so a taken name is refused
+     * before anything is written.
+     */
+    private suspend fun createHost(body: JSONObject): ProbeResult {
+        val fields = hostFields(body)
+        val nickname = fields.nickname?.takeIf { it.isNotBlank() } ?: invalid("昵称不能为空。")
+        val protocol = fields.protocol ?: SSH_PROTOCOL
+        if (protocol != SSH_PROTOCOL) invalid("只能新建 SSH 主机：Agent 连接需要 SSH。")
+        val hostname = fields.hostname?.takeIf { it.isNotBlank() } ?: invalid("地址不能为空。")
+        val target = hostTarget(fields.osType ?: HOST_OS_LINUX, fields.agentTarget ?: AGENT_TARGET_NATIVE)
+        if (source.hostByNickname(nickname) != null) return fail(409, "HOST_NICKNAME_TAKEN", "已有同名主机：$nickname。")
+        val created = Host.createSshHost(nickname, hostname, fields.port ?: DEFAULT_SSH_PORT, fields.username.orEmpty())
+            .copy(osType = target.osType, agentTarget = target.agentTarget)
+        val saved = try {
+            source.saveHost(created)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "HOST_SAVE_FAILED", "主机未能保存：${reason(error)}")
+        }
+        return success(RendererProjection.hostRow(saved, source.snapshot().availability))
+    }
+
+    /**
+     * Updates one saved host in place. A field the body omits keeps what the row holds, and the row is written back
+     * as itself with only those fields replaced, so a changed address rewrites that address alone: the id, the
+     * saved key association, the profile, the jump host and the known hosts of this host stay its own.
+     */
+    private suspend fun updateHost(params: JSONObject, body: JSONObject): ProbeResult {
+        val host = requestedHost(params) ?: return hostNotFound()
+        val fields = hostFields(body)
+        val nickname = (fields.nickname ?: host.nickname).takeIf { it.isNotBlank() } ?: invalid("昵称不能为空。")
+        if (fields.protocol != null && fields.protocol != SSH_PROTOCOL) invalid("SSH 主机不能改成 ${fields.protocol}：Agent 连接需要 SSH。")
+        val hostname = (fields.hostname ?: host.hostname).takeIf { it.isNotBlank() } ?: invalid("地址不能为空。")
+        val target = hostTarget(fields.osType ?: host.osType, fields.agentTarget ?: host.agentTarget)
+        if (nickname != host.nickname && source.hostByNickname(nickname) != null) {
+            return fail(409, "HOST_NICKNAME_TAKEN", "已有同名主机：$nickname。")
+        }
+        val updated = host.copy(
+            nickname = nickname,
+            hostname = hostname,
+            port = fields.port ?: host.port,
+            username = fields.username ?: host.username,
+            osType = target.osType,
+            agentTarget = target.agentTarget,
+        )
+        val saved = try {
+            source.saveHost(updated)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "HOST_SAVE_FAILED", "主机未能保存：${reason(error)}")
+        }
+        return success(RendererProjection.hostRow(saved, source.snapshot().availability))
+    }
+
+    /**
+     * Deletes one saved host. The confirmation a user must give is the front end's own step: this host performs the
+     * real deletion and nothing else, and the product's own repository readers drop what that host held — its saved
+     * credential, its indexed sessions and its detections.
+     */
+    private suspend fun deleteHost(params: JSONObject): ProbeResult {
+        val host = requestedHost(params) ?: return hostNotFound()
+        try {
+            source.deleteHost(host)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "HOST_DELETE_FAILED", "主机未能删除：${reason(error)}")
+        }
+        return success(json("deleted" to true, "host_id" to RendererProjection.projectId(host.id)))
+    }
+
+    /**
+     * One probe of one saved host's Agent target, through the repository entry that also writes every executable,
+     * version and capability it verified into `AgentDetectionStore`. Each Agent answers with its own state and what
+     * the probe found. A Windows host whose Agent would run on Windows itself has no entry in this app, so its
+     * Agents answer `target_unsupported` rather than looking installed, and a probe that never reached the host
+     * keeps the path it detected before instead of claiming a new one.
+     */
+    private suspend fun refreshDetection(params: JSONObject): ProbeResult {
+        val host = requestedHost(params) ?: return hostNotFound()
+        val rows = try {
+            source.refreshDetection(host.id)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "DETECTION_FAILED", "探测未能完成：${reason(error)}")
+        }
+        val target = remoteTargetOf(host.osType, host.agentTarget)
+        return success(
+            json(
+                "host_id" to RendererProjection.projectId(host.id),
+                "target" to target.id,
+                "target_supported" to target.supported,
+                "detection" to RendererProjection.detection(rows),
+            ),
+        )
+    }
+
+    /** The saved host an id names; the id is the same `host-<id>` a project row carries. */
+    private suspend fun requestedHost(params: JSONObject): Host? {
+        val hostId = RendererProjection.hostId(params.optString("hostId")) ?: return null
+        return source.snapshot().hosts.firstOrNull { it.id == hostId }
+    }
+
+    private fun hostNotFound(): ProbeResult = fail(404, "HOST_NOT_FOUND", "没有这台主机。")
+
+    /** One create or update body; a field the body does not carry stays null so an update can send only changes. */
+    private data class HostFields(
+        val nickname: String?,
+        val hostname: String?,
+        val port: Int?,
+        val username: String?,
+        val protocol: String?,
+        val osType: String?,
+        val agentTarget: String?,
+    )
+
+    private fun hostFields(body: JSONObject): HostFields = HostFields(
+        nickname = hostText(body, "nickname", "昵称", MAX_NICKNAME),
+        hostname = hostText(body, "hostname", "地址", MAX_HOSTNAME),
+        port = hostPort(body),
+        username = hostText(body, "username", "用户名", MAX_USERNAME),
+        protocol = hostText(body, "protocol", "协议", MAX_PROTOCOL),
+        osType = hostText(body, "os_type", "操作系统", MAX_OS_TYPE),
+        agentTarget = hostText(body, "agent_target", "Agent 目标", MAX_AGENT_TARGET),
+    )
+
+    /** A field that is absent or explicitly null carries nothing; any other shape has to be a usable string. */
+    private fun hostText(body: JSONObject, key: String, label: String, max: Int): String? {
+        if (body.isNull(key)) return null
+        val text = body.opt(key) as? String ?: invalid("$label 无效。")
+        if (text.length > max) invalid("$label 无效。")
+        if (text.any { it.isISOControl() }) invalid("$label 不能包含控制字符。")
+        return text
+    }
+
+    /** A port arrives as a number or as a numeric string; anything that is not a whole port number is refused. */
+    private fun hostPort(body: JSONObject): Int? {
+        if (body.isNull("port")) return null
+        val value = body.opt("port")
+        val parsed = when (value) {
+            is Number -> value.toDouble().takeIf { it % 1.0 == 0.0 }?.toInt()
+            is String -> value.toIntOrNull()
+            else -> null
+        }
+        return parsed?.takeIf { it in 1..MAX_PORT } ?: invalid("端口必须是 1..$MAX_PORT 的整数。")
+    }
+
+    /** The OS and Agent target a saved host may carry, both checked against what this app can address. */
+    private data class HostTarget(val osType: String, val agentTarget: String)
+
+    /**
+     * A Windows host may hold the Agent in one WSL distribution it names, or on Windows itself — a target this app
+     * has no entry for, which every probe reports as unsupported. A Linux host runs its Agent in its own shell, so
+     * that is the only target stored for it, and no other value is stored as a target nothing could reach.
+     */
+    private fun hostTarget(osType: String, agentTarget: String): HostTarget = when (osType) {
+        HOST_OS_LINUX -> HostTarget(HOST_OS_LINUX, AGENT_TARGET_NATIVE)
+
+        HOST_OS_WINDOWS -> when {
+            agentTarget == AGENT_TARGET_NATIVE -> HostTarget(HOST_OS_WINDOWS, AGENT_TARGET_NATIVE)
+            agentTarget.startsWith(AGENT_TARGET_WSL_PREFIX) &&
+                validWslDistribution(agentTarget.removePrefix(AGENT_TARGET_WSL_PREFIX)) -> HostTarget(HOST_OS_WINDOWS, agentTarget)
+
+            else -> invalid("Windows 主机的 Agent 目标必须是 native 或 wsl:<发行版>。")
+        }
+
+        else -> invalid("操作系统只能是 linux 或 windows。")
+    }
+
+    /** A create or update field this host cannot store; [handle] answers it as `422 HOST_INVALID`. */
+    private class InvalidHost(val reason: String) : RuntimeException(reason)
+
+    private fun invalid(reason: String): Nothing = throw InvalidHost(reason)
+
+    /** The repository failure behind a stable code, kept readable for whoever has to fix it. */
+    private fun reason(error: Exception): String = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
+
     /** The snapshot of the conversation [conversationId] names, or null when a different one is open. */
     private suspend fun openFor(conversationId: String): RendererSnapshot? = source.snapshot().takeIf { namesOpen(it, conversationId) }
 
@@ -532,5 +740,16 @@ internal class RendererActions(private val source: RendererSource) {
         val THEME_VALUES = setOf("light", "dark", "system")
         const val DEFAULT_PAGE = 50
         const val MAX_PAGE = 200
+
+        /** The protocol a host the renderer creates or keeps has to carry: an Agent is reached over SSH. */
+        const val SSH_PROTOCOL = "ssh"
+        const val DEFAULT_SSH_PORT = 22
+        const val MAX_PORT = 65535
+        const val MAX_NICKNAME = 100
+        const val MAX_HOSTNAME = 255
+        const val MAX_USERNAME = 128
+        const val MAX_PROTOCOL = 16
+        const val MAX_OS_TYPE = 16
+        const val MAX_AGENT_TARGET = 128
     }
 }

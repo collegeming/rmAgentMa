@@ -67,6 +67,23 @@ internal class FakeSource : RendererSource {
     /** Every (host, directory) pair a project read asked to list, so a test can prove the listing really ran. */
     val workspaceCalls = mutableListOf<Pair<Long, String>>()
 
+    /** Every host a renderer route asked the repository to store, and every one it asked to delete. */
+    val savedHosts = mutableListOf<Host>()
+    val deletedHosts = mutableListOf<Host>()
+
+    /** Every host a refresh was asked to probe, so a test can prove the probe really ran. */
+    val probedHosts = mutableListOf<Long>()
+
+    /** The failure a host write or a probe reports instead of succeeding. */
+    var hostFailure: Exception? = null
+    var detectionFailure: Exception? = null
+
+    /** The rows one probe produces, keyed by host id; a host missing here keeps the rows it already had. */
+    var probeRows: Map<Long, List<AgentAvailability>> = emptyMap()
+
+    /** The id an inserted host is assigned, as a real insert assigns one. */
+    var nextHostId = 100L
+
     override suspend fun snapshot(): RendererSnapshot = RendererSnapshot(
         session = session,
         host = host,
@@ -140,5 +157,29 @@ internal class FakeSource : RendererSource {
         workspaceCalls += hostId to directory
         workspaceFailure?.let { throw it }
         return workspace
+    }
+
+    override suspend fun hostByNickname(nickname: String): Host? = hosts.firstOrNull { it.nickname == nickname }
+
+    override suspend fun saveHost(host: Host): Host {
+        hostFailure?.let { throw it }
+        val saved = if (host.id > 0L) host else host.copy(id = nextHostId++)
+        savedHosts += saved
+        // The row a real repository stores is the row its next read answers with.
+        hosts = hosts.filterNot { it.id == saved.id } + saved
+        return saved
+    }
+
+    override suspend fun deleteHost(host: Host) {
+        hostFailure?.let { throw it }
+        deletedHosts += host
+        hosts = hosts.filterNot { it.id == host.id }
+    }
+
+    override suspend fun refreshDetection(hostId: Long): List<AgentAvailability> {
+        detectionFailure?.let { throw it }
+        probedHosts += hostId
+        probeRows[hostId]?.let { rows -> availability = availability.filterNot { it.hostId == hostId } + rows }
+        return availability.filter { it.hostId == hostId }
     }
 }

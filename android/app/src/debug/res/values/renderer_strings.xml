@@ -1,11 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Renderer host surface: the packaged assets were absent or their manifest could not be read. -->
-    <string name="renderer_assets_missing">此构建未打包可用的渲染器资源。</string>
-    <!-- Renderer host surface: the system WebView lacks the web message bridge feature. -->
-    <string name="renderer_bridge_unsupported">当前 WebView 不支持渲染器所需的消息通道。</string>
     <!-- Renderer host surface: navigation away from the packaged renderer entry was blocked. -->
     <string name="renderer_navigation_blocked">已阻止离开渲染器入口的导航。</string>
-    <!-- Renderer host surface: the WebView render process exited. -->
-    <string name="renderer_gone">渲染器进程已退出，请返回后重新打开。</string>
 </resources>

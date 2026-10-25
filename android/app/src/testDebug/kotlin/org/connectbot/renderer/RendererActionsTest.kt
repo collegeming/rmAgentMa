@@ -33,6 +33,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentConfigOption
 import org.rmagentma.core.AgentConfigValue
 import org.rmagentma.core.AgentEvent
@@ -44,6 +45,7 @@ import org.rmagentma.core.DirectoryEntryKind
 import org.rmagentma.core.DirectoryListing
 import org.rmagentma.core.DirectoryListingProblem
 import org.rmagentma.core.RemoteDirectoryEntry
+import org.rmagentma.core.WINDOWS_NATIVE_UNSUPPORTED
 import org.rmagentma.core.ZcodeConfigChange
 import org.rmagentma.core.ZcodeConfigStatus
 import org.rmagentma.core.ZcodeModelOption
@@ -334,6 +336,423 @@ class RendererActionsTest {
         assertThat(projectRoot(RendererActions(indexedOnly), "host-7").getString("display_path")).isEqualTo("/workspace/new")
         assertThat(indexedOnly.workspaceCalls).containsExactly(7L to "/workspace/new")
     }
+
+    // ==================== Hosts and Agent detection ====================
+
+    @Test
+    fun theHostListIsTheProductsOwnHostsWithTheProbeVerdictEachOfThemHolds() = runTest {
+        val windows = savedHost.copy(id = 8, nickname = "windows-box", osType = "windows", agentTarget = "native")
+        val source = FakeSource().apply {
+            hosts = listOf(savedHost, windows)
+            availability = listOf(availableRow(7), targetUnsupportedRow(8))
+        }
+        val result = RendererActions(source).handle("hosts.list", payload())
+        assertThat(result.status).isEqualTo(200)
+        val data = dataOf(result)
+        assertThat(data.getInt("total")).isEqualTo(2)
+        val rows = data.getJSONArray("items")
+        val linux = rows.getJSONObject(0)
+        assertThat(linux.getString("id")).isEqualTo("host-7")
+        assertThat(linux.getString("nickname")).isEqualTo("工作机")
+        assertThat(linux.getString("hostname")).isEqualTo("example.test")
+        assertThat(linux.getInt("port")).isEqualTo(22)
+        assertThat(linux.getString("username")).isEqualTo("colle")
+        assertThat(linux.getString("protocol")).isEqualTo("ssh")
+        assertThat(linux.getString("os_type")).isEqualTo("linux")
+        assertThat(linux.getString("agent_target")).isEqualTo("native")
+        assertThat(linux.getString("target")).isEqualTo("posix")
+        assertThat(linux.getBoolean("target_supported")).isTrue()
+        val detection = linux.getJSONObject("detection")
+        assertThat(detection.getBoolean("checked")).isTrue()
+        val kimi = detection.getJSONArray("agents").getJSONObject(0)
+        assertThat(kimi.getString("id")).isEqualTo("kimi")
+        assertThat(kimi.getString("state")).isEqualTo("available")
+        assertThat(kimi.getString("executable")).isEqualTo("/usr/local/bin/kimi")
+        assertThat(kimi.getString("version")).isEqualTo("1.0.0")
+        assertThat(kimi.getJSONObject("capabilities").getBoolean("acp")).isTrue()
+
+        // A Windows host whose Agent would run on Windows itself has no entry in this app, and its row says so.
+        val native = rows.getJSONObject(1)
+        assertThat(native.getString("os_type")).isEqualTo("windows")
+        assertThat(native.getString("agent_target")).isEqualTo("native")
+        assertThat(native.getString("target")).isEqualTo("windows-native")
+        assertThat(native.getBoolean("target_supported")).isFalse()
+        val unsupported = native.getJSONObject("detection").getJSONArray("agents").getJSONObject(0)
+        assertThat(unsupported.getString("state")).isEqualTo("target_unsupported")
+        assertThat(unsupported.getString("executable")).isEmpty()
+    }
+
+    @Test
+    fun anUnprobedHostIsListedAsUncheckedInsteadOfInstalled() = runTest {
+        val source = FakeSource().apply { hosts = listOf(savedHost) }
+        val row = dataOf(RendererActions(source).handle("hosts.list", payload())).getJSONArray("items").getJSONObject(0)
+        val detection = row.getJSONObject("detection")
+        assertThat(detection.getBoolean("checked")).isFalse()
+        assertThat(detection.getJSONArray("agents").length()).isZero()
+    }
+
+    @Test
+    fun creatingAHostStoresEveryFieldInTheBodyAndAnswersTheStoredRow() = runTest {
+        val source = FakeSource()
+        val result = RendererActions(source).handle(
+            "hosts.create",
+            payload(
+                body = mapOf(
+                    "nickname" to "新机",
+                    "hostname" to "192.0.2.10",
+                    "port" to 2222,
+                    "username" to "colle",
+                    "protocol" to "ssh",
+                    "os_type" to "windows",
+                    "agent_target" to "wsl:Ubuntu-24.04",
+                ),
+            ),
+        )
+        assertThat(result.status).isEqualTo(200)
+        val stored = source.savedHosts.single()
+        // The insert is the product's own SSH host helper: a new id, no key association, every other column default.
+        assertThat(stored.id).isEqualTo(100L)
+        assertThat(stored.nickname).isEqualTo("新机")
+        assertThat(stored.hostname).isEqualTo("192.0.2.10")
+        assertThat(stored.port).isEqualTo(2222)
+        assertThat(stored.username).isEqualTo("colle")
+        assertThat(stored.protocol).isEqualTo("ssh")
+        assertThat(stored.osType).isEqualTo("windows")
+        assertThat(stored.agentTarget).isEqualTo("wsl:Ubuntu-24.04")
+        assertThat(stored.pubkeyId).isEqualTo(-1L)
+        val answered = dataOf(result)
+        assertThat(answered.getString("id")).isEqualTo("host-100")
+        assertThat(answered.getString("target")).isEqualTo("wsl:Ubuntu-24.04")
+        assertThat(answered.getBoolean("target_supported")).isTrue()
+        assertThat(answered.getJSONObject("detection").getBoolean("checked")).isFalse()
+
+        // Only the nickname and the address are required; everything else is what a new SSH host carries.
+        val minimal = RendererActions(source).handle("hosts.create", payload(body = mapOf("nickname" to "默认机", "hostname" to "default.test")))
+        assertThat(minimal.status).isEqualTo(200)
+        val defaults = source.savedHosts.last()
+        assertThat(defaults.port).isEqualTo(22)
+        assertThat(defaults.username).isEmpty()
+        assertThat(defaults.osType).isEqualTo("linux")
+        assertThat(defaults.agentTarget).isEqualTo("native")
+    }
+
+    @Test
+    fun aHostIsNotCreatedFromATakenNicknameOrAFieldNothingCanUse() = runTest {
+        val source = FakeSource().apply { hosts = listOf(savedHost) }
+        val taken = RendererActions(source).handle("hosts.create", payload(body = mapOf("nickname" to "工作机", "hostname" to "other.test")))
+        assertThat(taken.status).isEqualTo(409)
+        assertThat(codeOf(taken)).isEqualTo("HOST_NICKNAME_TAKEN")
+
+        val refused = listOf(
+            mapOf("nickname" to " ", "hostname" to "a.test"),
+            mapOf("hostname" to "a.test"),
+            mapOf("nickname" to "n"),
+            mapOf("nickname" to "n", "hostname" to "a.test", "port" to 0),
+            mapOf("nickname" to "n", "hostname" to "a.test", "port" to 65536),
+            mapOf("nickname" to "n", "hostname" to "a.test", "port" to "22.5"),
+            mapOf("nickname" to "n", "hostname" to "a.test", "port" to "ssh"),
+            mapOf("nickname" to "n", "hostname" to "a.test", "port" to true),
+            mapOf("nickname" to "n", "hostname" to "a.test", "username" to "col\nle"),
+            mapOf("nickname" to "n", "hostname" to "a.test", "os_type" to "plan9"),
+            mapOf("nickname" to "n", "hostname" to "a.test", "os_type" to "windows", "agent_target" to "Ubuntu"),
+            mapOf("nickname" to "n", "hostname" to "a.test", "protocol" to "telnet"),
+        )
+        for (body in refused) {
+            val result = RendererActions(source).handle("hosts.create", payload(body = body))
+            assertThat(result.status).describedAs(body.toString()).isEqualTo(422)
+            assertThat(codeOf(result)).describedAs(body.toString()).isEqualTo("HOST_INVALID")
+            // The reason travels with the code so the page can tell which field it has to fix.
+            assertThat((result.body as JSONObject).getString("error")).describedAs(body.toString()).isNotBlank()
+        }
+        // Nothing was written for any refused request, and the stored row is still the one that was there.
+        assertThat(source.savedHosts).isEmpty()
+        assertThat(source.hosts).containsExactly(savedHost)
+    }
+
+    @Test
+    fun changingAHostsAddressRewritesThatAddressAlone() = runTest {
+        val source = FakeSource().apply { hosts = listOf(savedHost) }
+        val result = RendererActions(source).handle(
+            "hosts.update",
+            payload(params = mapOf("hostId" to "host-7"), body = mapOf("hostname" to "198.51.100.7")),
+        )
+        assertThat(result.status).isEqualTo(200)
+        val stored = source.savedHosts.single()
+        assertThat(stored.id).isEqualTo(7L)
+        assertThat(stored.hostname).isEqualTo("198.51.100.7")
+        // Everything else about this host is the row it already was: its key association, profile, jump host, the
+        // algorithm its known host was trusted under and the fields the page never sent stay untouched.
+        assertThat(stored.nickname).isEqualTo("工作机")
+        assertThat(stored.username).isEqualTo("colle")
+        assertThat(stored.port).isEqualTo(22)
+        assertThat(stored.pubkeyId).isEqualTo(42L)
+        assertThat(stored.profileId).isEqualTo(3L)
+        assertThat(stored.jumpHostId).isEqualTo(5L)
+        assertThat(stored.hostKeyAlgo).isEqualTo("ssh-ed25519")
+        assertThat(stored.color).isEqualTo("blue")
+        assertThat(stored.lastConnect).isEqualTo(1_700_000_000_000L)
+        assertThat(dataOf(result).getString("hostname")).isEqualTo("198.51.100.7")
+    }
+
+    @Test
+    fun aHostIsNotRenamedOntoAnotherHostsNickname() = runTest {
+        val second = savedHost.copy(id = 8, nickname = "备用机")
+        val source = FakeSource().apply { hosts = listOf(savedHost, second) }
+        val taken = RendererActions(source).handle(
+            "hosts.update",
+            payload(params = mapOf("hostId" to "host-7"), body = mapOf("nickname" to "备用机")),
+        )
+        assertThat(taken.status).isEqualTo(409)
+        assertThat(codeOf(taken)).isEqualTo("HOST_NICKNAME_TAKEN")
+        assertThat(source.savedHosts).isEmpty()
+
+        // Keeping the name it already has is not a conflict with itself.
+        val kept = RendererActions(source).handle(
+            "hosts.update",
+            payload(params = mapOf("hostId" to "host-7"), body = mapOf("nickname" to "工作机", "username" to "root")),
+        )
+        assertThat(kept.status).isEqualTo(200)
+        assertThat(source.savedHosts.single().username).isEqualTo("root")
+    }
+
+    @Test
+    fun aWindowsHostCanBeGivenOneWslDistributionAndNothingElse() = runTest {
+        val windows = savedHost.copy(id = 8, nickname = "windows-box", osType = "windows", agentTarget = "native")
+        val source = FakeSource().apply { hosts = listOf(windows) }
+        val moved = RendererActions(source).handle(
+            "hosts.update",
+            payload(params = mapOf("hostId" to "host-8"), body = mapOf("agent_target" to "wsl:Ubuntu-24.04")),
+        )
+        assertThat(moved.status).isEqualTo(200)
+        assertThat(source.savedHosts.single().agentTarget).isEqualTo("wsl:Ubuntu-24.04")
+        assertThat(source.savedHosts.single().osType).isEqualTo("windows")
+        assertThat(dataOf(moved).getString("target")).isEqualTo("wsl:Ubuntu-24.04")
+
+        // A value that could not survive the Windows shell, or an OS this app cannot address, is refused whole.
+        for (body in listOf(
+            mapOf("agent_target" to "Ubuntu 24.04; rm -rf /"),
+            mapOf("agent_target" to "wsl:"),
+            mapOf("os_type" to "windows 11"),
+        )) {
+            val result = RendererActions(source).handle("hosts.update", payload(params = mapOf("hostId" to "host-8"), body = body))
+            assertThat(result.status).describedAs(body.toString()).isEqualTo(422)
+            assertThat(codeOf(result)).isEqualTo("HOST_INVALID")
+        }
+        assertThat(source.savedHosts).hasSize(1)
+    }
+
+    @Test
+    fun deletingAHostRemovesThatHostAlone() = runTest {
+        val source = FakeSource().apply { hosts = listOf(savedHost, savedHost.copy(id = 8, nickname = "备用机")) }
+        val result = RendererActions(source).handle("hosts.delete", payload(params = mapOf("hostId" to "host-7")))
+        assertThat(result.status).isEqualTo(200)
+        assertThat(dataOf(result).getBoolean("deleted")).isTrue()
+        assertThat(source.deletedHosts.single().id).isEqualTo(7L)
+        assertThat(source.deletedHosts.single().nickname).isEqualTo("工作机")
+
+        // The host that was not named is still there, and the removed one cannot be deleted twice.
+        assertThat(source.hosts.map { it.id }).containsExactly(8L)
+        val again = RendererActions(source).handle("hosts.delete", payload(params = mapOf("hostId" to "host-7")))
+        assertThat(again.status).isEqualTo(404)
+        assertThat(codeOf(again)).isEqualTo("HOST_NOT_FOUND")
+    }
+
+    @Test
+    fun aRefreshAnswersEveryAgentsStateWithThePathVersionAndCapabilitiesItFound() = runTest {
+        val source = FakeSource().apply {
+            hosts = listOf(savedHost)
+            probeRows = mapOf(7L to AgentKind.entries.map { kind -> if (kind == AgentKind.KIMI) availableRow(7) else missingRow(7, kind) })
+        }
+        val result = RendererActions(source).handle("detection.refresh", payload(params = mapOf("hostId" to "host-7")))
+        assertThat(result.status).isEqualTo(200)
+        assertThat(source.probedHosts).containsExactly(7L)
+        val data = dataOf(result)
+        assertThat(data.getString("host_id")).isEqualTo("host-7")
+        assertThat(data.getString("target")).isEqualTo("posix")
+        assertThat(data.getBoolean("target_supported")).isTrue()
+        val detection = data.getJSONObject("detection")
+        assertThat(detection.getBoolean("checked")).isTrue()
+        val agents = detection.getJSONArray("agents")
+        assertThat(agents.length()).isEqualTo(AgentKind.entries.size)
+        val kimi = agents.getJSONObject(0)
+        assertThat(kimi.getString("id")).isEqualTo("kimi")
+        assertThat(kimi.getString("state")).isEqualTo("available")
+        assertThat(kimi.getString("executable")).isEqualTo("/usr/local/bin/kimi")
+        assertThat(kimi.getString("version")).isEqualTo("1.0.0")
+        assertThat(kimi.getJSONObject("capabilities").getBoolean("acp")).isTrue()
+        val dsh = agents.getJSONObject(AgentKind.DSH.ordinal)
+        assertThat(dsh.getString("state")).isEqualTo("not_installed")
+        assertThat(dsh.getString("executable")).isEmpty()
+        assertThat(dsh.getString("error")).isEqualTo("executable_missing")
+    }
+
+    @Test
+    fun aWindowsHostsOwnAgentTargetIsNeverReportedAsUsable() = runTest {
+        val windows = savedHost.copy(id = 8, nickname = "windows-box", osType = "windows", agentTarget = "native")
+        val source = FakeSource().apply {
+            hosts = listOf(windows)
+            probeRows = mapOf(8L to AgentKind.entries.map { targetUnsupportedRow(8, it) })
+        }
+        val data = dataOf(RendererActions(source).handle("detection.refresh", payload(params = mapOf("hostId" to "host-8"))))
+        assertThat(data.getBoolean("target_supported")).isFalse()
+        assertThat(data.getString("target")).isEqualTo("windows-native")
+        val agents = data.getJSONObject("detection").getJSONArray("agents")
+        assertThat(agents.length()).isEqualTo(AgentKind.entries.size)
+        for (index in 0 until agents.length()) {
+            val agent = agents.getJSONObject(index)
+            assertThat(agent.getString("state")).describedAs(agent.getString("id")).isEqualTo("target_unsupported")
+            assertThat(agent.getString("executable")).describedAs(agent.getString("id")).isEmpty()
+            assertThat(agent.getString("error")).isEqualTo(WINDOWS_NATIVE_UNSUPPORTED)
+        }
+    }
+
+    @Test
+    fun aProbeThatNeverReachedTheHostKeepsTheValuesItDetectedBefore() = runTest {
+        val before = availableRow(7)
+        val source = FakeSource().apply {
+            hosts = listOf(savedHost)
+            availability = listOf(before)
+            // The repository keeps what it detected before and reports the failure as the row's own error, so the
+            // page still knows where this Agent was found and why that path is not confirmed right now.
+            probeRows = mapOf(
+                7L to listOf(AgentAvailability(7L, AgentKind.KIMI, before.executable, false, "probe_transport_failed", before.version, before.capabilities)),
+            )
+        }
+        val kimi = dataOf(RendererActions(source).handle("detection.refresh", payload(params = mapOf("hostId" to "host-7"))))
+            .getJSONObject("detection").getJSONArray("agents").getJSONObject(0)
+        assertThat(kimi.getString("state")).isEqualTo("connect_failed")
+        assertThat(kimi.getString("executable")).isEqualTo("/usr/local/bin/kimi")
+        assertThat(kimi.getString("version")).isEqualTo("1.0.0")
+        assertThat(kimi.getJSONObject("capabilities").getBoolean("acp")).isTrue()
+        assertThat(kimi.getString("error")).isEqualTo("probe_transport_failed")
+    }
+
+    @Test
+    fun aHostThisPhoneDoesNotHaveIsNeverSavedDeletedOrProbed() = runTest {
+        val source = FakeSource()
+        for (action in listOf("hosts.update", "hosts.delete", "detection.refresh")) {
+            val result = RendererActions(source).handle(action, payload(params = mapOf("hostId" to "host-404")))
+            assertThat(result.status).describedAs(action).isEqualTo(404)
+            assertThat(codeOf(result)).describedAs(action).isEqualTo("HOST_NOT_FOUND")
+        }
+        // An id that is not one this host hands out names no host either, so nothing is written for it.
+        val unknown = RendererActions(source).handle("hosts.delete", payload(params = mapOf("hostId" to "7")))
+        assertThat(unknown.status).isEqualTo(404)
+        assertThat(source.deletedHosts).isEmpty()
+        assertThat(source.savedHosts).isEmpty()
+        assertThat(source.probedHosts).isEmpty()
+    }
+
+    @Test
+    fun aRepositoryFailureKeepsItsOwnCodeAndNeverLooksLikeSuccess() = runTest {
+        val failingWrite = FakeSource().apply {
+            hosts = listOf(savedHost)
+            hostFailure = IOException("数据库不可写")
+        }
+        val create = RendererActions(failingWrite).handle("hosts.create", payload(body = mapOf("nickname" to "n", "hostname" to "a.test")))
+        assertThat(create.status).isEqualTo(500)
+        assertThat(codeOf(create)).isEqualTo("HOST_SAVE_FAILED")
+        val update = RendererActions(failingWrite).handle(
+            "hosts.update",
+            payload(params = mapOf("hostId" to "host-7"), body = mapOf("hostname" to "b.test")),
+        )
+        assertThat(update.status).isEqualTo(500)
+        assertThat(codeOf(update)).isEqualTo("HOST_SAVE_FAILED")
+        val delete = RendererActions(failingWrite).handle("hosts.delete", payload(params = mapOf("hostId" to "host-7")))
+        assertThat(delete.status).isEqualTo(500)
+        assertThat(codeOf(delete)).isEqualTo("HOST_DELETE_FAILED")
+
+        val failingProbe = FakeSource().apply {
+            hosts = listOf(savedHost)
+            detectionFailure = IOException("探测通道不可用")
+        }
+        val refresh = RendererActions(failingProbe).handle("detection.refresh", payload(params = mapOf("hostId" to "host-7")))
+        assertThat(refresh.status).isEqualTo(500)
+        assertThat(codeOf(refresh)).isEqualTo("DETECTION_FAILED")
+        for (result in listOf(create, update, delete, refresh)) {
+            assertThat((result.body as JSONObject).getBoolean("success")).isFalse()
+            assertThat((result.body as JSONObject).getString("error")).isNotBlank()
+        }
+    }
+
+    @Test
+    fun theSharedBridgeAcceptsTheHostRoutesAndKeepsTheirParametersToHostId() {
+        val bridge = ProbeBridge(projectId = null)
+        bridge.commit(ProbeBridge.ENTRY)
+        val seen = mutableListOf<String>()
+        val execute = { action: String, payload: JSONObject ->
+            seen += "$action:${payload.getJSONObject("params").optString("hostId")}"
+            ProbeResult(body = json("success" to true))
+        }
+        val handshake = bridge.receive(ProbeBridge.ORIGIN, true, bridgeRequest("host.handshake", "", "renderer-1", JSONObject()), execute)!!
+        val document = handshake.getJSONObject("body").getString("documentId")
+        var serial = 2
+        for (action in listOf("hosts.list", "hosts.create")) {
+            val response = bridge.receive(ProbeBridge.ORIGIN, true, bridgeRequest(action, document, "renderer-${serial++}", JSONObject()), execute)!!
+            assertThat(response.getInt("status")).describedAs(action).isEqualTo(200)
+        }
+        for (action in listOf("hosts.update", "hosts.delete", "detection.refresh")) {
+            val params = JSONObject().put("hostId", "host-7")
+            val response = bridge.receive(ProbeBridge.ORIGIN, true, bridgeRequest(action, document, "renderer-${serial++}", params), execute)!!
+            assertThat(response.getInt("status")).describedAs(action).isEqualTo(200)
+        }
+        assertThat(seen).containsExactly("hosts.list:", "hosts.create:", "hosts.update:host-7", "hosts.delete:host-7", "detection.refresh:host-7")
+
+        // A host route carrying a conversation id instead of a host id is refused by the bridge, not by the action.
+        val refused = bridge.receive(
+            ProbeBridge.ORIGIN,
+            true,
+            bridgeRequest("hosts.delete", document, "renderer-${serial++}", JSONObject().put("conversationId", RENDERER_CONVERSATION)),
+            execute,
+        )!!
+        assertThat(refused.getInt("status")).isEqualTo(400)
+        assertThat(refused.getJSONObject("body").getString("code")).isEqualTo("INVALID_REQUEST")
+    }
+
+    /** One saved host with every identity column a rename or an address change must leave alone. */
+    private val savedHost = Host(
+        id = 7,
+        nickname = "工作机",
+        protocol = "ssh",
+        username = "colle",
+        hostname = "example.test",
+        port = 22,
+        hostKeyAlgo = "ssh-ed25519",
+        lastConnect = 1_700_000_000_000L,
+        color = "blue",
+        pubkeyId = 42L,
+        profileId = 3L,
+        jumpHostId = 5L,
+    )
+
+    private fun availableRow(hostId: Long, kind: AgentKind = AgentKind.KIMI): AgentAvailability = AgentAvailability(
+        hostId = hostId,
+        kind = kind,
+        executable = "/usr/local/bin/${kind.wireName}",
+        available = true,
+        version = "1.0.0",
+        capabilities = JsonObject(mapOf("acp" to JsonPrimitive(true))),
+    )
+
+    private fun missingRow(hostId: Long, kind: AgentKind): AgentAvailability = AgentAvailability(
+        hostId = hostId,
+        kind = kind,
+        executable = "",
+        available = false,
+        error = "executable_missing",
+    )
+
+    private fun targetUnsupportedRow(hostId: Long, kind: AgentKind = AgentKind.KIMI): AgentAvailability = AgentAvailability(
+        hostId = hostId,
+        kind = kind,
+        executable = "",
+        available = false,
+        error = WINDOWS_NATIVE_UNSUPPORTED,
+    )
+
+    private fun codeOf(result: ProbeResult): String = (result.body as JSONObject).getString("code")
+
+    private fun dataOf(result: ProbeResult): JSONObject = (result.body as JSONObject).getJSONObject("data")
 
     /** One open conversation of host 7 whose workspace listing a case decides. */
     private fun openSourceWithWorkspace(configure: FakeSource.() -> Unit): FakeSource = FakeSource().apply {
