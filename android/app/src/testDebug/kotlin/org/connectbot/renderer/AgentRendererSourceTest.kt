@@ -23,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
@@ -30,10 +31,13 @@ import org.assertj.core.api.Assertions.assertThat
 import org.connectbot.agent.AgentConversationState
 import org.connectbot.agent.AgentDraftStore
 import org.connectbot.agent.AgentIndexStore
+import org.connectbot.agent.AgentLinkState
+import org.connectbot.agent.AgentMessageQueue
 import org.connectbot.agent.AgentRepository
 import org.connectbot.agent.AgentSshPool
 import org.connectbot.data.HostRepository
 import org.connectbot.di.CoroutineDispatchers
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -58,6 +62,7 @@ class AgentRendererSourceTest {
     private val dispatchers = CoroutineDispatchers(dispatcher, dispatcher, dispatcher)
     private val active = MutableStateFlow<AgentSession?>(null)
     private val selected = MutableStateFlow<AgentSession?>(null)
+    private val liveLinks = MutableStateFlow<Map<Long, AgentLinkState>>(emptyMap())
     private lateinit var repository: AgentRepository
     private lateinit var pool: AgentSshPool
     private lateinit var source: AgentRendererSource
@@ -74,18 +79,23 @@ class AgentRendererSourceTest {
         `when`(repository.conversationState).thenReturn(MutableStateFlow(AgentConversationState.Closed))
         `when`(repository.hasEarlier).thenReturn(MutableStateFlow(false))
         `when`(repository.availability).thenReturn(MutableStateFlow(emptyList()))
+        `when`(repository.liveLinkStates).thenReturn(liveLinks)
+        `when`(repository.linkRecords).thenReturn(MutableStateFlow(emptyList()))
+        `when`(repository.scannedSources).thenReturn(MutableStateFlow(emptySet()))
         val hosts = mock(HostRepository::class.java)
         `when`(hosts.getSshHosts()).thenReturn(emptyList())
         val index = mock(AgentIndexStore::class.java)
         `when`(index.read()).thenReturn(emptyList())
         val drafts = mock(AgentDraftStore::class.java)
+        val queue = mock(AgentMessageQueue::class.java)
         val preferences = mock(SharedPreferences::class.java)
         pool = mock(AgentSshPool::class.java)
-        source = AgentRendererSource(repository, hosts, index, pool, drafts, preferences, dispatchers)
+        source = AgentRendererSource(repository, hosts, index, pool, drafts, queue, preferences, dispatchers)
     }
 
     @After
     fun tearDown() {
+        source.close()
         Dispatchers.resetMain()
     }
 
@@ -143,6 +153,49 @@ class AgentRendererSourceTest {
         // host really receives rather than in the payload's own spelling.
         assertThat(sent).contains(payloadArgument("--directory", "/work"))
         assertThat(sent).contains(payloadArgument("--limit", "$DIRECTORY_LISTING_MAX_ENTRIES"))
+    }
+
+    /**
+     * A lost link and its recovery travel on the event channel the renderer already reads, and only a real change of
+     * that state publishes a frame, so the product's own reconnect bookkeeping cannot turn into a stream of notices.
+     */
+    @Test
+    fun aLostLinkAndItsRecoveryArePublishedWithoutAnyPollingOfTheirOwn() = runTest {
+        val session = AgentSession(hostId = 7, agent = AgentKind.KIMI, sessionId = "session-a", cwd = "/work/a")
+        active.value = session
+        val frames = mutableListOf<Pair<String, JSONObject>>()
+        source.open { name, data, _, _ -> frames += name to data }
+        liveLinks.value = mapOf(7L to AgentLinkState.CONNECTED)
+        advanceUntilIdle()
+        assertThat(frames.map { it.first }).contains("realtime.reconnected")
+        val reconnected = frames.last { it.first == "realtime.reconnected" }.second
+        assertThat(reconnected.getString("host_id")).isEqualTo("host-7")
+        assertThat(reconnected.getString("state")).isEqualTo("connected")
+
+        frames.clear()
+        liveLinks.value = mapOf(7L to AgentLinkState.DISCONNECTED)
+        advanceUntilIdle()
+        assertThat(frames.map { it.first }).containsExactly("realtime.disconnected")
+        assertThat(frames.single().second.getString("state")).isEqualTo("offline")
+        assertThat(frames.single().second.getString("link_state")).isEqualTo("disconnected")
+
+        // Another state of the same kind is not a second notice: only connected, offline and needs_user differ.
+        frames.clear()
+        liveLinks.value = mapOf(7L to AgentLinkState.RETRYING)
+        advanceUntilIdle()
+        assertThat(frames).isEmpty()
+
+        frames.clear()
+        liveLinks.value = mapOf(7L to AgentLinkState.NEEDS_USER)
+        advanceUntilIdle()
+        assertThat(frames.map { it.first }).containsExactly("realtime.disconnected")
+        assertThat(frames.single().second.getBoolean("needs_user")).isTrue()
+
+        frames.clear()
+        liveLinks.value = mapOf(7L to AgentLinkState.CONNECTED)
+        advanceUntilIdle()
+        assertThat(frames.map { it.first }).containsExactly("realtime.reconnected")
+        assertThat(frames.single().second.getBoolean("reconnected")).isTrue()
     }
 }
 

@@ -19,6 +19,18 @@ package org.connectbot.renderer
 
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
+import org.connectbot.agent.AgentAttentionItem
+import org.connectbot.agent.AgentLinkState
+import org.connectbot.agent.AgentMessageQueueStats
+import org.connectbot.agent.AgentMessageState
+import org.connectbot.agent.AgentQueuedMessage
+import org.connectbot.agent.AgentSearchHit
+import org.connectbot.agent.AgentSearchScope
+import org.connectbot.agent.AgentSearchSource
+import org.connectbot.agent.AgentSessionReference
+import org.connectbot.agent.AgentTranscriptHit
+import org.connectbot.agent.AgentTranscriptOutcome
+import org.connectbot.agent.agentSessionContextPack
 import org.connectbot.agent.probeStateOf
 import org.connectbot.data.entity.Host
 import org.connectbot.ui.screens.agents.projectQuestion
@@ -55,13 +67,22 @@ private const val HOST_PREFIX = "host-"
 /** Content kind of a tip row that carries text the chat has no shape of its own for. */
 private const val TIP_INFO = "info"
 
+/** Link state of a host the product holds no state for: unknown, reported as neither reachable nor offline. */
+private const val LINK_UNKNOWN = "unknown"
+
+/** Search sources: a row re-read from the host in this pass, and one the index cache alone holds. */
+private const val SOURCE_REMOTE = "remote"
+private const val SOURCE_CACHED = "cached"
+
+/** Code one host-level search failure carries; the host's own text travels beside it in `reason`. */
+private const val SOURCE_FAILED = "source_unreadable"
+
 /**
- * Events the chat draws nothing for because the host reports them through routes of their own: the turn boundary
- * reaches the renderer as `turn.completed`, context usage through `usage.read`, and a resolved interaction is the
- * product's own bookkeeping row for something the chat already drew while it was pending. Everything else becomes
- * a readable raw line instead of vanishing.
+ * Events the chat draws nothing for because the host reports them through routes of their own: one interaction that
+ * was resolved is the product's own bookkeeping row for something the chat already drew while it was pending.
+ * Everything else becomes a row of its own or a readable raw line instead of vanishing.
  */
-private val SILENT_TYPES = setOf("complete", "permission_resolved", "question_resolved", "usage")
+private val SILENT_TYPES = setOf("permission_resolved", "question_resolved")
 
 /** One raw line is bounded because the Agent wrote its text; it is a row, not a payload dump. */
 private const val RAW_LINE_UNITS = 1_000
@@ -106,6 +127,7 @@ internal object RendererProjection {
         val row = snapshot.indexed
         val name = listOf(row?.title, session.title, session.preview, session.sessionId, session.cwd)
             .firstOrNull { !it.isNullOrBlank() }
+        val link = linkState(snapshot, session.hostId)
         return json(
             "id" to conversationId,
             "name" to name,
@@ -115,6 +137,13 @@ internal object RendererProjection {
             "created_at" to (row?.createdAt?.takeIf { it > 0 } ?: session.createdAt),
             "modified_at" to (row?.updatedAt?.takeIf { it > 0 } ?: session.updatedAt),
             "status" to if (snapshot.turnId != null || pending != null) "running" else "finished",
+            // The agent of this row reached the host through a link the product either holds a state for or does
+            // not, so an offline host is flagged with the state behind it instead of looking like a live one.
+            "offline" to (link != null && link != AgentLinkState.CONNECTED),
+            "link_state" to (link?.name?.lowercase() ?: LINK_UNKNOWN),
+            // True while this row comes from the index cache rather than a read of the host in this pass.
+            "cached" to !live(snapshot, session),
+            "workspace" to json("host_id" to projectId(session.hostId), "cwd" to session.cwd),
             // The renderer's model and mode pickers read the Agent's own option catalogue from `config.read`; this
             // row names no model, and the cached list stays empty because the host keeps no catalogue of its own.
             "model" to json("provider_id" to "", "use_model" to "", "model" to ""),
@@ -131,6 +160,19 @@ internal object RendererProjection {
         )
     }
 
+    /** The link state the product holds for [hostId], live or recorded, or null when it never held one. */
+    private fun linkState(snapshot: RendererSnapshot, hostId: Long): AgentLinkState? = snapshot.linkStates[hostId]
+
+    /**
+     * True while one row is the product's own live conversation, or one whose host and agent were really re-read in
+     * this pass. The open conversation counts as live because its window is what the product is reading right now.
+     */
+    private fun live(snapshot: RendererSnapshot, session: AgentSession): Boolean {
+        val open = snapshot.session
+        if (open != null && snapshot.active && open.sameConversation(session)) return true
+        return (session.hostId to session.agent) in snapshot.scannedSources
+    }
+
     fun projectId(hostId: Long): String = HOST_PREFIX + hostId
 
     /** The host id an opaque `host-<id>` name carries; anything else names no saved host. */
@@ -143,8 +185,10 @@ internal object RendererProjection {
      * One saved host as the hosts page reads it: the row itself plus the probe verdict this host already holds.
      * A row is never dressed up as probed — `detection` says whether any probe answered for it — and the shell
      * context the Agent would run in is named by the target, so a Windows host reads as the target it really is.
+     * [sessions] is how many conversations the product's index holds for this host, which is what a session index
+     * that was never read reports as a real zero instead of an invented count.
      */
-    fun hostRow(host: Host, availability: List<AgentAvailability>): JSONObject {
+    fun hostRow(host: Host, availability: List<AgentAvailability>, sessions: Int): JSONObject {
         val target = remoteTargetOf(host.osType, host.agentTarget)
         return json(
             "id" to projectId(host.id),
@@ -157,11 +201,13 @@ internal object RendererProjection {
             "agent_target" to host.agentTarget,
             "target" to target.id,
             "target_supported" to target.supported,
+            "session_count" to sessions,
             "detection" to detection(availability.filter { it.hostId == host.id }),
         )
     }
 
-    fun hostRows(hosts: List<Host>, availability: List<AgentAvailability>): JSONArray = array(*hosts.map { hostRow(it, availability) }.toTypedArray())
+    fun hostRows(hosts: List<Host>, availability: List<AgentAvailability>, sessionCounts: Map<Long, Int> = emptyMap()): JSONArray =
+        array(*hosts.map { hostRow(it, availability, sessionCounts[host.id] ?: 0) }.toTypedArray())
 
     /**
      * What the product holds for one host: `checked` is false until some probe answered for it, and each Agent
@@ -367,6 +413,174 @@ internal object RendererProjection {
         return result
     }
 
+    /** The outcome one `complete` event states, in the vocabulary a turn boundary is reported with. */
+    fun turnOutcome(status: String): String = when (status) {
+        "cancelled" -> "cancelled"
+        "end_turn" -> "completed"
+        else -> "stopped"
+    }
+
+    /**
+     * One index hit: the conversation it names, the field that matched and the snippet around the match, together
+     * with whether that row was re-read from the host in this pass or is only what the cache holds. A hit whose
+     * conversation the product no longer holds says so, because its id cannot be opened from here.
+     */
+    fun indexHit(hit: AgentSearchHit, held: Set<String>): JSONObject {
+        val conversationId = RendererConversationId.of(hit.session)
+        return json(
+            "id" to "index:$conversationId:${hit.field.name.lowercase()}",
+            "kind" to "index",
+            "conversation_id" to conversationId,
+            "host_id" to projectId(hit.session.hostId),
+            "agent" to hit.session.agent.wireName,
+            "session_id" to hit.session.sessionId,
+            "cwd" to hit.session.cwd,
+            "field" to hit.field.name.lowercase(),
+            "snippet" to hit.snippet,
+            "source" to if (hit.source == AgentSearchSource.REMOTE) SOURCE_REMOTE else SOURCE_CACHED,
+            "openable" to (conversationId in held),
+        )
+    }
+
+    /**
+     * One content hit read from a remote transcript: the host, Agent and directory it was found in, the snippet
+     * around the match and the anchor a later read of that part of the history is named by.
+     */
+    fun contentHit(hit: AgentTranscriptHit, held: Set<String>): JSONObject {
+        val row = hit.hit
+        val session = AgentSession(hostId = hit.hostId, agent = row.agent, sessionId = row.sessionId, cwd = row.directory)
+        val conversationId = RendererConversationId.of(session)
+        return json(
+            "id" to "content:$conversationId:${row.anchor}",
+            "kind" to "content",
+            "conversation_id" to conversationId,
+            "host_id" to projectId(hit.hostId),
+            "agent" to row.agent.wireName,
+            "session_id" to row.sessionId,
+            "cwd" to row.directory,
+            "snippet" to row.snippet,
+            "file" to row.file,
+            "line" to row.line,
+            "anchor" to row.anchor,
+            "clipped" to row.clipped,
+            // A content hit was really read over the wire in this pass, so its source is remote by construction.
+            "source" to SOURCE_REMOTE,
+            "openable" to (conversationId in held),
+        )
+    }
+
+    /**
+     * What one search covered, not only what it found. `complete` is false while any part of the selection stayed
+     * unread, so a caller can never render this as a history without that text: a clock that cut the remote scan
+     * short, a host that failed, a session whose history is not a file this build can name and a scan page that was
+     * never loaded are each reported as themselves.
+     */
+    fun searchCoverage(outcome: AgentTranscriptOutcome, scope: AgentSearchScope): JSONObject = json(
+        "complete" to (scope.complete && !outcome.incomplete),
+        "truncated" to outcome.truncated,
+        "failed_sources" to array(
+            *outcome.failures.map { failure -> json("host_id" to projectId(failure.hostId), "code" to SOURCE_FAILED, "reason" to failure.reason) }.toTypedArray(),
+        ),
+        "problems" to array(*outcome.problems.map { it.code }.toTypedArray()),
+        "skipped" to array(
+            *outcome.skips.map { skip ->
+                json(
+                    "conversation_id" to RendererConversationId.of(skip.session),
+                    "host_id" to projectId(skip.session.hostId),
+                    "agent" to skip.session.agent.wireName,
+                    "session_id" to skip.session.sessionId,
+                    "code" to skip.reason.name.lowercase(),
+                )
+            }.toTypedArray(),
+        ),
+        "roots" to array(*outcome.roots.toTypedArray()),
+        "searched_sessions" to outcome.searchedSessions,
+        // The index half of the same search: what it covered, and how many rows were cache-only.
+        "index_complete" to scope.complete,
+        "remote_rows" to scope.remoteCount,
+        "cached_rows" to scope.cachedCount,
+    )
+
+    /** One attention row: the conversation to open and every reason it waits for the user, most urgent first. */
+    fun inboxItem(item: AgentAttentionItem): JSONObject {
+        val session = AgentSession(hostId = item.key.hostId, agent = item.key.agent, sessionId = item.key.sessionId)
+        return json(
+            "conversation_id" to RendererConversationId.of(session),
+            "host_id" to projectId(item.key.hostId),
+            "agent" to item.key.agent.wireName,
+            "session_id" to item.key.sessionId,
+            "reasons" to array(*item.reasons.map { it.name.lowercase() }.toTypedArray()),
+            "pending_approvals" to item.pendingApprovals,
+            "pending_questions" to item.pendingQuestions,
+            "last_error" to item.lastError,
+            "summary" to item.summary,
+            // A conversation whose time was never reported keeps null instead of an invented timestamp.
+            "updated_at" to item.updatedAt,
+        )
+    }
+
+    /**
+     * One queued message as the renderer reads it: the target conversation, what the sender asked of it and whether
+     * it is still waiting. Nothing here is a delivery — a message is only ever delivered by the conversation it was
+     * addressed to, which is why a queued row reports `pending`.
+     */
+    fun queued(row: AgentQueuedMessage): JSONObject {
+        val agent = AgentKind.fromWire(row.agent)
+        val data = json(
+            "queue_id" to row.id,
+            "host_id" to projectId(row.hostId),
+            "agent" to row.agent,
+            "session_id" to row.sessionId,
+            "kind" to row.kind.name.lowercase(),
+            "text" to row.text,
+            "created_at" to row.createdAtMillis,
+            "state" to row.state.name.lowercase(),
+            "pending" to (row.state == AgentMessageState.PENDING),
+        )
+        // A queue row written for an Agent this build no longer knows still reads as itself, without a
+        // conversation id it could never derive.
+        if (agent != null) data.put("conversation_id", RendererConversationId.of(AgentSession(hostId = row.hostId, agent = agent, sessionId = row.sessionId, cwd = "")))
+        return data
+    }
+
+    /** What the queue holds now, including the overflow it dropped, so a lost send is visible instead of silent. */
+    fun queueStats(stats: AgentMessageQueueStats): JSONObject = json(
+        "stored" to stats.stored,
+        "pending" to stats.pending,
+        "delivered" to stats.delivered,
+        "dropped" to stats.dropped,
+    )
+
+    /**
+     * One bounded context pack of the open conversation's own loaded window, built by the same projection the
+     * Compose quote uses. The text only reaches whatever asked for it: preparing a pack starts no model call, which
+     * is why the answer states `sent` false rather than an outcome nobody observed.
+     */
+    fun reference(session: AgentSession, hostLabel: String, events: List<AgentEvent>, conversationId: String): JSONObject {
+        val source = AgentSessionReference(
+            hostId = session.hostId,
+            agent = session.agent,
+            sessionId = session.sessionId,
+            cwd = session.cwd,
+            hostLabel = hostLabel,
+        )
+        val pack = agentSessionContextPack(source, events)
+        return json(
+            "conversation_id" to conversationId,
+            "host_id" to projectId(session.hostId),
+            "host" to source.host,
+            "agent" to session.agent.wireName,
+            "session_id" to session.sessionId,
+            "cwd" to session.cwd,
+            "status" to pack.status.name.lowercase(),
+            "text" to pack.text,
+            "quoted_count" to pack.quotedCount,
+            "omitted_count" to pack.omittedCount,
+            "cut_count" to pack.cutCount,
+            "sent" to false,
+        )
+    }
+
     /**
      * The open conversation's configuration surface as the renderer's own option list. Every option keeps the
      * Agent's id, category and type, a type this host cannot draw included, so an unknown one stays readable
@@ -456,9 +670,29 @@ internal object RendererProjection {
             "error" -> base.put("type", "tips").put("position", "center")
                 .put("content", json("content" to event.text, "type" to "error"))
 
-            // The turn boundary reaches the renderer as `turn.completed`, and a resolved interaction is the
-            // product's own bookkeeping row: those are the only events the chat draws nothing for. Every other
-            // event still becomes one readable raw line, so nothing the agent sent vanishes without a trace.
+            // The turn boundary the Agent stated, in the shape the renderer's own stream closes a turn with. The
+            // host publishes the same boundary as `turn.completed` for a caller that reads named events only.
+            "complete" -> base.put("type", "finish").put("position", "center")
+                .put("content", json("conversation_id" to conversationId, "turn_id" to turnId, "status" to "finished", "stop_reason" to event.status, "outcome" to turnOutcome(event.status)))
+
+            // Context usage the Agent itself reported, under the row type the renderer already reads it from. A
+            // report this build cannot read keeps the bounded raw line so the event is visible either way.
+            "usage" -> base.put("type", "acp_context_usage").put("position", "center")
+                .put("content", usage(event) ?: json("content" to rawLine(event), "type" to TIP_INFO))
+
+            // The Agent's own session facts — a retitled session and the like — as one bounded line plus whatever
+            // the Agent stated about them, so a title change is readable here without a second call.
+            "session_info" -> base.put("type", "tips").put("position", "center")
+                .put(
+                    "content",
+                    json("content" to rawLine(event), "type" to TIP_INFO)
+                        .put("title", event.title)
+                        .put("status", event.status)
+                        .put("session_id" to conversationId),
+                )
+
+            // A resolved interaction is the product's own bookkeeping row for something the chat already drew;
+            // every other event still becomes one readable raw line, so nothing the agent sent vanishes.
             in SILENT_TYPES -> return null
 
             else -> base.put("type", "tips").put("position", "center")

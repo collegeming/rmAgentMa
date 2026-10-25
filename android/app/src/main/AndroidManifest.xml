@@ -21,10 +21,23 @@
 	<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 	<uses-permission android:name="android.permission.INTERNET" />
+	<!--
+	 Local network: SSH to LAN hosts and mDNS `_ssh._tcp` discovery. The Compose shell asks for this permission
+	 before the first LAN action on API 36 and later (AgentScreen.withNetworkPermission); this app calls no Wi-Fi
+	 scan, P2P, Aware or RTT API, the only ones this compile SDK ties to the permission, and its own WifiManager use
+	 is a Wi-Fi lock. android.permission.ACCESS_LOCAL_NETWORK (android-37.0, since 37.0 in
+	 platforms/android-37.0/data/api-versions.xml, and tied to no API in data/annotations.zip) is deliberately not
+	 declared while this build targets API 36: a declaration without its runtime request and its refusal message
+	 would claim a capability the app does not have. Declare and request it together with the targetSdk 37 bump.
+	-->
 	<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
 	<uses-permission android:name="android.permission.VIBRATE" />
 	<uses-permission android:name="android.permission.WAKE_LOCK" />
 	<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+	<!--
+	 Notifications of the connection foreground service. Requested at runtime with a rationale (MainActivity,
+	 SettingsScreen); it controls notification visibility only, never foreground-service eligibility (AppViewModel).
+	-->
 	<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 	<uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
 

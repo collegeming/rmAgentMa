@@ -3,6 +3,7 @@
  * Copyright 2026 rmAgentMa contributors
  * SPDX-License-Identifier: Apache-2.0
  */
+import { markHostInterrupted, markHostLive } from './hostConnection';
 
 type HostReply = { requestId: string; documentId: string; ok: boolean; status: number; body: unknown };
 type HostEvent = {
@@ -48,6 +49,14 @@ const ROUTES = [
   // Escape hatches: the host opens the terminal, and builds the Agent's own TUI command itself.
   ['POST', '/api/conversations/:conversationId/terminal', 'terminal.open'],
   ['POST', '/api/conversations/:conversationId/terminal/command', 'terminal.command.start'],
+  // Cross-session work: content search across the saved hosts, the pending-work list, the message queue
+  // other sessions can be handed, and the context pack one conversation offers to a new one.
+  ['GET', '/api/search', 'search.sessions'],
+  ['GET', '/api/inbox', 'inbox.list'],
+  ['GET', '/api/queue', 'queue.list'],
+  ['POST', '/api/queue', 'queue.send'],
+  ['DELETE', '/api/queue/:queueId', 'queue.cancel'],
+  ['POST', '/api/conversations/:conversationId/reference', 'reference.pack'],
   ['GET', '/api/projects', 'projects.list'],
   ['GET', '/api/projects/:projectId', 'project.read'],
   ['GET', '/api/hosts', 'hosts.list'],
@@ -136,7 +145,10 @@ export class NativeTransport {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
-        reject(new Error(`HOST_TIMEOUT: ${action}; result unknown`));
+        const failure = new Error(`HOST_TIMEOUT: ${action}; result unknown`);
+        // No answer inside the host's own window: the connection is what failed, not the request.
+        markHostInterrupted(failure);
+        reject(failure);
       }, this.timeoutMs);
       this.pending.set(requestId, { resolve, reject, timer });
       try {
@@ -146,6 +158,7 @@ export class NativeTransport {
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(requestId);
+        markHostInterrupted(error);
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
@@ -192,6 +205,8 @@ export class NativeTransport {
       if (this.epoch !== undefined && message.epoch !== this.epoch) this.retiredEpochs.add(this.epoch);
       this.epoch = message.epoch;
       this.seq = message.seq;
+      // A host frame is the recovery signal: the interrupted state ends here, without a poll of its own.
+      markHostLive();
       for (const listener of this.listeners) {
         try {
           listener(message.name, message.data);
@@ -207,6 +222,7 @@ export class NativeTransport {
     if (this.documentId && message.documentId !== this.documentId) return;
     clearTimeout(pending.timer);
     this.pending.delete(message.requestId);
+    markHostLive();
     pending.resolve(message);
   }
 }
@@ -241,6 +257,16 @@ export async function initializeHost(): Promise<void> {
 }
 
 /**
+ * Asks the host for its event stream again — the retry behind an interrupted connection. The answer (or the
+ * events that follow it) is what ends the interrupted state; nothing here schedules a second attempt.
+ */
+export async function retryHostEvents(): Promise<void> {
+  if (!nativeTransport) throw new Error('HOST_NOT_READY');
+  const reply = await nativeTransport.call('events.subscribe');
+  if (!reply.ok) throw new Error('HOST_EVENTS_UNAVAILABLE');
+}
+
+/**
  * The five saved-host actions this build declares, each with its route in ROUTES: `hosts.list`, `hosts.create`,
  * `hosts.update`, `hosts.delete` and `detection.refresh`. Structured fields travel in the request body, because
  * the bridge carries only string parameters.
@@ -271,7 +297,8 @@ export type HostAgentProbe = {
   state: string;
   executable: string;
   version: string;
-  capabilities: Record<string, unknown> | null;
+  /** What the probe found this Agent able to do; an empty reading is no capability, never a made-up one. */
+  capabilities: Record<string, unknown> | string[] | null;
   error: string;
 };
 
@@ -289,6 +316,8 @@ export type SavedHost = {
   protocol: string;
   os_type: string;
   agent_target: string;
+  /** How many sessions this host's index holds; the host names no count when it holds no index. */
+  session_count?: number | null;
   /** The shell context the Agent would run in: `posix`, `wsl:<distribution>` or `windows-native`. */
   target: string;
   target_supported: boolean;

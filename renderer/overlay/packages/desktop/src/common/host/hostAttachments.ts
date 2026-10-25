@@ -5,6 +5,12 @@
  */
 import { captureHostDocument, hostAction } from './hostTransport';
 
+/**
+ * Sending attachments is not part of this host yet. Every upload entry point in the renderer reads this and
+ * says so, rather than offering a button whose request can only fail.
+ */
+export const HOST_ATTACHMENTS_SUPPORTED = false;
+
 export async function uploadHostAttachment(
   file: File,
   conversationId: string,
@@ -12,6 +18,10 @@ export async function uploadHostAttachment(
   name = file.name,
   signal?: AbortSignal
 ): Promise<string> {
+  // 边界兜底：入口都已禁用并写明原因，任何绕过入口的上传在这里被拒绝，且带一个稳定的错误码。
+  // The boundary: every entry point is disabled and says why, and any upload that slips past them is refused
+  // here with a stable code instead of a confusing transport error.
+  if (!HOST_ATTACHMENTS_SUPPORTED) throw new Error('HOST_ATTACHMENTS_UNSUPPORTED');
   const documentAlive = captureHostDocument();
   const check = () => {
     if (signal?.aborted) throw new Error('Upload aborted');

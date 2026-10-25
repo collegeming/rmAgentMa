@@ -2,4 +2,6 @@
 <resources>
     <!-- Renderer host surface: navigation away from the packaged renderer entry was blocked. -->
     <string name="renderer_navigation_blocked">已阻止离开渲染器入口的导航。</string>
+    <!-- Renderer host surface: the nearby-devices or local-network grant is missing, so hosts on the LAN cannot be probed or read. -->
+    <string name="renderer_local_network_denied">未授予附近设备或局域网权限，局域网内的主机暂时无法探测或读取。</string>
 </resources>

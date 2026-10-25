@@ -15,7 +15,16 @@ function requireHostList(payload: { items?: unknown } | null | undefined): Saved
   const items = payload?.items;
   if (!Array.isArray(items) || items.some((row) => typeof (row as SavedHost | null)?.id !== 'string'))
     throw new Error('HOST_LIST_INVALID');
-  return items as SavedHost[];
+  return items.map((row) => {
+    const host = row as SavedHost;
+    const detection = host.detection as unknown;
+    // A host that holds no probe yet answers with no detection at all; it reads as a not-probed host. A
+    // detection that IS there but is not readable is a refusal, not an empty verdict list.
+    if (detection === undefined || detection === null) return { ...host, detection: { checked: false, agents: [] } };
+    if (typeof detection !== 'object' || !Array.isArray((detection as { agents?: unknown }).agents))
+      throw new Error('HOST_LIST_INVALID');
+    return host;
+  });
 }
 
 /** Every saved SSH host with the probe verdict it already holds. */

@@ -17,6 +17,7 @@
 
 package org.connectbot.renderer
 
+import android.Manifest
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
@@ -28,6 +29,16 @@ import org.assertj.core.api.Assertions.assertThat
 import org.connectbot.agent.AgentChallenge
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConfigBusyException
+import org.connectbot.agent.AgentLinkState
+import org.connectbot.agent.AgentMessageKind
+import org.connectbot.agent.AgentMessageQueueStats
+import org.connectbot.agent.AgentMessageState
+import org.connectbot.agent.AgentQueuedMessage
+import org.connectbot.agent.AgentTranscriptFailure
+import org.connectbot.agent.AgentTranscriptHit
+import org.connectbot.agent.AgentTranscriptOutcome
+import org.connectbot.agent.AgentTranscriptSkip
+import org.connectbot.agent.AgentTranscriptSkipReason
 import org.connectbot.agent.AgentZcodeConfig
 import org.connectbot.agent.ZCODE_MODEL_OPTION
 import org.connectbot.data.entity.Host
@@ -47,6 +58,8 @@ import org.rmagentma.core.DirectoryEntryKind
 import org.rmagentma.core.DirectoryListing
 import org.rmagentma.core.DirectoryListingProblem
 import org.rmagentma.core.RemoteDirectoryEntry
+import org.rmagentma.core.TranscriptSearchHit
+import org.rmagentma.core.TranscriptSearchProblem
 import org.rmagentma.core.WINDOWS_NATIVE_UNSUPPORTED
 import org.rmagentma.core.ZcodeConfigChange
 import org.rmagentma.core.ZcodeConfigStatus
@@ -54,6 +67,7 @@ import org.rmagentma.core.ZcodeModelOption
 import org.rmagentma.core.ZcodeModelSelection
 import org.rmagentma.core.ZcodeSessionConfig
 import org.rmagentma.rendererhost.ProbeBridge
+import org.rmagentma.rendererhost.ProbeLimits
 import org.rmagentma.rendererhost.ProbeResult
 import org.rmagentma.rendererhost.json
 import java.io.IOException
@@ -138,14 +152,17 @@ class RendererActionsTest {
         }
         val actions = RendererActions(source)
         val page = (actions.handle("messages.list", payload(conversation = true, query = mapOf("limit" to "50"))).body as JSONObject).getJSONObject("data")
-        assertThat(page.getJSONArray("items").length()).isEqualTo(2)
+        // The turn boundary is a row of its own, so the window holds its three events in their own order.
+        assertThat(page.getJSONArray("items").length()).isEqualTo(3)
         assertThat(page.getJSONArray("items").getJSONObject(0).getString("msg_id")).isEqualTo("m3")
         assertThat(page.getJSONArray("items").getJSONObject(0).getString("position")).isEqualTo("right")
         assertThat(page.getJSONArray("items").getJSONObject(0).getJSONObject("content").getString("content")).isEqualTo("你好")
         assertThat(page.getJSONArray("items").getJSONObject(1).getString("id")).isEqualTo("m4")
         assertThat(page.getJSONArray("items").getJSONObject(1).getJSONObject("content").getBoolean("replace")).isTrue()
+        assertThat(page.getJSONArray("items").getJSONObject(2).getString("id")).isEqualTo("m5")
+        assertThat(page.getJSONArray("items").getJSONObject(2).getString("type")).isEqualTo("finish")
         assertThat(page.getString("oldest_cursor")).isEqualTo("m3")
-        assertThat(page.getString("newest_cursor")).isEqualTo("m4")
+        assertThat(page.getString("newest_cursor")).isEqualTo("m5")
 
         val missing = actions.handle("messages.list", payload(conversation = true, query = mapOf("before" to "m404")))
         assertThat(missing.status).isEqualTo(422)
@@ -827,15 +844,506 @@ class RendererActionsTest {
         assertThat(line).doesNotContain("\u0007")
         assertThat(line.length).isLessThanOrEqualTo(1000)
 
-        // The rows the host reports through routes of their own stay out of the chat stream.
+        // A resolved interaction stays out of the chat stream: the product's own bookkeeping row covers what the
+        // chat already drew while it was pending.
         val control = openSource().apply {
             events = listOf(
-                AgentEvent(type = "complete", status = "end_turn", historyKey = 1),
                 AgentEvent(type = "question_resolved", status = "resolved", historyKey = 2),
-                AgentEvent(type = "usage", raw = buildJsonObject { put("used", 3200) }, historyKey = 3),
             )
         }
         assertThat((RendererActions(control).handle("messages.list", payload(conversation = true)).body as JSONObject).getJSONObject("data").getJSONArray("items").length()).isZero()
+    }
+
+    /**
+     * The three event kinds the chat used to drop now reach the renderer as rows of their own: one usage report
+     * under the row type the renderer already reads context usage from, the turn boundary as the row that closes a
+     * turn, and the agent's own session fact as a bounded line carrying what it stated.
+     */
+    @Test
+    fun usageTheTurnBoundaryAndAgentSessionFactsEachReachTheRendererAsTheirOwnRow() = runTest {
+        val events = listOf(
+            AgentEvent(
+                type = "usage",
+                raw = buildJsonObject {
+                    put("sessionUpdate", "usage_update")
+                    put("used", 3200)
+                    put("size", 200000)
+                },
+                historyKey = 1,
+            ),
+            AgentEvent(type = "complete", status = "end_turn", historyKey = 2),
+            AgentEvent(type = "session_info", title = "新标题", raw = buildJsonObject { put("title", "新标题") }, historyKey = 3),
+        )
+        val items = (RendererActions(openSource().apply { events = events }).handle("messages.list", payload(conversation = true)).body as JSONObject)
+            .getJSONObject("data").getJSONArray("items")
+        assertThat(items.length()).isEqualTo(3)
+        assertThat(items.getJSONObject(0).getString("type")).isEqualTo("acp_context_usage")
+        assertThat(items.getJSONObject(0).getJSONObject("content").getInt("used")).isEqualTo(3200)
+        assertThat(items.getJSONObject(0).getJSONObject("content").getInt("size")).isEqualTo(200000)
+        assertThat(items.getJSONObject(1).getString("type")).isEqualTo("finish")
+        assertThat(items.getJSONObject(1).getJSONObject("content").getString("stop_reason")).isEqualTo("end_turn")
+        assertThat(items.getJSONObject(1).getJSONObject("content").getString("outcome")).isEqualTo("completed")
+        assertThat(items.getJSONObject(2).getString("type")).isEqualTo("tips")
+        assertThat(items.getJSONObject(2).getJSONObject("content").getString("type")).isEqualTo("info")
+        assertThat(items.getJSONObject(2).getJSONObject("content").getString("title")).isEqualTo("新标题")
+
+        // A usage report this build cannot read stays visible as a bounded line instead of vanishing.
+        val unreadable = (RendererActions(openSource().apply { events = listOf(AgentEvent(type = "usage", raw = buildJsonObject { put("sessionUpdate", "usage_update") }, historyKey = 1)) })
+            .handle("messages.list", payload(conversation = true)).body as JSONObject)
+            .getJSONObject("data").getJSONArray("items").getJSONObject(0)
+        assertThat(unreadable.getString("type")).isEqualTo("acp_context_usage")
+        assertThat(unreadable.getJSONObject("content").getString("content")).startsWith("[usage]")
+    }
+
+    // ==================== Cross-conversation search, attention inbox, queue, reference and the index cache ====================
+
+    /**
+     * One conversation row carries the link state behind it, whether it is only cached, and the workspace it belongs
+     * to, so a surface can group rows and mark the ones whose host cannot be reached right now.
+     */
+    @Test
+    fun conversationRowsCarryTheirLinkStateTheirCacheFlagAndTheirWorkspace() = runTest {
+        val other = AgentSession(hostId = 8, agent = AgentKind.DSH, sessionId = "session-b", cwd = "/workspace/other", updatedAt = 500)
+        val source = FakeSource().apply {
+            session = this@RendererActionsTest.session
+            indexed = this@RendererActionsTest.session
+            active = true
+            sessions = listOf(this@RendererActionsTest.session, other)
+            linkStates = mapOf(7L to AgentLinkState.DISCONNECTED)
+        }
+        val rows = dataOf(RendererActions(source).handle("conversations.list", payload())).getJSONArray("items")
+        val open = (0 until rows.length()).map { rows.getJSONObject(it) }.first { it.getString("id") == RendererConversationId.of(session) }
+        assertThat(open.getBoolean("offline")).isTrue()
+        assertThat(open.getString("link_state")).isEqualTo("disconnected")
+        assertThat(open.getJSONObject("workspace").getString("host_id")).isEqualTo("host-7")
+        assertThat(open.getJSONObject("workspace").getString("cwd")).isEqualTo("/workspace/app")
+        // The open conversation's own window is being read right now, so its row is not merely a cached one.
+        assertThat(open.getBoolean("cached")).isFalse()
+
+        // A row of a pair no scan re-read is cache-only, and a host the product never observed is not called offline.
+        val cached = (0 until rows.length()).map { rows.getJSONObject(it) }.first { it.getString("id") == RendererConversationId.of(other) }
+        assertThat(cached.getBoolean("cached")).isTrue()
+        assertThat(cached.getBoolean("offline")).isFalse()
+        assertThat(cached.getString("link_state")).isEqualTo("unknown")
+
+        // A pair this pass really re-read from its host is not cached either.
+        val rescanned = source.apply { scannedSources = setOf(8L to AgentKind.DSH) }
+        val refreshed = dataOf(RendererActions(rescanned).handle("conversations.list", payload())).getJSONArray("items")
+        val scanned = (0 until refreshed.length()).map { refreshed.getJSONObject(it) }.first { it.getString("id") == RendererConversationId.of(other) }
+        assertThat(scanned.getBoolean("cached")).isFalse()
+    }
+
+    /** Every host row counts what the product's own index holds for it, and keeps the capabilities its probe found. */
+    @Test
+    fun everyHostRowCountsTheSessionsTheIndexHoldsAndKeepsTheProbedCapabilities() = runTest {
+        val second = Host(id = 8, nickname = "另一台", username = "colle", hostname = "second.test")
+        val far = AgentSession(hostId = 8, agent = AgentKind.KIMI, sessionId = "session-c", cwd = "/srv")
+        val source = FakeSource().apply {
+            hosts = listOf(this@RendererActionsTest.host, second)
+            sessions = listOf(this@RendererActionsTest.session, AgentSession(hostId = 7, agent = AgentKind.DSH, sessionId = "session-b", cwd = "/workspace/other"), far)
+            availability = listOf(availableRow(7), missingRow(8, AgentKind.KIMI))
+        }
+        val rows = dataOf(RendererActions(source).handle("hosts.list", payload())).getJSONArray("items")
+        val rowsById = (0 until rows.length()).map { rows.getJSONObject(it) }.associateBy { it.getString("id") }
+        assertThat(rowsById.getValue("host-7").getInt("session_count")).isEqualTo(2)
+        assertThat(rowsById.getValue("host-8").getInt("session_count")).isEqualTo(1)
+        assertThat(rowsById.getValue("host-7").getBoolean("target_supported")).isTrue()
+        val detected = rowsById.getValue("host-7").getJSONObject("detection").getJSONArray("agents").getJSONObject(0)
+        assertThat(detected.getString("id")).isEqualTo("kimi")
+        assertThat(detected.getJSONObject("capabilities").getBoolean("acp")).isTrue()
+    }
+
+    /** One search answers what the index and the remote transcripts really held, with the range it covered. */
+    @Test
+    fun aSearchAnswersIndexAndContentHitsWithTheRangeItReallyCovered() = runTest {
+        val dsh = AgentSession(hostId = 7, agent = AgentKind.DSH, sessionId = "session-a", cwd = "/workspace/app", title = "部署脚本", updatedAt = 900)
+        val source = FakeSource().apply {
+            session = dsh
+            indexed = dsh
+            active = true
+            hosts = listOf(this@RendererActionsTest.host)
+            sessions = listOf(dsh)
+            scannedSources = setOf(7L to AgentKind.DSH)
+            transcriptOutcome = AgentTranscriptOutcome(
+                query = "部署",
+                hits = listOf(contentHit(7, AgentKind.DSH, "session-a", "/workspace/app", "session.v2.jsonl", 12, "部署到生产")),
+                searchedSessions = 1,
+                roots = listOf("/workspace/.dsh/sessions"),
+            )
+        }
+        val data = dataOf(RendererActions(source).handle("search.sessions", payload(query = mapOf("q" to "部署"))))
+        assertThat(source.transcriptSearches.single().first).isEqualTo("部署")
+        assertThat(source.transcriptSearches.single().second.map { it.sessionId }).containsExactly("session-a")
+        val items = data.getJSONArray("items")
+        assertThat(items.length()).isEqualTo(2)
+        val index = items.getJSONObject(0)
+        assertThat(index.getString("kind")).isEqualTo("index")
+        assertThat(index.getString("field")).isEqualTo("title")
+        assertThat(index.getString("source")).isEqualTo("remote")
+        assertThat(index.getString("conversation_id")).isEqualTo(RendererConversationId.of(dsh))
+        assertThat(index.getBoolean("openable")).isTrue()
+        val content = items.getJSONObject(1)
+        assertThat(content.getString("kind")).isEqualTo("content")
+        assertThat(content.getString("anchor")).isEqualTo("session.v2.jsonl#12")
+        assertThat(content.getInt("line")).isEqualTo(12)
+        assertThat(content.getString("snippet")).isEqualTo("部署到生产")
+        assertThat(content.getString("host_id")).isEqualTo("host-7")
+        assertThat(content.getBoolean("openable")).isTrue()
+        val coverage = data.getJSONObject("coverage")
+        assertThat(coverage.getBoolean("complete")).isTrue()
+        assertThat(coverage.getBoolean("truncated")).isFalse()
+        assertThat(coverage.getInt("searched_sessions")).isEqualTo(1)
+        assertThat(coverage.getInt("remote_rows")).isEqualTo(1)
+        assertThat(coverage.getJSONArray("failed_sources").length()).isZero()
+        assertThat(data.getBoolean("has_more")).isFalse()
+
+        // A hit whose conversation the product no longer holds cannot be opened from here, and says so.
+        val gone = FakeSource().apply {
+            session = null
+            active = false
+            sessions = emptyList()
+            transcriptOutcome = AgentTranscriptOutcome(
+                query = "部署",
+                hits = listOf(contentHit(9, AgentKind.DSH, "session-gone", "/gone", "session.v1.jsonl", 3, "部署过")),
+            )
+        }
+        val orphan = dataOf(RendererActions(gone).handle("search.sessions", payload(query = mapOf("q" to "部署")))).getJSONArray("items").getJSONObject(0)
+        assertThat(orphan.getBoolean("openable")).isFalse()
+        assertThat(orphan.getString("host_id")).isEqualTo("host-9")
+    }
+
+    /**
+     * A search that could not read every part of its range reports the coverage it really had: a clock that cut the
+     * scan short, a host that failed, a history that is not a file and a skipped session are each named, and
+     * `complete` stays false so no caller can read it as a history without that text.
+     */
+    @Test
+    fun anIncompleteSearchNeverReadsAsAHistoryWithoutThatText() = runTest {
+        val source = FakeSource().apply {
+            session = this@RendererActionsTest.session
+            active = true
+            hosts = listOf(this@RendererActionsTest.host)
+            sessions = listOf(this@RendererActionsTest.session)
+            transcriptOutcome = AgentTranscriptOutcome(
+                query = "部署",
+                truncated = true,
+                problems = listOf(TranscriptSearchProblem.TIMEOUT),
+                failures = listOf(AgentTranscriptFailure(hostId = 8, reason = "dir_not_readable")),
+                skips = listOf(
+                    AgentTranscriptSkip(
+                        AgentSession(hostId = 9, agent = AgentKind.KIMI, sessionId = "session-nine", cwd = "/srv"),
+                        AgentTranscriptSkipReason.HISTORY_NOT_A_FILE,
+                    ),
+                ),
+                searchedSessions = 0,
+            )
+        }
+        val coverage = dataOf(RendererActions(source).handle("search.sessions", payload(query = mapOf("q" to "部署")))).getJSONObject("coverage")
+        assertThat(coverage.getBoolean("complete")).isFalse()
+        assertThat(coverage.getBoolean("truncated")).isTrue()
+        assertThat(coverage.getJSONArray("problems").getString(0)).isEqualTo("search_timeout")
+        val failed = coverage.getJSONArray("failed_sources").getJSONObject(0)
+        assertThat(failed.getString("host_id")).isEqualTo("host-8")
+        assertThat(failed.getString("code")).isEqualTo("source_unreadable")
+        assertThat(failed.getString("reason")).isEqualTo("dir_not_readable")
+        val skipped = coverage.getJSONArray("skipped").getJSONObject(0)
+        assertThat(skipped.getString("code")).isEqualTo("history_not_a_file")
+        assertThat(skipped.getString("session_id")).isEqualTo("session-nine")
+        assertThat(coverage.getInt("searched_sessions")).isZero()
+
+        // A search that could not run at all is a failure of its own, not an empty history.
+        val broken = source.apply { transcriptFailure = IOException("远端读取失败") }
+        val result = RendererActions(broken).handle("search.sessions", payload(query = mapOf("q" to "部署")))
+        assertThat(result.status).isEqualTo(500)
+        assertThat(codeOf(result)).isEqualTo("SEARCH_FAILED")
+    }
+
+    /** A query no host could be asked about, and a filter nothing matches, are refused before any remote read. */
+    @Test
+    fun aSearchRefusesAnUnusableQueryAndFiltersNothingCouldMatch() = runTest {
+        val source = FakeSource().apply {
+            session = this@RendererActionsTest.session
+            active = true
+            hosts = listOf(this@RendererActionsTest.host)
+            sessions = listOf(this@RendererActionsTest.session)
+        }
+        val actions = RendererActions(source)
+        for (query in listOf(emptyMap<String, String>(), mapOf("q" to "  "), mapOf("q" to "x".repeat(300)), mapOf("q" to "a\u0007b"), mapOf("q" to "部署", "limit" to "0"))) {
+            val result = actions.handle("search.sessions", payload(query = query))
+            assertThat(result.status).describedAs(query.toString()).isEqualTo(422)
+            assertThat(codeOf(result)).isEqualTo("INVALID_QUERY")
+        }
+        assertThat(codeOf(actions.handle("search.sessions", payload(query = mapOf("q" to "部署", "agent" to "nope"))))).isEqualTo("AGENT_UNKNOWN")
+        assertThat(actions.handle("search.sessions", payload(query = mapOf("q" to "部署", "agent" to "nope"))).status).isEqualTo(422)
+        assertThat(actions.handle("search.sessions", payload(query = mapOf("q" to "部署", "host_id" to "host-99"))).status).isEqualTo(404)
+        assertThat(source.transcriptSearches).isEmpty()
+    }
+
+    /** The inbox is the read-only projection of the open conversation, and nothing waiting is an empty list. */
+    @Test
+    fun theInboxIsAReadOnlyProjectionOfTheOpenConversationAlone() = runTest {
+        val source = openSource().apply {
+            events = listOf(
+                AgentEvent(type = "permission", id = "req-1", text = "请求写入", historyKey = 1),
+                AgentEvent(type = "error", text = "命令失败", historyKey = 2),
+            )
+            busy = true
+        }
+        val data = dataOf(RendererActions(source).handle("inbox.list", payload()))
+        assertThat(data.getBoolean("read_only")).isTrue()
+        assertThat(data.getString("scope")).isEqualTo("open_conversation")
+        assertThat(data.getInt("total")).isEqualTo(1)
+        val item = data.getJSONArray("items").getJSONObject(0)
+        assertThat(item.getString("conversation_id")).isEqualTo(RendererConversationId.of(session))
+        assertThat(item.getString("host_id")).isEqualTo("host-7")
+        assertThat(item.getJSONArray("reasons").getString(0)).isEqualTo("approval")
+        assertThat(item.getInt("pending_approvals")).isEqualTo(1)
+        assertThat(item.getInt("pending_questions")).isZero()
+        assertThat(item.getString("last_error")).isEqualTo("命令失败")
+        assertThat(item.getString("summary")).contains("approval")
+
+        // A conversation with nothing waiting has no row at all, and an inbox without one is not a failure.
+        val idle = dataOf(RendererActions(openSource()).handle("inbox.list", payload()))
+        assertThat(idle.getInt("total")).isZero()
+        assertThat(idle.getJSONArray("items").length()).isZero()
+    }
+
+    /** The queue lists what waits and accepts a message without sending anything to any model. */
+    @Test
+    fun theQueueListsWhatWaitsAndQueuesWithoutSendingAnything() = runTest {
+        val target = AgentSession(hostId = 7, agent = AgentKind.DSH, sessionId = "session-b", cwd = "/workspace/other")
+        val waiting = AgentQueuedMessage(
+            id = "queue-1",
+            hostId = 7,
+            agent = "dsh",
+            sessionId = "session-b",
+            kind = AgentMessageKind.REQUEST,
+            text = "跑一下测试",
+            createdAtMillis = 5,
+            state = AgentMessageState.PENDING,
+        )
+        val source = FakeSource().apply {
+            session = this@RendererActionsTest.session
+            active = true
+            hosts = listOf(this@RendererActionsTest.host)
+            sessions = listOf(this@RendererActionsTest.session, target)
+            queuedMessages = listOf(waiting)
+            queuedStats = AgentMessageQueueStats(stored = 2, pending = 1, delivered = 1, dropped = 3)
+        }
+        val actions = RendererActions(source)
+        val list = dataOf(actions.handle("queue.list", payload()))
+        assertThat(list.getInt("total")).isEqualTo(1)
+        assertThat(list.getJSONObject("stats").getInt("dropped")).isEqualTo(3)
+        val item = list.getJSONArray("items").getJSONObject(0)
+        assertThat(item.getString("queue_id")).isEqualTo("queue-1")
+        assertThat(item.getString("kind")).isEqualTo("request")
+        assertThat(item.getString("state")).isEqualTo("pending")
+        assertThat(item.getBoolean("pending")).isTrue()
+        assertThat(item.getString("conversation_id")).isEqualTo(RendererConversationId.of(target))
+
+        val byConversation = dataOf(
+            actions.handle(
+                "queue.send",
+                payload(body = mapOf("conversation_id" to RendererConversationId.of(target), "kind" to "notify", "text" to "记得看日志")),
+            ),
+        )
+        assertThat(byConversation.getBoolean("queued")).isTrue()
+        assertThat(byConversation.getBoolean("delivered")).isFalse()
+        assertThat(byConversation.getString("state")).isEqualTo("pending")
+        assertThat(byConversation.getString("session_id")).isEqualTo("session-b")
+        assertThat(byConversation.getString("kind")).isEqualTo("notify")
+        assertThat(source.queuedWrites.single().first.sameConversation(target)).isTrue()
+        assertThat(source.queuedWrites.single().second).isEqualTo(AgentMessageKind.NOTIFY)
+        assertThat(source.queuedWrites.single().third).isEqualTo("记得看日志")
+        // Nothing was sent to the open conversation: queueing is the only write this route performs.
+        assertThat(source.turnId).isNull()
+
+        // The same request names its target by host, Agent and session id instead of a derived conversation id.
+        val byIdentity = dataOf(
+            actions.handle(
+                "queue.send",
+                payload(body = mapOf("host_id" to "host-7", "agent" to "dsh", "session_id" to "session-b", "kind" to "request", "text" to "再来一次")),
+            ),
+        )
+        assertThat(byIdentity.getString("conversation_id")).isEqualTo(RendererConversationId.of(target))
+        assertThat(source.queuedWrites.size).isEqualTo(2)
+    }
+
+    /** A queue request for a target nobody holds, or with content the queue cannot carry, is refused as itself. */
+    @Test
+    fun queueSendRefusesTargetsNothingHoldsAndContentNothingCanCarry() = runTest {
+        val source = FakeSource().apply {
+            session = this@RendererActionsTest.session
+            active = true
+            hosts = listOf(this@RendererActionsTest.host)
+            sessions = listOf(this@RendererActionsTest.session)
+        }
+        val actions = RendererActions(source)
+        val unknown = actions.handle("queue.send", payload(body = mapOf("conversation_id" to "c1.9.00.00", "kind" to "notify", "text" to "你好")))
+        assertThat(unknown.status).isEqualTo(404)
+        assertThat(codeOf(unknown)).isEqualTo("CONVERSATION_NOT_FOUND")
+        val unknownHost = actions.handle(
+            "queue.send",
+            payload(body = mapOf("host_id" to "host-99", "agent" to "dsh", "session_id" to "session-b", "kind" to "notify", "text" to "你好")),
+        )
+        assertThat(unknownHost.status).isEqualTo(404)
+        val badKind = actions.handle(
+            "queue.send",
+            payload(body = mapOf("conversation_id" to RendererConversationId.of(session), "kind" to "shout", "text" to "你好")),
+        )
+        assertThat(badKind.status).isEqualTo(422)
+        assertThat(codeOf(badKind)).isEqualTo("INVALID_KIND")
+        for (text in listOf("", "   ", "x".repeat(ProbeLimits.CONTENT_UNITS + 1))) {
+            val refused = actions.handle(
+                "queue.send",
+                payload(body = mapOf("conversation_id" to RendererConversationId.of(session), "kind" to "notify", "text" to text)),
+            )
+            assertThat(refused.status).describedAs("text of ${text.length}").isEqualTo(422)
+            assertThat(codeOf(refused)).isEqualTo("INVALID_CONTENT")
+        }
+        assertThat(source.queuedWrites).isEmpty()
+
+        val refusing = source.apply { queueRefuses = true }
+        val refusedByQueue = RendererActions(refusing).handle(
+            "queue.send",
+            payload(body = mapOf("conversation_id" to RendererConversationId.of(session), "kind" to "notify", "text" to "你好")),
+        )
+        assertThat(refusedByQueue.status).isEqualTo(422)
+        assertThat(codeOf(refusedByQueue)).isEqualTo("QUEUE_REFUSED")
+
+        val broken = source.apply { queueFailure = IOException("队列不可读") }
+        val failed = RendererActions(broken).handle("queue.list", payload())
+        assertThat(failed.status).isEqualTo(500)
+        assertThat(codeOf(failed)).isEqualTo("QUEUE_UNAVAILABLE")
+    }
+
+    /** Only a message the queue still holds as pending can be withdrawn, and no delivery is ever claimed for it. */
+    @Test
+    fun queueCancelWithdrawsOnlyAMessageTheQueueStillHolds() = runTest {
+        val waiting = AgentQueuedMessage(
+            id = "queue-1",
+            hostId = 7,
+            agent = "kimi",
+            sessionId = "session-a",
+            kind = AgentMessageKind.NOTIFY,
+            text = "记得看日志",
+            createdAtMillis = 5,
+            state = AgentMessageState.PENDING,
+        )
+        val source = openSource().apply { queuedMessages = listOf(waiting) }
+        val actions = RendererActions(source)
+        val cancelled = dataOf(actions.handle("queue.cancel", payload(params = mapOf("queueId" to "queue-1"))))
+        assertThat(cancelled.getBoolean("cancelled")).isTrue()
+        assertThat(cancelled.getBoolean("delivered")).isFalse()
+        assertThat(source.withdrawn).containsExactly("queue-1")
+        assertThat(source.queuedMessages).isEmpty()
+
+        val missing = actions.handle("queue.cancel", payload(params = mapOf("queueId" to "queue-404")))
+        assertThat(missing.status).isEqualTo(404)
+        assertThat(codeOf(missing)).isEqualTo("QUEUE_NOT_FOUND")
+        val blank = actions.handle("queue.cancel", payload(params = mapOf("queueId" to "")))
+        assertThat(blank.status).isEqualTo(422)
+        assertThat(codeOf(blank)).isEqualTo("INVALID_QUEUE_ID")
+
+        // A message its conversation already took is not this queue's to undo.
+        val taken = openSource().apply {
+            queuedMessages = listOf(waiting)
+            withdrawAccepted = false
+        }
+        val refused = RendererActions(taken).handle("queue.cancel", payload(params = mapOf("queueId" to "queue-1")))
+        assertThat(refused.status).isEqualTo(409)
+        assertThat(codeOf(refused)).isEqualTo("QUEUE_NOT_PENDING")
+    }
+
+    /** A reference pack quotes the open window as bounded text and is never sent anywhere. */
+    @Test
+    fun aReferencePackQuotesTheOpenWindowAndSendsNothing() = runTest {
+        val source = openSource().apply {
+            hosts = listOf(this@RendererActionsTest.host)
+            events = listOf(
+                AgentEvent(type = "user", text = "部署到生产吧", id = "u1", historyKey = 1),
+                AgentEvent(type = "content", text = "好的，先跑测试", id = "a1", historyKey = 2),
+            )
+        }
+        val data = dataOf(RendererActions(source).handle("reference.pack", payload(conversation = true)))
+        assertThat(data.getString("status")).isEqualTo("complete")
+        assertThat(data.getInt("quoted_count")).isEqualTo(2)
+        assertThat(data.getInt("omitted_count")).isZero()
+        assertThat(data.getBoolean("sent")).isFalse()
+        assertThat(data.getString("host")).isEqualTo("工作机")
+        assertThat(data.getString("session_id")).isEqualTo("session-a")
+        val text = data.getString("text")
+        assertThat(text).contains("host=工作机")
+        assertThat(text).contains("部署到生产吧")
+        assertThat(text).contains("好的，先跑测试")
+        assertThat(text.length).isLessThanOrEqualTo(4000)
+
+        // Only the open conversation has a window to quote; another row is refused as not open, not as missing.
+        val other = AgentSession(hostId = 7, agent = AgentKind.KIMI, sessionId = "session-z", cwd = "/workspace/z")
+        val switched = openSource().apply {
+            sessions = listOf(this@RendererActionsTest.session, other)
+            session = other
+        }
+        val notOpen = RendererActions(switched).handle("reference.pack", payload(params = mapOf("conversationId" to RendererConversationId.of(session))))
+        assertThat(notOpen.status).isEqualTo(409)
+        assertThat(codeOf(notOpen)).isEqualTo("CONVERSATION_NOT_OPEN")
+        val unknown = RendererActions(switched).handle("reference.pack", payload(params = mapOf("conversationId" to "c1.9.00.00")))
+        assertThat(unknown.status).isEqualTo(404)
+        assertThat(codeOf(unknown)).isEqualTo("CONVERSATION_NOT_FOUND")
+        val closed = RendererActions(openSource().apply { active = false }).handle("reference.pack", payload(conversation = true))
+        assertThat(closed.status).isEqualTo(409)
+        assertThat(codeOf(closed)).isEqualTo("CONVERSATION_NOT_OPEN")
+    }
+
+    /** Clearing the index cache really drops the cached rows and reports what the index holds afterwards. */
+    @Test
+    fun clearingTheIndexReallyDropsTheCacheAndReportsWhatIsLeft() = runTest {
+        val source = openSource().apply {
+            indexed = this@RendererActionsTest.session
+            sessions = listOf(this@RendererActionsTest.session, AgentSession(hostId = 8, agent = AgentKind.KIMI, sessionId = "session-c", cwd = "/srv"))
+        }
+        val data = dataOf(RendererActions(source).handle("index.clear", payload()))
+        assertThat(data.getBoolean("cleared")).isTrue()
+        assertThat(data.getInt("sessions_before")).isEqualTo(2)
+        assertThat(data.getInt("sessions")).isZero()
+        assertThat(source.indexClears).isEqualTo(1)
+        // The cache really lost its rows: only the open conversation is listed afterwards.
+        assertThat(source.sessions).isEmpty()
+        val listed = dataOf(RendererActions(source).handle("conversations.list", payload())).getJSONArray("items")
+        assertThat(listed.length()).isEqualTo(1)
+        assertThat(listed.getJSONObject(0).getString("id")).isEqualTo(RendererConversationId.of(session))
+
+        // A cache that could not be dropped is a failure, and nothing is reported as cleared.
+        val broken = openSource().apply { indexFailure = IOException("索引缓存不可写") }
+        val failed = RendererActions(broken).handle("index.clear", payload())
+        assertThat(failed.status).isEqualTo(500)
+        assertThat(codeOf(failed)).isEqualTo("INDEX_CLEAR_FAILED")
+        assertThat(broken.indexClears).isZero()
+    }
+
+    /**
+     * The nearby/local-network grants are what the current system actually needs, and a refusal degrades the routes
+     * that reach a host over the LAN: they answer a stable code instead of running, and a route that reads the
+     * product's own stores is never held back by them.
+     */
+    @Test
+    fun aMissingLocalNetworkGrantDegradesOnlyTheRoutesThatReachAHost() {
+        val nearby = Manifest.permission.NEARBY_WIFI_DEVICES
+        val local = Manifest.permission.ACCESS_LOCAL_NETWORK
+        assertThat(networkPermissions(35)).isEmpty()
+        assertThat(networkPermissions(36)).containsExactly(nearby)
+        assertThat(networkPermissions(37)).containsExactly(nearby, local)
+
+        val denied = { _: String -> false }
+        for (action in listOf("detection.refresh", "hosts.refresh", "conversations.create", "project.read", "search.sessions")) {
+            assertThat(localNetworkRefused(action, networkPermissions(37), denied)).describedAs(action).isTrue()
+        }
+        for (action in listOf("conversations.list", "queue.list", "inbox.list", "index.clear", "messages.list")) {
+            assertThat(localNetworkRefused(action, networkPermissions(37), denied)).describedAs(action).isFalse()
+        }
+        // Once the user granted what the route needs it runs again, and a system that needs no grant is never refused.
+        assertThat(localNetworkRefused("detection.refresh", networkPermissions(37)) { true }).isFalse()
+        assertThat(localNetworkRefused("detection.refresh", networkPermissions(35), denied)).isFalse()
     }
 
     @Test
@@ -1254,6 +1762,15 @@ class RendererActionsTest {
         assertThat(receive("terminal.command.start", JSONObject().put("hostId", "host-7")).getInt("status")).isEqualTo(200)
         assertThat(receive("hosts.refresh", JSONObject().put("hostId", "host-7")).getInt("status")).isEqualTo(200)
         assertThat(receive("conversations.create", JSONObject().put("hostId", "host-7").put("agent", "kimi").put("cwd", "/w")).getInt("status")).isEqualTo(200)
+        // The cross-conversation routes: three that name no conversation, one that names the one it quotes, and
+        // the queue id a withdrawal travels by.
+        assertThat(receive("search.sessions").getInt("status")).isEqualTo(200)
+        assertThat(receive("inbox.list").getInt("status")).isEqualTo(200)
+        assertThat(receive("queue.list").getInt("status")).isEqualTo(200)
+        assertThat(receive("queue.send").getInt("status")).isEqualTo(200)
+        assertThat(receive("queue.cancel", JSONObject().put("queueId", "queue-1")).getInt("status")).isEqualTo(200)
+        assertThat(receive("reference.pack", JSONObject().put("conversationId", RENDERER_CONVERSATION)).getInt("status")).isEqualTo(200)
+        assertThat(receive("index.clear").getInt("status")).isEqualTo(200)
         // Every new route reached the action layer with exactly the parameters it documents.
         assertThat(seen).containsExactly(
             "challenges.read:",
@@ -1266,6 +1783,13 @@ class RendererActionsTest {
             "terminal.command.start:hostId=host-7",
             "hosts.refresh:hostId=host-7",
             "conversations.create:agent=kimi,cwd=/w,hostId=host-7",
+            "search.sessions:",
+            "inbox.list:",
+            "queue.list:",
+            "queue.send:",
+            "queue.cancel:queueId=queue-1",
+            "reference.pack:conversationId=$RENDERER_CONVERSATION",
+            "index.clear:",
         )
 
         // A conversation route of the new set still refuses an id the product could not have derived, and a route
@@ -1273,6 +1797,12 @@ class RendererActionsTest {
         val wrongConversation = receive("terminal.open", JSONObject().put("conversationId", "conv-other"))
         assertThat(wrongConversation.getInt("status")).isEqualTo(404)
         assertThat(wrongConversation.getJSONObject("body").getString("code")).isEqualTo("CONVERSATION_NOT_FOUND")
+        val wrongQuote = receive("reference.pack", JSONObject().put("conversationId", "conv-other"))
+        assertThat(wrongQuote.getInt("status")).isEqualTo(404)
+        assertThat(wrongQuote.getJSONObject("body").getString("code")).isEqualTo("CONVERSATION_NOT_FOUND")
+        val wrongQueueParameter = receive("queue.cancel", JSONObject().put("hostId", "host-7"))
+        assertThat(wrongQueueParameter.getInt("status")).isEqualTo(400)
+        assertThat(wrongQueueParameter.getJSONObject("body").getString("code")).isEqualTo("INVALID_REQUEST")
         val wrongParameter = receive("challenges.answer", JSONObject().put("hostId", "host-7"))
         assertThat(wrongParameter.getInt("status")).isEqualTo(400)
         assertThat(wrongParameter.getJSONObject("body").getString("code")).isEqualTo("INVALID_REQUEST")
@@ -1364,6 +1894,23 @@ class RendererActionsTest {
     private fun codeOf(result: ProbeResult): String = (result.body as JSONObject).getString("code")
 
     private fun dataOf(result: ProbeResult): JSONObject = (result.body as JSONObject).getJSONObject("data")
+
+    /** One content hit as the remote transcript search states it: the file and the line the match sits at. */
+    private fun contentHit(hostId: Long, agent: AgentKind, sessionId: String, directory: String, file: String, line: Int, snippet: String): AgentTranscriptHit =
+        AgentTranscriptHit(
+            hostId,
+            TranscriptSearchHit(
+                sessionKey = "${agent.wireName}:$sessionId",
+                agent = agent,
+                sessionId = sessionId,
+                directory = directory,
+                file = file,
+                line = line,
+                offset = 0,
+                snippet = snippet,
+                clipped = false,
+            ),
+        )
 
     /** One open conversation of host 7 whose workspace listing a case decides. */
     private fun openSourceWithWorkspace(configure: FakeSource.() -> Unit): FakeSource = FakeSource().apply {

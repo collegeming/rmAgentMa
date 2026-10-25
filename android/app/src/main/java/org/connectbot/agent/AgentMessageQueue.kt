@@ -161,6 +161,29 @@ class AgentMessageQueue @Inject constructor(
         }
     }
 
+    /**
+     * Drops the message [id] so it can never be delivered later, and reports false when it is unknown or was already
+     * delivered: a message the receiving conversation took belongs to that conversation, and [delivered] is the only
+     * entry that may claim a hand-off. A withdrawal is not counted as a drop, which stays the cap's own count.
+     */
+    suspend fun withdraw(id: String): Boolean = withContext(io) {
+        if (!validId(id)) return@withContext false
+        mutex.withLock {
+            try {
+                load()
+            } catch (_: IOException) {
+                // An unreadable queue names no message, and rewriting it would drop the evidence.
+                return@withLock false
+            }
+            val row = rows.firstOrNull { it.id == id } ?: return@withLock false
+            if (row.state == AgentMessageState.DELIVERED) return@withLock false
+            val updated = rows.filterNot { it.id == id }
+            persist(updated, dropped)
+            rows = updated
+            true
+        }
+    }
+
     /** Drops everything queued for a host, delivered or not: a removed host has no conversation left to tell. */
     suspend fun forget(hostId: Long) {
         if (hostId <= 0) return

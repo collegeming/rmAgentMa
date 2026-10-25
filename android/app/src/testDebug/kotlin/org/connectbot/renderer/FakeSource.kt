@@ -19,6 +19,12 @@ package org.connectbot.renderer
 
 import org.connectbot.agent.AgentChallenge
 import org.connectbot.agent.AgentConfigAccess
+import org.connectbot.agent.AgentLinkState
+import org.connectbot.agent.AgentMessageKind
+import org.connectbot.agent.AgentMessageQueueStats
+import org.connectbot.agent.AgentMessageState
+import org.connectbot.agent.AgentQueuedMessage
+import org.connectbot.agent.AgentTranscriptOutcome
 import org.connectbot.data.entity.Host
 import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
@@ -43,6 +49,15 @@ internal class FakeSource : RendererSource {
     var currentTheme = "light"
     var configAccess: AgentConfigAccess = AgentConfigAccess.Unsupported
     var setter: (String, String) -> AgentConfigAccess = { _, _ -> AgentConfigAccess.Closed }
+
+    /** Whether the product is running another operation on the open conversation, as the repository reports it. */
+    var busy = false
+
+    /** Link state per host the product holds, live or recorded; a host missing here was never observed. */
+    var linkStates: Map<Long, AgentLinkState> = emptyMap()
+
+    /** Host/agent pairs whose rows were really re-read from the remote, so every other row is cache-only. */
+    var scannedSources: Set<Pair<Long, AgentKind>> = emptySet()
 
     /** The reason [open] reports; null means it switched successfully. */
     var openFailure: String? = null
@@ -93,11 +108,14 @@ internal class FakeSource : RendererSource {
         events = events,
         active = active,
         loading = loading,
+        busy = busy,
         turnId = turnId,
         cancelling = cancelling,
         hasEarlier = hasEarlier,
         hosts = hosts,
         availability = availability,
+        linkStates = linkStates,
+        scannedSources = scannedSources,
         epoch = "epoch-1",
         seq = 4,
         theme = currentTheme,
@@ -237,5 +255,77 @@ internal class FakeSource : RendererSource {
         probedHosts += hostId
         probeRows[hostId]?.let { rows -> availability = availability.filterNot { it.hostId == hostId } + rows }
         return availability.filter { it.hostId == hostId }
+    }
+
+    /** What one content search answers with, the failure it throws instead, and every selection it was asked about. */
+    var transcriptOutcome = AgentTranscriptOutcome(query = "")
+    var transcriptFailure: Exception? = null
+    val transcriptSearches = mutableListOf<Pair<String, List<AgentSession>>>()
+
+    override suspend fun searchTranscripts(query: String, sessions: List<AgentSession>): AgentTranscriptOutcome {
+        transcriptSearches += query to sessions
+        transcriptFailure?.let { throw it }
+        return transcriptOutcome
+    }
+
+    /** What the queue holds, what it was asked to queue, and what a withdrawal is answered with. */
+    var queuedMessages: List<AgentQueuedMessage> = emptyList()
+    var queuedStats = AgentMessageQueueStats(stored = 0, pending = 0, delivered = 0, dropped = 0)
+    var queueRefuses = false
+    var withdrawAccepted = true
+    var queueFailure: Exception? = null
+    val queuedWrites = mutableListOf<Triple<AgentSession, AgentMessageKind, String>>()
+    val withdrawn = mutableListOf<String>()
+
+    override suspend fun queued(): List<AgentQueuedMessage> {
+        queueFailure?.let { throw it }
+        return queuedMessages
+    }
+
+    override suspend fun queueStats(): AgentMessageQueueStats {
+        queueFailure?.let { throw it }
+        return queuedStats
+    }
+
+    override suspend fun queue(target: AgentSession, kind: AgentMessageKind, text: String): String? {
+        queueFailure?.let { throw it }
+        if (queueRefuses) return null
+        queuedWrites += Triple(target, kind, text)
+        val id = "queue-${queuedWrites.size}"
+        queuedMessages += AgentQueuedMessage(
+            id = id,
+            hostId = target.hostId,
+            agent = target.agent.wireName,
+            sessionId = target.sessionId,
+            kind = kind,
+            text = text,
+            createdAtMillis = 1,
+            state = AgentMessageState.PENDING,
+        )
+        return id
+    }
+
+    /** Withdrawing really drops the row from what the queue holds, exactly as the real queue does. */
+    override suspend fun withdrawQueued(id: String): Boolean {
+        queueFailure?.let { throw it }
+        if (!withdrawAccepted) return false
+        val kept = queuedMessages.filterNot { it.id == id }
+        if (kept.size == queuedMessages.size) return false
+        withdrawn += id
+        queuedMessages = kept
+        return true
+    }
+
+    /** How many times the index cache was cleared, and what it holds afterwards. */
+    var indexClears = 0
+    var indexFailure: Exception? = null
+
+    /** Clearing really drops the rows the fake holds, so a route that reports a cleanup proves one happened. */
+    override suspend fun clearIndex(): Int {
+        indexFailure?.let { throw it }
+        indexClears++
+        sessions = emptyList()
+        indexed = null
+        return sessions.size
     }
 }

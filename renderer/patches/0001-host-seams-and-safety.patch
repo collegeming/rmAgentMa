@@ -1,8 +1,14 @@
 Modified by rmAgentMa contributors for the renderer probe.
-JSON modifications: packages/desktop/src/renderer/services/i18n/locales/en-US/messages.json;
+JSON modifications: packages/desktop/src/renderer/services/i18n/locales/en-US/conversation.json;
+packages/desktop/src/renderer/services/i18n/locales/en-US/guid.json;
+packages/desktop/src/renderer/services/i18n/locales/en-US/messages.json;
 packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json;
+packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json;
+packages/desktop/src/renderer/services/i18n/locales/zh-CN/guid.json;
 packages/desktop/src/renderer/services/i18n/locales/zh-CN/messages.json;
 packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json;
+packages/desktop/src/renderer/services/i18n/locales/zh-TW/conversation.json;
+packages/desktop/src/renderer/services/i18n/locales/zh-TW/guid.json;
 packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json.
 
 diff --git a/packages/desktop/src/common/adapter/browser.ts b/packages/desktop/src/common/adapter/browser.ts
@@ -6774,3 +6780,1113 @@ index 37c3b7b..a6253d7 100644
      expect(screen.queryByTestId('window-controls')).not.toBeInTheDocument();
    });
  
+diff --git a/packages/desktop/src/renderer/pages/conversation/GroupedHistory/utils/groupingHelpers.ts b/packages/desktop/src/renderer/pages/conversation/GroupedHistory/utils/groupingHelpers.ts
+--- a/packages/desktop/src/renderer/pages/conversation/GroupedHistory/utils/groupingHelpers.ts
++++ b/packages/desktop/src/renderer/pages/conversation/GroupedHistory/utils/groupingHelpers.ts
+@@ -5,6 +5,7 @@
+  */
+ 
+ import type { TChatConversation } from '@/common/config/storage';
++import { hostWorkspaceKey, hostWorkspaceOf, directoryShortName, type HostWorkspaceRef } from '@renderer/host/hostRows';
+ import { getActivityTime } from '@/renderer/utils/chat/timeline';
+ import { getWorkspaceDisplayName } from '@/renderer/utils/workspace/workspace';
+ import { getWorkspaceUpdateTime } from '@/renderer/utils/workspace/workspaceHistory';
+@@ -29,18 +30,25 @@
+   conversations: TChatConversation[],
+   t: (key: string) => string
+ ): TimelineSection[] => {
+-  const allWorkspaceGroups = new Map<string, TChatConversation[]>();
++  const allWorkspaceGroups = new Map<string, { ref: HostWorkspaceRef | null; conversations: TChatConversation[] }>();
+   const withoutWorkspaceConvs: TChatConversation[] = [];
+ 
+   conversations.forEach((conv) => {
+     const workspace = conv.extra?.workspace;
+     const custom_workspace = conv.extra?.custom_workspace;
++    const hostWorkspace = hostWorkspaceOf(conv);
+ 
+-    if (custom_workspace && workspace) {
+-      if (!allWorkspaceGroups.has(workspace)) {
+-        allWorkspaceGroups.set(workspace, []);
+-      }
+-      allWorkspaceGroups.get(workspace)!.push(conv);
++    if (hostWorkspace) {
++      // A row the host itself addressed: its host and directory name the group, so the same directory name
++      // on two hosts stays two groups, and the row no longer has to be a user-chosen (custom) workspace.
++      const key = hostWorkspaceKey(hostWorkspace);
++      const group = allWorkspaceGroups.get(key) ?? { ref: hostWorkspace, conversations: [] };
++      group.conversations.push(conv);
++      allWorkspaceGroups.set(key, group);
++    } else if (custom_workspace && workspace) {
++      const group = allWorkspaceGroups.get(workspace) ?? { ref: null, conversations: [] };
++      group.conversations.push(conv);
++      allWorkspaceGroups.set(workspace, group);
+     } else {
+       withoutWorkspaceConvs.push(conv);
+     }
+@@ -48,22 +56,28 @@
+ 
+   const items: TimelineItem[] = [];
+ 
+-  allWorkspaceGroups.forEach((convList, workspace) => {
+-    const sortedConvs = [...convList].toSorted((a, b) => getActivityTime(b) - getActivityTime(a));
++  allWorkspaceGroups.forEach((group, key) => {
++    const sortedConvs = [...group.conversations].toSorted((a, b) => getActivityTime(b) - getActivityTime(a));
+     const latestConversationTime = getActivityTime(sortedConvs[0]);
+-    const updateTime = getWorkspaceUpdateTime(workspace);
++    // A host directory has no local folder record to date the group by, so its recency is its own rows'.
++    const updateTime = group.ref ? 0 : getWorkspaceUpdateTime(key);
+     const time = Math.max(updateTime, latestConversationTime);
+     items.push({
+       type: 'workspace',
+       time,
+       workspaceGroup: {
+-        workspace,
+-        // This grouping path only sees custom (user-chosen) workspaces —
+-        // non-custom conversations end up in `withoutWorkspaceConvs` above
+-        // and never reach this helper. Passing `false` is therefore correct
+-        // without consulting `extra.is_temporary_workspace` per-row.
+-        display_name: getWorkspaceDisplayName(workspace, false, t),
++        workspace: key,
++        // A host group is titled by its directory's own name; the host is a field of the group, so the
++        // header can name it without parsing it back out of the key.
++        display_name: group.ref
++          ? directoryShortName(group.ref.cwd)
++          : // This grouping path only sees custom (user-chosen) workspaces —
++            // non-custom conversations end up in `withoutWorkspaceConvs` above
++            // and never reach this helper. Passing `false` is therefore correct
++            // without consulting `extra.is_temporary_workspace` per-row.
++            getWorkspaceDisplayName(key, false, t),
+         conversations: sortedConvs,
++        ...(group.ref ? { host: group.ref } : {}),
+       },
+     });
+   });
+diff --git a/packages/desktop/src/renderer/pages/conversation/GroupedHistory/types.ts b/packages/desktop/src/renderer/pages/conversation/GroupedHistory/types.ts
+--- a/packages/desktop/src/renderer/pages/conversation/GroupedHistory/types.ts
++++ b/packages/desktop/src/renderer/pages/conversation/GroupedHistory/types.ts
+@@ -5,12 +5,15 @@
+  */
+ 
+ import type { TChatConversation } from '@/common/config/storage';
++import type { HostWorkspaceRef } from '@renderer/host/hostRows';
+ import type { ReactNode } from 'react';
+ 
+ export type WorkspaceGroup = {
+   workspace: string;
+   display_name: string;
+   conversations: TChatConversation[];
++  /** Set when this group is one host's directory: the host it runs on and the directory itself. */
++  host?: HostWorkspaceRef;
+ };
+ 
+ export type TimelineItem = {
+diff --git a/packages/desktop/src/renderer/pages/conversation/GroupedHistory/index.tsx b/packages/desktop/src/renderer/pages/conversation/GroupedHistory/index.tsx
+--- a/packages/desktop/src/renderer/pages/conversation/GroupedHistory/index.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/GroupedHistory/index.tsx
+@@ -14,7 +14,7 @@
+ import { Button, Dropdown, Empty, Input, Menu, Modal, Tooltip } from '@arco-design/web-react';
+ import { FolderClose, MoreOne, Plus, Right } from '@icon-park/react';
+ import classNames from 'classnames';
+-import React, { useCallback, useEffect, useMemo } from 'react';
++import React, { useCallback, useEffect, useMemo, useState } from 'react';
+ import { useTranslation } from 'react-i18next';
+ import { useNavigate, useParams } from 'react-router-dom';
+ 
+@@ -26,6 +26,9 @@
+ import { useConversations } from './hooks/useConversations';
+ import { useDragAndDrop } from './hooks/useDragAndDrop';
+ import type { ConversationRowProps, WorkspaceGroupedHistoryProps } from './types';
++import HostHistoryFilterBar, { HOST_FILTER_ALL } from '@renderer/host/HostHistoryFilterBar';
++import { hostLabelOf, useHostDirectory } from '@renderer/host/hostDirectory';
++import { isSessionCached, isSessionOffline, matchesHostFilters } from '@renderer/host/hostRows';
+ 
+ const WorkspaceGroupedHistory: React.FC<WorkspaceGroupedHistoryProps> = ({
+   onSessionClick,
+@@ -42,6 +45,18 @@
+   const isMobile = layout?.isMobile ?? false;
+   const { getJobStatus, markAsRead, setActiveConversation } = useCronJobsMap();
+ 
++  const [hostFilter, setHostFilter] = useState(HOST_FILTER_ALL);
++  const [agentFilter, setAgentFilter] = useState(HOST_FILTER_ALL);
++  // Subscribing here is what puts a host name on a group title as soon as the host list — read lazily by the
++  // filter bar — lands.
++  useHostDirectory();
++  // The two filters narrow what this list draws; they are this component's own state and nothing else reads
++  // them, so clearing them is just leaving them on `All`.
++  const passesFilter = useCallback(
++    (conversation: TChatConversation) => matchesHostFilters(conversation, hostFilter, agentFilter),
++    [hostFilter, agentFilter]
++  );
++
+   const {
+     conversations,
+     isConversationGenerating,
+@@ -219,35 +234,52 @@
+   const pinnedIds = useMemo(() => pinnedConversations.map((c) => c.id), [pinnedConversations]);
+ 
+   // Codex-style split: project folders (workspaces) on top, free conversations below.
+-  // Projects section: collect all workspace groups across timeline sections, ordered by recency.
++  // Projects section: collect all workspace groups across timeline sections, ordered by recency. The two
++  // filters are applied here, to the rows a group would show: a group left with no row is not drawn at all.
+   const projectGroups = useMemo(() => {
+     const seen = new Set<string>();
+-    const groups: Array<{ workspace: string; displayName: string; conversations: TChatConversation[] }> = [];
++    const groups: Array<{
++      workspace: string;
++      displayName: string;
++      conversations: TChatConversation[];
++      host?: { hostId: string; cwd: string };
++    }> = [];
+     for (const section of timelineSections) {
+       for (const item of section.items) {
+         if (item.type === 'workspace' && item.workspaceGroup && !seen.has(item.workspaceGroup.workspace)) {
+           seen.add(item.workspaceGroup.workspace);
++          const conversations = item.workspaceGroup.conversations.filter(passesFilter);
++          if (conversations.length === 0) continue;
+           groups.push({
+             workspace: item.workspaceGroup.workspace,
+             displayName: item.workspaceGroup.display_name,
+-            conversations: item.workspaceGroup.conversations,
++            conversations,
++            ...(item.workspaceGroup.host ? { host: item.workspaceGroup.host } : {}),
+           });
+         }
+       }
+     }
+     return groups;
+-  }, [timelineSections]);
++  }, [timelineSections, passesFilter]);
+ 
+-  // Conversations section: keep timeline grouping (today/yesterday/...) but only show non-workspace conversations.
++  // Conversations section: keep timeline grouping (today/yesterday/...) but only show non-workspace
++  // conversations, narrowed by the same two filters.
+   const conversationOnlySections = useMemo(
+     () =>
+       timelineSections
+         .map((section) => ({
+           ...section,
+-          items: section.items.filter((item) => item.type === 'conversation' && item.conversation),
++          items: section.items.filter(
++            (item) => item.type === 'conversation' && item.conversation && passesFilter(item.conversation)
++          ),
+         }))
+         .filter((section) => section.items.length > 0),
+-    [timelineSections]
++    [timelineSections, passesFilter]
++  );
++
++  const pinnedVisible = useMemo(
++    () => pinnedConversations.filter(passesFilter),
++    [pinnedConversations, passesFilter]
+   );
+ 
+   if (timelineSections.length === 0 && pinnedConversations.length === 0) {
+@@ -382,6 +414,17 @@
+       </AionModal>
+ 
+       <div>
++        {/* The two selectors narrow this list by the host a group runs on and the Agent it runs. They are the
++            same rows' own fields, so `All` really filters nothing. */}
++        {!collapsed && (
++          <HostHistoryFilterBar
++            conversations={conversations}
++            hostId={hostFilter}
++            agentId={agentFilter}
++            onHostChange={setHostFilter}
++            onAgentChange={setAgentFilter}
++          />
++        )}
+         {/* L1: Pinned section */}
+         <DndContext
+           sensors={sensors}
+@@ -389,13 +432,13 @@
+           modifiers={[restrictToVerticalAxis]}
+           onDragEnd={handleDragEnd}
+         >
+-          {pinnedConversations.length > 0 && (
++          {pinnedVisible.length > 0 && (
+             <div className='min-w-0'>
+               {!collapsed && <SectionLabel sectionKey='pinned' label={t('conversation.history.pinnedSection')} />}
+               {!collapsedSections.has('pinned') && (
+                 <SortableContext items={pinnedIds} strategy={verticalListSortingStrategy}>
+                   <div className='min-w-0'>
+-                    {pinnedConversations.map((conversation) => {
++                    {pinnedVisible.map((conversation) => {
+                       const props = getConversationRowProps(conversation);
+                       return isDragEnabled ? (
+                         <SortableConversationRow key={conversation.id} {...props} />
+@@ -435,6 +478,12 @@
+                     </Menu.Item>
+                   </Menu>
+                 );
++                // A host group carries two names: the directory (its display name) and the host it runs on.
++                // Every row of the group being offline — or holding only a cached copy — is a state of the
++                // group, so it is stated here instead of being left to each row.
++                const openWorkspace = group.host?.cwd ?? group.workspace;
++                const groupOffline = group.conversations.every((row) => isSessionOffline(row));
++                const groupCached = group.conversations.every((row) => isSessionCached(row));
+                 return (
+                   <div key={group.workspace} className='min-w-0'>
+                     <WorkspaceCollapse
+@@ -444,8 +493,23 @@
+                       stickyHeader
+                       stickyTop={28}
+                       header={
+-                        <span className='text-14px font-[500] truncate flex-1 text-t-primary min-w-0'>
+-                          {group.displayName}
++                        <span className='flex min-w-0 flex-1 items-center gap-6px text-14px font-[500] text-t-primary'>
++                          <span className='min-w-0 truncate'>{group.displayName}</span>
++                          {group.host && (
++                            <span className='shrink-0 text-12px font-[400] text-t-tertiary'>
++                              {hostLabelOf(group.host.hostId) ?? group.host.hostId}
++                            </span>
++                          )}
++                          {groupOffline && (
++                            <span className='shrink-0 rounded-4px bg-fill-2 px-4px text-11px leading-16px text-warning'>
++                              {t('conversation.hostTools.offline')}
++                            </span>
++                          )}
++                          {groupCached && (
++                            <span className='shrink-0 rounded-4px bg-fill-2 px-4px text-11px leading-16px text-t-tertiary'>
++                              {t('conversation.hostTools.cached')}
++                            </span>
++                          )}
+                         </span>
+                       }
+                       trailing={
+@@ -461,13 +525,20 @@
+                               )}
+                               onClick={(e) => {
+                                 e.stopPropagation();
+-                                void navigate('/guid', { state: { workspace: group.workspace } });
++                                void navigate('/guid', {
++                                  state: { workspace: openWorkspace, ...(group.host ? { hostId: group.host.hostId } : {}) },
++                                });
+                               }}
+                               onKeyDown={(e) => {
+                                 if (e.key === 'Enter' || e.key === ' ') {
+                                   e.preventDefault();
+                                   e.stopPropagation();
+-                                  void navigate('/guid', { state: { workspace: group.workspace } });
++                                  void navigate('/guid', {
++                                    state: {
++                                      workspace: openWorkspace,
++                                      ...(group.host ? { hostId: group.host.hostId } : {}),
++                                    },
++                                  });
+                                 }
+                               }}
+                             >
+diff --git a/packages/desktop/src/renderer/pages/conversation/GroupedHistory/ConversationRow.tsx b/packages/desktop/src/renderer/pages/conversation/GroupedHistory/ConversationRow.tsx
+--- a/packages/desktop/src/renderer/pages/conversation/GroupedHistory/ConversationRow.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/GroupedHistory/ConversationRow.tsx
+@@ -13,6 +13,10 @@
+ import { cleanupSiderTooltips, getSiderTooltipProps } from '@/renderer/utils/ui/siderTooltip';
+ import { useLongPress } from '@renderer/host/longPress';
+ import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
++import { hostAgentOf, hostWorkspaceOf, isSessionCached, isSessionOffline } from '@renderer/host/hostRows';
++import HostCrossSessionMenuItems from '@renderer/host/HostCrossSessionMenuItems';
++import { formatRelativeTime } from '@/renderer/utils/chat/relativeTime';
++import { getActivityTime } from '@/renderer/utils/chat/timeline';
+ import { Checkbox, Dropdown, Menu, Spin, Tooltip } from '@arco-design/web-react';
+ import {
+   Attention,
+@@ -66,9 +70,18 @@
+     isManualUnread,
+     getJobStatus,
+   } = props;
+-  const { t } = useTranslation();
++  const { t, i18n } = useTranslation();
+   const { info: assistantInfo } = usePresetAssistantInfo(conversation);
+   const isPinned = isConversationPinned(conversation);
++  // What the host itself said about this row: the Agent it runs and whether its host is reachable at all. A
++  // cached row otherwise looks like any other row, while opening it can only fail — so both states are
++  // stated on the row rather than left to the failure.
++  const hostWorkspace = hostWorkspaceOf(conversation);
++  const hostAgent = hostAgentOf(conversation);
++  const rowAgentLabel = hostWorkspace ? hostAgent : null;
++  const rowOffline = isSessionOffline(conversation);
++  const rowCached = isSessionCached(conversation);
++  const rowUpdatedAt = hostWorkspace ? formatRelativeTime(getActivityTime(conversation), i18n.language) : '';
+   // Fork-lineage badge: present only on forked conversations (extra.fork is
+   // server-minted by the fork API). Parent name resolves from the loaded
+   // sidebar list; a deleted/unloaded parent degrades to the generic tip.
+@@ -243,7 +256,36 @@
+             position='top'
+           >
+             <div className='chat-history__item-name overflow-hidden text-ellipsis flex items-center gap-4px w-full text-14px font-[500] lh-24px whitespace-nowrap min-w-0 text-t-primary'>
+-              <span className='block overflow-hidden text-ellipsis whitespace-nowrap min-w-0'>{conversation.name}</span>
++              <span className='block flex-1 overflow-hidden text-ellipsis whitespace-nowrap min-w-0'>
++                {conversation.name}
++              </span>
++              {/* The Agent this row runs and when it last moved, both as the host reported them. */}
++              {rowAgentLabel && (
++                <span
++                  className='shrink-0 text-11px leading-16px font-[400] text-t-tertiary'
++                  data-testid={`conversation-agent-${conversation.id}`}
++                >
++                  {rowAgentLabel}
++                </span>
++              )}
++              {rowUpdatedAt && (
++                <span
++                  className='shrink-0 text-11px leading-16px font-[400] text-t-tertiary'
++                  data-testid={`conversation-updated-${conversation.id}`}
++                >
++                  {rowUpdatedAt}
++                </span>
++              )}
++              {rowOffline && (
++                <span className='shrink-0 rounded-4px bg-fill-2 px-4px text-11px leading-16px font-[400] text-warning'>
++                  {t('conversation.hostTools.offline')}
++                </span>
++              )}
++              {rowCached && (
++                <span className='shrink-0 rounded-4px bg-fill-2 px-4px text-11px leading-16px font-[400] text-t-tertiary'>
++                  {t('conversation.hostTools.cached')}
++                </span>
++              )}
+               {forkLineage && (
+                 <Tooltip
+                   content={
+@@ -339,6 +381,9 @@
+                       </div>
+                     </Menu.Item>
+                   )}
++                  {/* Handing this conversation's work to another session, and quoting its context into a new
++                      one. Both call the host; neither sends anything on its own. */}
++                  <HostCrossSessionMenuItems conversation={conversation} />
+                   <Menu.Item key='archive'>
+                     <div className='flex items-center gap-8px'>
+                       <FolderClose theme='outline' size='14' />
+diff --git a/packages/desktop/src/renderer/components/layout/Sider/SiderNav/index.ts b/packages/desktop/src/renderer/components/layout/Sider/SiderNav/index.ts
+--- a/packages/desktop/src/renderer/components/layout/Sider/SiderNav/index.ts
++++ b/packages/desktop/src/renderer/components/layout/Sider/SiderNav/index.ts
+@@ -1,5 +1,6 @@
+ export { default as SiderAssistantEntry } from './SiderAssistantEntry';
+ export { default as SiderHostsEntry } from './SiderHostsEntry';
++export { default as SiderHostToolEntry } from './SiderHostToolEntry';
+ export { default as SiderNewConversationEntry } from './SiderNewConversationEntry';
+ export { default as SiderScheduledEntry } from './SiderScheduledEntry';
+ export { default as SiderSearchEntry } from './SiderSearchEntry';
+diff --git a/packages/desktop/src/renderer/components/layout/Sider/index.tsx b/packages/desktop/src/renderer/components/layout/Sider/index.tsx
+--- a/packages/desktop/src/renderer/components/layout/Sider/index.tsx
++++ b/packages/desktop/src/renderer/components/layout/Sider/index.tsx
+@@ -6,7 +6,9 @@
+ import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
+ import { blurActiveElement } from '@renderer/utils/ui/focus';
+ import { useThemeContext } from '@renderer/hooks/context/ThemeContext';
+-import { SiderToolbar, SiderSearchEntry, SiderHostsEntry, SiderNewConversationEntry } from './SiderNav';
++import { Inbox, Search } from '@icon-park/react';
++import { useTranslation } from 'react-i18next';
++import { SiderToolbar, SiderSearchEntry, SiderHostsEntry, SiderHostToolEntry, SiderNewConversationEntry } from './SiderNav';
+ import SiderFooter from './SiderFooter';
+ import siderStyles from './Sider.module.css';
+ 
+@@ -27,6 +29,7 @@
+   const navigate = useNavigate();
+   const { closePreview } = usePreviewContext();
+   const { theme, setTheme } = useThemeContext();
++  const { t } = useTranslation();
+   const [isBatchMode, setIsBatchMode] = useState(false);
+   const isSettings = pathname.startsWith('/settings');
+   const lastNonSettingsPathRef = useRef('/guid');
+@@ -91,6 +94,21 @@
+     }
+   };
+ 
++  // The two cross-session surfaces open as pages of their own: a phone shows one column, so a list of hits
++  // or of waiting work needs the room.
++  const openHostPage = (path: string) => {
++    cleanupSiderTooltips();
++    blurActiveElement();
++    closePreview();
++    setIsBatchMode(false);
++    Promise.resolve(navigate(path)).catch((error) => {
++      console.error('Navigation failed:', error);
++    });
++    if (onSessionClick) {
++      onSessionClick();
++    }
++  };
++
+   const handleQuickThemeToggle = () => {
+     void setTheme(theme === 'dark' ? 'light' : 'dark');
+   };
+@@ -149,6 +167,27 @@
+               siderTooltipProps={siderTooltipProps}
+               onClick={handleHostsClick}
+             />
++            {/* Content search across every saved host, and the work waiting on the user */}
++            <SiderHostToolEntry
++              isMobile={isMobile}
++              isActive={pathname.startsWith('/search')}
++              collapsed={collapsed}
++              label={t('conversation.hostTools.searchEntry')}
++              testId='sider-host-search-entry'
++              icon={<Search theme='outline' size='16' fill='currentColor' />}
++              siderTooltipProps={siderTooltipProps}
++              onClick={() => openHostPage('/search')}
++            />
++            <SiderHostToolEntry
++              isMobile={isMobile}
++              isActive={pathname.startsWith('/inbox')}
++              collapsed={collapsed}
++              label={t('conversation.hostTools.inboxEntry')}
++              testId='sider-host-inbox-entry'
++              icon={<Inbox theme='outline' size='16' fill='currentColor' />}
++              siderTooltipProps={siderTooltipProps}
++              onClick={() => openHostPage('/inbox')}
++            />
+             {/* Divider between fixed top nav and scrollable content area */}
+             <div
+               className={classNames(
+diff --git a/packages/desktop/src/renderer/components/layout/Router.tsx b/packages/desktop/src/renderer/components/layout/Router.tsx
+--- a/packages/desktop/src/renderer/components/layout/Router.tsx
++++ b/packages/desktop/src/renderer/components/layout/Router.tsx
+@@ -7,6 +7,8 @@
+ const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
+ const Guid = React.lazy(() => import('@renderer/pages/guid'));
+ const HostsPage = React.lazy(() => import('@renderer/pages/hosts'));
++const HostSearchPage = React.lazy(() => import('@renderer/pages/hostSearch'));
++const HostInboxPage = React.lazy(() => import('@renderer/pages/hostInbox'));
+ const EscapeHatchSettings = React.lazy(() => import('@renderer/pages/settings/EscapeHatchSettings'));
+ const AppearanceSettings = React.lazy(() => import('@renderer/pages/settings/AppearanceSettings'));
+ const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemSettings'));
+@@ -54,6 +56,9 @@
+           <Route path='/guid' element={withRouteFallback(Guid)} />
+           <Route path='/conversation/:id' element={withRouteFallback(Conversation)} />
+           <Route path='/hosts' element={withRouteFallback(HostsPage)} />
++          {/* Cross-session surfaces: content search over every saved host, and the work waiting on the user */}
++          <Route path='/search' element={withRouteFallback(HostSearchPage)} />
++          <Route path='/inbox' element={withRouteFallback(HostInboxPage)} />
+           {/* A session is created host first, so the escape hatch addresses a saved host here. */}
+           <Route path='/settings/escape' element={withRouteFallback(EscapeHatchSettings)} />
+           <Route path='/settings/appearance' element={withRouteFallback(AppearanceSettings)} />
+diff --git a/packages/desktop/src/renderer/pages/conversation/index.tsx b/packages/desktop/src/renderer/pages/conversation/index.tsx
+--- a/packages/desktop/src/renderer/pages/conversation/index.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/index.tsx
+@@ -12,6 +12,7 @@
+ import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
+ import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
+ import { getSnapshotConversationProjectId } from '@/renderer/pages/conversation/GroupedHistory/hooks/useConversationListSync';
++import { HostConversationFailure, HostReconnectBanner } from '@renderer/host/HostConversationFailure';
+ 
+ const ChatConversationIndex: React.FC = () => {
+   const { id } = useParams();
+@@ -22,7 +23,7 @@
+   const notFoundHandledIdRef = useRef<string | undefined>(undefined);
+   const defaultConversationTitle = t('conversation.welcome.newConversation');
+ 
+-  const { data, isLoading, mutate } = useSWR(id ? `conversation/${id}` : null, () => {
++  const { data, error, isLoading, mutate } = useSWR(id ? `conversation/${id}` : null, () => {
+     return getConversationOrNull(id!);
+   });
+ 
+@@ -99,15 +100,28 @@
+   // Conversation does not exist (e.g. navigating back to a deleted one via
+   // browser history): show a toast and replace the route with home, so we
+   // don't render an empty skeleton. Fire at most once per id.
++  //
++  // A request that failed is NOT that case: a conversation this host could not
++  // read keeps its route and shows the host's own code and reason, because
++  // replacing it with home would report a reachable session as deleted.
+   useEffect(() => {
+-    if (!id || isLoading || data || notFoundHandledIdRef.current === id) return;
++    if (!id || isLoading || error || data || notFoundHandledIdRef.current === id) return;
+     notFoundHandledIdRef.current = id;
+     Message.warning(t('conversation.notFound'));
+     navigate('/', { replace: true });
+-  }, [id, isLoading, data, navigate, t]);
++  }, [error, id, isLoading, data, navigate, t]);
+ 
+   if (isLoading) return <Spin loading></Spin>;
+-  return <ChatConversation conversation={data ?? undefined}></ChatConversation>;
++  // The conversation could not be read: the host's code and reason, and the retry that asks again.
++  if (error) return <HostConversationFailure error={error} onRetry={() => void mutate()} />;
++  return (
++    <div className='flex h-full min-h-0 flex-col'>
++      <HostReconnectBanner />
++      <div className='min-h-0 flex-1'>
++        <ChatConversation conversation={data ?? undefined}></ChatConversation>
++      </div>
++    </div>
++  );
+ };
+ 
+ export default ChatConversationIndex;
+diff --git a/packages/desktop/src/renderer/components/media/FileAttachButton.tsx b/packages/desktop/src/renderer/components/media/FileAttachButton.tsx
+--- a/packages/desktop/src/renderer/components/media/FileAttachButton.tsx
++++ b/packages/desktop/src/renderer/components/media/FileAttachButton.tsx
+@@ -6,6 +6,7 @@
+ 
+ import type { IConversationMcpStatus, IConversationMcpStatusKind } from '@/common/config/storage';
+ import { ipcBridge } from '@/common';
++import { HOST_ATTACHMENTS_SUPPORTED } from '@/common/host/hostAttachments';
+ import { Button, Message, Trigger } from '@arco-design/web-react';
+ import { FolderOpen, Lightning, Paperclip, Plus, Right, Shield } from '@icon-park/react';
+ import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
+@@ -127,6 +128,10 @@
+     [conversationContext?.conversation_id, onLocalFilesAdded, t]
+   );
+ 
++  // 宿主尚不支持附件：入口保留但点不动，原因写在按钮与菜单项上。
++  // This host cannot receive attachments yet: the entry stays where it was, disabled, and says why.
++  const attachUnsupported = !HOST_ATTACHMENTS_SUPPORTED;
++  const attachUnsupportedReason = t('conversation.hostTools.attachmentsUnsupported');
+   const isDesktop = isElectronDesktop();
+   const hasSkills = skillNames.length > 0;
+   const hasMcpServers = mcpStatuses.length > 0;
+@@ -138,6 +143,8 @@
+         type='secondary'
+         shape='circle'
+         icon={plusIcon}
++        disabled={attachUnsupported}
++        title={attachUnsupported ? attachUnsupportedReason : undefined}
+         onClick={openFileSelector}
+         data-testid='aionrs-attach-folder-btn'
+       />
+@@ -278,24 +285,35 @@
+ 
+       {/* 文件操作最常用，在最下（离 + 最近） */}
+       <div className='px-6px'>
+-        {!isDesktop && (
++        {attachUnsupported ? (
+           <MenuItem
+-            icon={<FolderOpen theme='outline' size={15} strokeWidth={2.5} />}
+-            label={t('common.fileAttach.myDevice', { defaultValue: 'Upload from device' })}
+-            onClick={() => {
+-              fileInputRef.current?.click();
+-              setOpen(false);
+-            }}
++            icon={<Paperclip theme='outline' size={15} strokeWidth={2.5} />}
++            label={t('common.fileAttach.addFiles', { defaultValue: 'Add files' })}
++            description={attachUnsupportedReason}
++            className='cursor-not-allowed opacity-60'
+           />
++        ) : (
++          <>
++            {!isDesktop && (
++              <MenuItem
++                icon={<FolderOpen theme='outline' size={15} strokeWidth={2.5} />}
++                label={t('common.fileAttach.myDevice', { defaultValue: 'Upload from device' })}
++                onClick={() => {
++                  fileInputRef.current?.click();
++                  setOpen(false);
++                }}
++              />
++            )}
++            <MenuItem
++              icon={<Paperclip theme='outline' size={15} strokeWidth={2.5} />}
++              label={t('common.fileAttach.addFiles', { defaultValue: 'Add files' })}
++              onClick={() => {
++                openFileSelector();
++                setOpen(false);
++              }}
++            />
++          </>
+         )}
+-        <MenuItem
+-          icon={<Paperclip theme='outline' size={15} strokeWidth={2.5} />}
+-          label={t('common.fileAttach.addFiles', { defaultValue: 'Add files' })}
+-          onClick={() => {
+-            openFileSelector();
+-            setOpen(false);
+-          }}
+-        />
+       </div>
+     </div>
+   );
+diff --git a/packages/desktop/src/renderer/components/chat/MobileActionSheet/useAttachEntry.tsx b/packages/desktop/src/renderer/components/chat/MobileActionSheet/useAttachEntry.tsx
+--- a/packages/desktop/src/renderer/components/chat/MobileActionSheet/useAttachEntry.tsx
++++ b/packages/desktop/src/renderer/components/chat/MobileActionSheet/useAttachEntry.tsx
+@@ -5,6 +5,7 @@
+  */
+ 
+ import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
++import { HOST_ATTACHMENTS_SUPPORTED } from '@/common/host/hostAttachments';
+ import { FileService, type FileMetadata } from '@/renderer/services/FileService';
+ import { isElectronDesktop } from '@/renderer/utils/platform';
+ import { Message } from '@arco-design/web-react';
+@@ -67,6 +68,23 @@
+   }, []);
+ 
+   const entries = useMemo<MobileActionSheetEntry[]>(() => {
++    // 宿主暂不支持接收附件：入口保留在原处但不可点，并写明原因，避免留下一个点了必失败的按钮。
++    // This host cannot receive attachments yet: the entry stays in place, disabled, and says why, so no
++    // button here can only fail.
++    if (!HOST_ATTACHMENTS_SUPPORTED) {
++      return [
++        {
++          key: 'attach',
++          icon: <FolderUpload theme='outline' size='16' />,
++          label: t('common.fileAttach.addFiles', { defaultValue: 'Add files' }),
++          description: t('conversation.hostTools.attachmentsUnsupported'),
++          variant: 'muted',
++          dividerBefore,
++          disabled: true,
++        },
++      ];
++    }
++
+     if (isDesktop) {
+       return [
+         {
+diff --git a/packages/desktop/src/renderer/pages/guid/components/GuidActionRow.tsx b/packages/desktop/src/renderer/pages/guid/components/GuidActionRow.tsx
+--- a/packages/desktop/src/renderer/pages/guid/components/GuidActionRow.tsx
++++ b/packages/desktop/src/renderer/pages/guid/components/GuidActionRow.tsx
+@@ -5,6 +5,7 @@
+  */
+ 
+ import { ipcBridge } from '@/common';
++import { HOST_ATTACHMENTS_SUPPORTED } from '@/common/host/hostAttachments';
+ import type { IMcpServer, IProvider, TProviderWithModel } from '@/common/config/storage';
+ import AgentModeSelector from '@/renderer/components/agent/AgentModeSelector';
+ import { DROPDOWN_SEARCH_THRESHOLD } from '@/renderer/components/agent/runtimeSelectorOptions';
+@@ -318,7 +319,20 @@
+ 
+     // Match the conversation send box: WebUI offers both the backend-machine
+     // picker and an upload from the phone/current browser device.
+-    if (isWebUI) {
++    //
++    // 宿主尚不支持接收附件：入口保留在原处但不可点，并写明原因。
++    // This host cannot receive attachments yet, so the entry stays in place, disabled, and says why.
++    if (!HOST_ATTACHMENTS_SUPPORTED) {
++      entries.push({
++        key: 'attach',
++        icon: <FolderUpload theme='outline' size='16' />,
++        label: t('common.fileAttach.addFiles', { defaultValue: 'Add files' }),
++        description: t('conversation.hostTools.attachmentsUnsupported'),
++        variant: 'muted',
++        dividerBefore: true,
++        disabled: true,
++      });
++    } else if (isWebUI) {
+       entries.push(
+         {
+           key: 'attach-host-files',
+@@ -449,7 +463,17 @@
+         }
+       }}
+     >
+-      {isWebUI ? (
++      {!HOST_ATTACHMENTS_SUPPORTED ? (
++        // 宿主尚不支持接收附件：入口保留但点不动，原因写在菜单项上。
++        // This host cannot receive attachments yet: the entry stays, disabled, and names the reason.
++        <Menu.Item key='file' disabled>
++          <div className='flex items-center gap-8px'>
++            <UploadOne theme='outline' size='16' fill={iconColors.secondary} style={{ lineHeight: 0 }} />
++            <span>{t('common.fileAttach.addFiles')}</span>
++            <span className='text-12px text-t-tertiary'>{t('conversation.hostTools.attachmentsUnsupported')}</span>
++          </div>
++        </Menu.Item>
++      ) : isWebUI ? (
+         <>
+           <Menu.Item key='file'>
+             <div className='flex items-center gap-8px'>
+diff --git a/packages/desktop/src/renderer/hooks/file/useDragUpload.ts b/packages/desktop/src/renderer/hooks/file/useDragUpload.ts
+--- a/packages/desktop/src/renderer/hooks/file/useDragUpload.ts
++++ b/packages/desktop/src/renderer/hooks/file/useDragUpload.ts
+@@ -97,7 +97,14 @@
+         }
+       } catch (err) {
+         console.error('Failed to process dropped files:', err);
+-        Message.error(t('conversation.workspace.dragFailed', 'Failed to process dropped files'));
++        // 宿主暂不支持接收附件：失败原因就是它，直接说明，而不是笼统的"处理失败"。
++        // The host cannot receive attachments yet: that refusal is the failure, and it is named as itself
++        // instead of as a generic processing failure.
++        Message.error(
++          err instanceof Error && err.message === 'HOST_ATTACHMENTS_UNSUPPORTED'
++            ? t('conversation.hostTools.attachmentsUnsupported')
++            : t('conversation.workspace.dragFailed', 'Failed to process dropped files')
++        );
+       }
+     },
+     [conversation_id, onFilesAdded, supportedExts, t]
+diff --git a/packages/desktop/src/renderer/pages/guid/GuidPage.tsx b/packages/desktop/src/renderer/pages/guid/GuidPage.tsx
+--- a/packages/desktop/src/renderer/pages/guid/GuidPage.tsx
++++ b/packages/desktop/src/renderer/pages/guid/GuidPage.tsx
+@@ -15,6 +15,7 @@
+ import { appendPromptToDraft } from '@/renderer/hooks/chat/useSendBoxDraft';
+ import { getFuzzyMatchIndices, useSlashCommandController } from '@/renderer/hooks/chat/useSlashCommandController';
+ import { openExternalUrl } from '@/renderer/utils/platform';
++import { setSelectedHostId } from '@renderer/host/selectedHost';
+ import SlashCommandMenu, { type SlashCommandMenuItem } from '@/renderer/components/chat/SlashCommandMenu';
+ import AssistantSelectionArea from './components/AssistantSelectionArea';
+ import GuidActionRow from './components/GuidActionRow';
+@@ -49,6 +50,8 @@
+   preservePrefillDraft?: boolean;
+   focusPrefill?: boolean;
+   workspace?: string;
++  /** The host the handed-over workspace belongs to; it selects that host for the next session. */
++  hostId?: string;
+   [key: string]: unknown;
+ };
+ 
+@@ -546,6 +549,11 @@
+     if (!preserveCurrentDraft && !(location.state as { workspace?: string } | null)?.workspace) {
+       guidInput.setDir('');
+     }
++    // A workspace is handed over together with the host it lives on (a sidebar group, a quoted conversation),
++    // so that host is the one the next session is created on — never an unrelated default row.
++    if (typeof prefillState?.hostId === 'string' && prefillState.hostId) {
++      setSelectedHostId(prefillState.hostId);
++    }
+   }, [guidInput.setDir, guidInput.setFiles, guidInput.setInput, guidInput.setLoading, location.key, location.state]);
+ 
+   // A draft-preserving prefill is an action, not durable navigation state.
+diff --git a/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts b/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
+--- a/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
++++ b/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
+@@ -765,6 +765,53 @@
+   | 'conversation.historySearch.title'
+   | 'conversation.historySearch.tooltip'
+   | 'conversation.historySearch.untitled'
++  | 'conversation.hostTools.attachmentsUnsupported'
++  | 'conversation.hostTools.cached'
++  | 'conversation.hostTools.filterAgent'
++  | 'conversation.hostTools.filterAll'
++  | 'conversation.hostTools.filterHost'
++  | 'conversation.hostTools.inboxEmpty'
++  | 'conversation.hostTools.inboxEntry'
++  | 'conversation.hostTools.inboxKindApproval'
++  | 'conversation.hostTools.inboxKindBusy'
++  | 'conversation.hostTools.inboxKindFailure'
++  | 'conversation.hostTools.inboxKindQuestion'
++  | 'conversation.hostTools.inboxPending'
++  | 'conversation.hostTools.inboxRefresh'
++  | 'conversation.hostTools.inboxScope'
++  | 'conversation.hostTools.inboxTitle'
++  | 'conversation.hostTools.offline'
++  | 'conversation.hostTools.openFailed'
++  | 'conversation.hostTools.queueKind'
++  | 'conversation.hostTools.queueKindNotify'
++  | 'conversation.hostTools.queueKindNotifyHint'
++  | 'conversation.hostTools.queueKindRequest'
++  | 'conversation.hostTools.queueKindRequestHint'
++  | 'conversation.hostTools.queueMenu'
++  | 'conversation.hostTools.queueSend'
++  | 'conversation.hostTools.queueSent'
++  | 'conversation.hostTools.queueTarget'
++  | 'conversation.hostTools.queueTargetNone'
++  | 'conversation.hostTools.queueTargetRequired'
++  | 'conversation.hostTools.queueText'
++  | 'conversation.hostTools.queueTextPlaceholder'
++  | 'conversation.hostTools.queueTextRequired'
++  | 'conversation.hostTools.queueTitle'
++  | 'conversation.hostTools.reconnecting'
++  | 'conversation.hostTools.referenceMenu'
++  | 'conversation.hostTools.retry'
++  | 'conversation.hostTools.searchAction'
++  | 'conversation.hostTools.searchCoverageComplete'
++  | 'conversation.hostTools.searchCoverageFailed'
++  | 'conversation.hostTools.searchCoveragePartial'
++  | 'conversation.hostTools.searchCoverageProblems'
++  | 'conversation.hostTools.searchCoverageTruncated'
++  | 'conversation.hostTools.searchEmpty'
++  | 'conversation.hostTools.searchEntry'
++  | 'conversation.hostTools.searchPlaceholder'
++  | 'conversation.hostTools.searchQueryRequired'
++  | 'conversation.hostTools.searchTitle'
++  | 'conversation.hostTools.searchUntitled'
+   | 'conversation.mcp.loaded'
+   | 'conversation.mcp.managementHint'
+   | 'conversation.mcp.openSettings'
+@@ -1082,6 +1129,8 @@
+   | 'guid.promptExamplesHint'
+   | 'guid.selectAssistantHint'
+   | 'guid.workspace.clearWorkspace'
++  | 'guid.workspace.hostDirectories'
++  | 'guid.workspace.hostDirectoriesEmpty'
+   | 'guid.workspace.noProject'
+   | 'guid.workspace.optional'
+   | 'guid.workspace.searchPlaceholder'
+@@ -2082,6 +2131,7 @@
+   | 'settings.hosts.addressRequired'
+   | 'settings.hosts.agentTarget'
+   | 'settings.hosts.cancel'
++  | 'settings.hosts.capabilities'
+   | 'settings.hosts.createTitle'
+   | 'settings.hosts.delete'
+   | 'settings.hosts.deleteConfirm'
+@@ -2114,13 +2164,16 @@
+   | 'settings.hosts.retry'
+   | 'settings.hosts.save'
+   | 'settings.hosts.saving'
++  | 'settings.hosts.sessionCount'
+   | 'settings.hosts.targetLinuxHint'
+   | 'settings.hosts.targetNative'
+   | 'settings.hosts.targetNativeHint'
+   | 'settings.hosts.targetNativeUnsupported'
++  | 'settings.hosts.targetUnsupportedNote'
+   | 'settings.hosts.targetWsl'
+   | 'settings.hosts.title'
+   | 'settings.hosts.username'
++  | 'settings.hosts.valueNone'
+   | 'settings.hosts.version'
+   | 'settings.hosts.wslBadge'
+   | 'settings.hosts.wslDistribution'
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/en-US/conversation.json b/packages/desktop/src/renderer/services/i18n/locales/en-US/conversation.json
+--- a/packages/desktop/src/renderer/services/i18n/locales/en-US/conversation.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/en-US/conversation.json
+@@ -102,6 +102,55 @@
+     "loadingMore": "Loading more...",
+     "untitled": "Untitled conversation"
+   },
++  "hostTools": {
++    "searchEntry": "Search conversation content",
++    "searchTitle": "Search conversation content",
++    "searchPlaceholder": "Search messages in every session…",
++    "searchAction": "Search",
++    "searchQueryRequired": "Type what to search for.",
++    "searchEmpty": "No matching messages.",
++    "searchUntitled": "Untitled conversation",
++    "searchCoverageComplete": "Every indexed host answered, so these results cover all of its sessions.",
++    "searchCoveragePartial": "A host did not answer, so these results may be incomplete.",
++    "searchCoverageTruncated": "Only the first matches of each session are shown.",
++    "searchCoverageFailed": "Not searched: {{sources}}",
++    "inboxEntry": "To do",
++    "inboxTitle": "To do",
++    "inboxRefresh": "Refresh",
++    "inboxEmpty": "Nothing is waiting right now.",
++    "inboxKindApproval": "Approval",
++    "inboxKindQuestion": "Question",
++    "inboxKindFailure": "Failed",
++    "inboxKindBusy": "Working",
++    "filterHost": "Host",
++    "filterAgent": "Agent",
++    "filterAll": "All",
++    "offline": "offline",
++    "cached": "cached",
++    "queueMenu": "Send to another conversation",
++    "queueTitle": "Send to another conversation",
++    "queueTarget": "Target conversation",
++    "queueTargetNone": "There is no other conversation to hand this to yet.",
++    "queueTargetRequired": "Choose the conversation to hand this to.",
++    "queueKind": "Message kind",
++    "queueKindNotify": "Notify only",
++    "queueKindNotifyHint": "The target session shows this as a notice; it does not run it.",
++    "queueKindRequest": "Send when that session is next opened",
++    "queueKindRequestHint": "Queued now, sent automatically the next time that session is opened.",
++    "queueText": "Message",
++    "queueTextPlaceholder": "What the other session should see",
++    "queueTextRequired": "Write the message first.",
++    "queueSend": "Queue it",
++    "queueSent": "Queued for {{target}}.",
++    "referenceMenu": "Quote into a new conversation",
++    "openFailed": "This conversation could not be opened: {{reason}}",
++    "reconnecting": "Connection lost — reconnecting automatically…",
++    "retry": "Retry",
++    "attachmentsUnsupported": "This host cannot receive attachments yet, so this build offers no attach button.",
++    "inboxScope": "This host reports the waiting-work scope as: {{scope}}",
++    "inboxPending": "{{approvals}} approvals · {{questions}} questions waiting",
++    "searchCoverageProblems": "Parts of the search that were not read: {{problems}}"
++  },
+   "dropdown": {
+     "cliAgents": "CLI Agents",
+     "presetAssistants": "Preset Assistants"
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json
+@@ -102,6 +102,55 @@
+     "loadingMore": "正在加载更多...",
+     "untitled": "未命名会话"
+   },
++  "hostTools": {
++    "searchEntry": "搜索对话内容",
++    "searchTitle": "搜索对话内容",
++    "searchPlaceholder": "搜索所有会话中的消息…",
++    "searchAction": "搜索",
++    "searchQueryRequired": "请先输入要搜索的内容。",
++    "searchEmpty": "没有匹配的消息。",
++    "searchUntitled": "未命名会话",
++    "searchCoverageComplete": "所有已索引的主机均已返回，结果覆盖其全部会话。",
++    "searchCoveragePartial": "有主机未返回，结果可能不完整。",
++    "searchCoverageTruncated": "每个会话只显示前若干条命中。",
++    "searchCoverageFailed": "未搜索：{{sources}}",
++    "inboxEntry": "待办",
++    "inboxTitle": "待办",
++    "inboxRefresh": "刷新",
++    "inboxEmpty": "当前没有待处理事项。",
++    "inboxKindApproval": "待审批",
++    "inboxKindQuestion": "待回答",
++    "inboxKindFailure": "失败",
++    "inboxKindBusy": "运行中",
++    "filterHost": "主机",
++    "filterAgent": "Agent",
++    "filterAll": "全部",
++    "offline": "离线",
++    "cached": "仅缓存",
++    "queueMenu": "发消息到其它会话",
++    "queueTitle": "发消息到其它会话",
++    "queueTarget": "目标会话",
++    "queueTargetNone": "暂时没有其它会话可以投递。",
++    "queueTargetRequired": "请选择要投递的会话。",
++    "queueKind": "消息语义",
++    "queueKindNotify": "仅通知",
++    "queueKindNotifyHint": "目标会话只会看到这条通知，不会执行它。",
++    "queueKindRequest": "下次打开该会话时自动发送",
++    "queueKindRequestHint": "先排队，目标会话下次被打开时自动发送。",
++    "queueText": "消息内容",
++    "queueTextPlaceholder": "让另一个会话看到的内容",
++    "queueTextRequired": "请先填写消息内容。",
++    "queueSend": "入队",
++    "queueSent": "已投递到 {{target}}。",
++    "referenceMenu": "引用到新会话",
++    "openFailed": "无法打开该会话：{{reason}}",
++    "reconnecting": "连接中断，正在自动重连…",
++    "retry": "重试",
++    "attachmentsUnsupported": "宿主暂不支持接收附件，因此本构建不提供附件入口。",
++    "inboxScope": "宿主报告的待办范围：{{scope}}",
++    "inboxPending": "待审批 {{approvals}} · 待回答 {{questions}}",
++    "searchCoverageProblems": "未读取到的部分：{{problems}}"
++  },
+   "dropdown": {
+     "cliAgents": "CLI Agents",
+     "presetAssistants": "预设助手"
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-TW/conversation.json b/packages/desktop/src/renderer/services/i18n/locales/zh-TW/conversation.json
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-TW/conversation.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-TW/conversation.json
+@@ -102,6 +102,55 @@
+     "loadingMore": "載入更多...",
+     "untitled": "未命名對話"
+   },
++  "hostTools": {
++    "searchEntry": "搜尋對話內容",
++    "searchTitle": "搜尋對話內容",
++    "searchPlaceholder": "搜尋所有對話中的訊息…",
++    "searchAction": "搜尋",
++    "searchQueryRequired": "請先輸入要搜尋的內容。",
++    "searchEmpty": "沒有符合的訊息。",
++    "searchUntitled": "未命名對話",
++    "searchCoverageComplete": "所有已建立索引的主機皆已回應，結果涵蓋其全部對話。",
++    "searchCoveragePartial": "有主機未回應，結果可能不完整。",
++    "searchCoverageTruncated": "每個對話只顯示前幾筆命中。",
++    "searchCoverageFailed": "未搜尋：{{sources}}",
++    "inboxEntry": "待辦",
++    "inboxTitle": "待辦",
++    "inboxRefresh": "重新整理",
++    "inboxEmpty": "目前沒有待處理事項。",
++    "inboxKindApproval": "待核准",
++    "inboxKindQuestion": "待回答",
++    "inboxKindFailure": "失敗",
++    "inboxKindBusy": "執行中",
++    "filterHost": "主機",
++    "filterAgent": "Agent",
++    "filterAll": "全部",
++    "offline": "離線",
++    "cached": "僅快取",
++    "queueMenu": "傳訊息到其它對話",
++    "queueTitle": "傳訊息到其它對話",
++    "queueTarget": "目標對話",
++    "queueTargetNone": "目前沒有其它對話可以投遞。",
++    "queueTargetRequired": "請選擇要投遞的對話。",
++    "queueKind": "訊息語意",
++    "queueKindNotify": "僅通知",
++    "queueKindNotifyHint": "目標對話只會看到這則通知，不會執行它。",
++    "queueKindRequest": "下次開啟該對話時自動傳送",
++    "queueKindRequestHint": "先排隊，目標對話下次被開啟時自動傳送。",
++    "queueText": "訊息內容",
++    "queueTextPlaceholder": "讓另一個對話看到的內容",
++    "queueTextRequired": "請先填寫訊息內容。",
++    "queueSend": "排入佇列",
++    "queueSent": "已投遞到 {{target}}。",
++    "referenceMenu": "引用到新對話",
++    "openFailed": "無法開啟該對話：{{reason}}",
++    "reconnecting": "連線中斷，正在自動重連…",
++    "retry": "重試",
++    "attachmentsUnsupported": "主機暫不支援接收附件，因此本建置不提供附件入口。",
++    "inboxScope": "主機回報的待辦範圍：{{scope}}",
++    "inboxPending": "待核准 {{approvals}} · 待回答 {{questions}}",
++    "searchCoverageProblems": "未讀取到的部分：{{problems}}"
++  },
+   "dropdown": {
+     "cliAgents": "CLI Agents",
+     "presetAssistants": "預設助手"
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json b/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json
+--- a/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json
+@@ -872,7 +872,11 @@
+     "portInvalid": "Port must be a whole number between 1 and 65535.",
+     "distributionRequired": "Enter the WSL distribution name.",
+     "requestFailed": "The host refused this request ({{code}}): {{reason}}",
+-    "reasonUnknown": "no reason given"
++    "reasonUnknown": "no reason given",
++    "sessionCount": "{{total}} sessions",
++    "capabilities": "Capabilities",
++    "valueNone": "—",
++    "targetUnsupportedNote": "Target not supported: this app has no Agent entry for what this host would run, so no session can start on it."
+   },
+   "escape": {
+     "title": "Escape hatch",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
+@@ -872,7 +872,11 @@
+     "portInvalid": "端口必须是 1 到 65535 的整数。",
+     "distributionRequired": "请填写 WSL 发行版名称。",
+     "requestFailed": "宿主拒绝了这个请求（{{code}}）：{{reason}}",
+-    "reasonUnknown": "未给出原因"
++    "reasonUnknown": "未给出原因",
++    "sessionCount": "{{total}} 个会话",
++    "capabilities": "能力",
++    "valueNone": "—",
++    "targetUnsupportedNote": "不支持该目标：本应用尚无对应的 Agent 入口，无法在其上启动会话。"
+   },
+   "escape": {
+     "title": "逃生舱",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json b/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json
+@@ -872,7 +872,11 @@
+     "portInvalid": "連接埠必須是 1 到 65535 的整數。",
+     "distributionRequired": "請填寫 WSL 發行版名稱。",
+     "requestFailed": "宿主拒絕了這個請求（{{code}}）：{{reason}}",
+-    "reasonUnknown": "未提供原因"
++    "reasonUnknown": "未提供原因",
++    "sessionCount": "{{total}} 個對話",
++    "capabilities": "能力",
++    "valueNone": "—",
++    "targetUnsupportedNote": "不支援該目標：本應用尚無對應的 Agent 入口，無法在其上啟動對話。"
+   },
+   "escape": {
+     "title": "逃生艙",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/en-US/guid.json b/packages/desktop/src/renderer/services/i18n/locales/en-US/guid.json
+--- a/packages/desktop/src/renderer/services/i18n/locales/en-US/guid.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/en-US/guid.json
+@@ -12,6 +12,8 @@
+     "clearWorkspace": "Clear",
+     "specifyWorkspace": "Select project folder",
+     "searchPlaceholder": "Search projects…",
+-    "noProject": "No Project"
++    "noProject": "No Project",
++    "hostDirectories": "This host's folders",
++    "hostDirectoriesEmpty": "This host has no session yet, so no folder is known. Type one above."
+   }
+ }
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/guid.json b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/guid.json
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/guid.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/guid.json
+@@ -12,6 +12,8 @@
+     "clearWorkspace": "清除",
+     "specifyWorkspace": "选择项目文件夹",
+     "searchPlaceholder": "搜索项目…",
+-    "noProject": "不使用项目"
++    "noProject": "不使用项目",
++    "hostDirectories": "该主机的目录",
++    "hostDirectoriesEmpty": "该主机还没有会话，暂不知道目录，请在上方填写。"
+   }
+ }
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-TW/guid.json b/packages/desktop/src/renderer/services/i18n/locales/zh-TW/guid.json
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-TW/guid.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-TW/guid.json
+@@ -12,6 +12,8 @@
+     "clearWorkspace": "清除",
+     "specifyWorkspace": "選擇專案資料夾",
+     "searchPlaceholder": "搜尋專案…",
+-    "noProject": "不使用專案"
++    "noProject": "不使用專案",
++    "hostDirectories": "該主機的目錄",
++    "hostDirectoriesEmpty": "該主機還沒有對話，暫不知道目錄，請在上方填寫。"
+   }
+ }

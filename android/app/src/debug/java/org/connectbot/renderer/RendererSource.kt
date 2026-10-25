@@ -19,6 +19,11 @@ package org.connectbot.renderer
 
 import org.connectbot.agent.AgentChallenge
 import org.connectbot.agent.AgentConfigAccess
+import org.connectbot.agent.AgentLinkState
+import org.connectbot.agent.AgentMessageKind
+import org.connectbot.agent.AgentMessageQueueStats
+import org.connectbot.agent.AgentQueuedMessage
+import org.connectbot.agent.AgentTranscriptOutcome
 import org.connectbot.data.entity.Host
 import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
@@ -47,6 +52,11 @@ data class RendererSnapshot(
     val active: Boolean,
     /** True while the product is still opening [session]. */
     val loading: Boolean,
+    /**
+     * True while the product is running another operation on the open conversation. It is the repository's own busy
+     * fact, so the attention projection reports a running turn instead of one this host guessed.
+     */
+    val busy: Boolean = false,
     /** Host-generated identity of the turn accepted by this host, or null when no turn is running. */
     val turnId: String?,
     /** True between an accepted cancel request and its result. */
@@ -57,6 +67,16 @@ data class RendererSnapshot(
     val hosts: List<Host>,
     /** Last probe result per host and agent kind; rows are absent until a probe ran. */
     val availability: List<AgentAvailability>,
+    /**
+     * Link state the product holds for each host, live or recorded. A host no row names was never connected in this
+     * process and was never recorded, so it is unknown here rather than reported as reachable or offline.
+     */
+    val linkStates: Map<Long, AgentLinkState> = emptyMap(),
+    /**
+     * Host/agent pairs whose sessions were re-read from the remote in the last scan. Every other indexed row is
+     * served from the index cache, which is what the conversation row's own `cached` flag reports.
+     */
+    val scannedSources: Set<Pair<Long, AgentKind>> = emptySet(),
     /** Runtime generation stamped on every event this host emits. */
     val epoch: String,
     /** Last event sequence this host published in [epoch]. */
@@ -174,4 +194,42 @@ interface RendererSource {
      * host keeps the path it detected before instead of inventing one.
      */
     suspend fun refreshDetection(hostId: Long): List<AgentAvailability>
+
+    /**
+     * Searches the *content* of [sessions]' remote transcripts through the repository's own search entry: one
+     * bounded, read-only remote scan per host, which names why any part of the selection stayed unread instead of
+     * answering a history without that text. A host this app cannot reach keeps its own error, which the entry
+     * reports as that host's failure rather than as a search result.
+     */
+    suspend fun searchTranscripts(query: String, sessions: List<AgentSession>): AgentTranscriptOutcome
+
+    /**
+     * Every message the product still holds in its cross-conversation queue, oldest first. Reading the queue
+     * neither sends nor delivers anything: a queued request is handed to its conversation only when that
+     * conversation is next opened.
+     */
+    suspend fun queued(): List<AgentQueuedMessage>
+
+    /** What the queue holds now, including the overflow it dropped, which no other read of it could show. */
+    suspend fun queueStats(): AgentMessageQueueStats
+
+    /**
+     * Queues one message for [target] and answers its queue id, or null when the queue refused the message. Nothing
+     * is sent here — the queue delivers a request the next time that conversation is opened, which is why this entry
+     * can never claim a delivery.
+     */
+    suspend fun queue(target: AgentSession, kind: AgentMessageKind, text: String): String?
+
+    /**
+     * Withdraws the queued message [id] so it can never be delivered later; false when that id is not a pending
+     * message of this queue. No delivery of it is reported, because none happened.
+     */
+    suspend fun withdrawQueued(id: String): Boolean
+
+    /**
+     * Drops the session index cache through the repository's own clear entry and answers how many rows it holds
+     * afterwards. The call throws when the cache could not be dropped, so a caller never reports a cleanup that
+     * did not happen.
+     */
+    suspend fun clearIndex(): Int
 }

@@ -60,6 +60,29 @@ export function targetLabel(host: SavedHost): { key: string; values?: Record<str
   return { key: 'settings.hosts.targetNative' };
 }
 
+/** How many sessions this host's index holds, read as the count it named and never as an invented one. */
+export function sessionCountText(host: SavedHost, t: TFunction): string {
+  const count = host.session_count;
+  return typeof count === 'number' && Number.isFinite(count) && count >= 0
+    ? t('settings.hosts.sessionCount', { total: count })
+    : t('settings.hosts.valueNone');
+}
+
+/**
+ * One Agent's capabilities as chip labels. A capability map keeps only the entries the probe answered yes to
+ * (a false reading is not a capability), an array is read as the list itself, and anything unreadable — or
+ * empty — is no capability at all: the caller shows a dash rather than a placeholder.
+ */
+export function capabilityLabels(capabilities: HostAgentProbe['capabilities']): string[] {
+  if (Array.isArray(capabilities)) {
+    return capabilities.filter((entry): entry is string => typeof entry === 'string' && Boolean(entry.trim()));
+  }
+  if (!capabilities || typeof capabilities !== 'object') return [];
+  return Object.entries(capabilities)
+    .filter(([, value]) => value === true || (typeof value === 'string' && Boolean(value.trim())) || typeof value === 'number')
+    .map(([key, value]) => (value === true ? key : `${key}: ${String(value)}`));
+}
+
 /**
  * A distribution name must be safe to quote into the Windows shell, so only the characters WSL itself reports
  * are accepted — the same rule the host applies before it stores one.

@@ -227,6 +227,14 @@ class AgentRepository @Inject constructor(
 
     suspend fun refresh(hostId: Long? = null) = operation { refreshIndex(hostId, interactive = true) }
 
+    /**
+     * Drops the cached session index. Every row is re-readable from the host it names, so this clears a cache and
+     * never history: the open conversation keeps its handle, its loaded event window and its replay history under
+     * `agent-history`, and [selectedSession] and [activeSession] are untouched. The remote-read marks in
+     * [scannedSources] stay as they are, because they name which pair a remote read answered, not which rows the
+     * index holds. A failed write is added to [errors] and rethrown, so no caller can report a cleanup that did not
+     * happen, and the next refresh rebuilds the rows.
+     */
     suspend fun clearIndex() {
         jobs.submit {
             refreshMutex.withLock {
@@ -241,6 +249,17 @@ class AgentRepository @Inject constructor(
             }
         }.await()
     }
+
+    /**
+     * Link state this app holds per host: the pool's live fact wins, and without one the last recorded row is
+     * history, so a CONNECTED stored by an earlier process never reads as a running link. A host neither source
+     * names was never connected here and stays unknown instead of reported as reachable or offline.
+     */
+    fun hostLinkStates(): Map<Long, AgentLinkState> =
+        mutableLinkRecords.value.filter { it.agent == null }.associate { it.hostId to it.state } + mutableLiveLinkStates.value
+
+    /** Index rows this app holds per host right now, so a caller reports this app's own row count as it stands. */
+    fun sessionCounts(): Map<Long, Int> = mutableSessions.value.groupingBy { it.hostId }.eachCount()
 
     private suspend fun probeHost(hostId: Long, interactive: Boolean, force: Boolean): List<AgentAvailability> = probeMutex.withLock {
         val cached = mutableAvailability.value.filter { it.hostId == hostId }

@@ -19,7 +19,9 @@ package org.connectbot.renderer
 
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -33,6 +35,8 @@ import android.webkit.WebViewClient
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewAssetLoader
@@ -79,6 +83,16 @@ class RendererHostActivity : ComponentActivity() {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
     private lateinit var container: LinearLayout
+
+    /** The local-network grants this system may require; the shared rule keeps them identical to what tests check. */
+    private val networkGrants: List<String> = networkPermissions(Build.VERSION.SDK_INT)
+
+    private var permissionRequested = false
+    private var notice: TextView? = null
+
+    private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+        if (grants.any { !it.value }) showNetworkNotice()
+    }
 
     @Inject
     lateinit var source: AgentRendererSource
@@ -216,6 +230,7 @@ class RendererHostActivity : ComponentActivity() {
     }
 
     private fun handle(action: String, payload: JSONObject): ProbeResult = runBlocking {
+        localNetworkGate(action)?.let { return@runBlocking it }
         when (action) {
             "events.subscribe" -> {
                 subscribed = true
@@ -242,6 +257,55 @@ class RendererHostActivity : ComponentActivity() {
             if (closed || !subscribed || current !== bridge || bridge.documentId != document) return@post
             if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) reply?.postMessage(event)
         }
+    }
+
+    /**
+     * The nearby/local-network grants a host behind the LAN needs, asked for once, the first time an action has to
+     * reach one. A refusal is shown in the interface and in the answer of that route — never as a silent failure —
+     * so a user can grant the permission and retry the action that needed it.
+     */
+    private fun localNetworkGate(action: String): ProbeResult? {
+        if (action !in NETWORK_ACTIONS) return null
+        if (!localNetworkRefused(action, networkGrants, ::granted)) {
+            main.post { clearNetworkNotice() }
+            return null
+        }
+        main.post {
+            if (closed) return@post
+            if (!permissionRequested) {
+                permissionRequested = true
+                permissionLauncher.launch(networkGrants.toTypedArray())
+            }
+            showNetworkNotice()
+        }
+        return ProbeResult(
+            403,
+            json(
+                "success" to false,
+                "code" to LOCAL_NETWORK_PERMISSION_REQUIRED,
+                "error" to getString(R.string.renderer_local_network_denied),
+            ),
+        )
+    }
+
+    private fun granted(permission: String): Boolean = ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    /** Makes the degraded local-network access visible on the surface instead of leaving the routes to fail alone. */
+    private fun showNetworkNotice() {
+        if (closed) return
+        notice?.let { return }
+        val bar = TextView(this).apply {
+            setText(R.string.renderer_local_network_denied)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+        }
+        notice = bar
+        container.addView(bar, 0)
+    }
+
+    private fun clearNetworkNotice() {
+        val bar = notice ?: return
+        notice = null
+        container.removeView(bar)
     }
 
     private fun dispose(view: WebView) {

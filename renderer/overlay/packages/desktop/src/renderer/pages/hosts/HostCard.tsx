@@ -7,7 +7,7 @@ import type { SavedHost } from '@/common/host/hostTransport';
 import { Button, Popconfirm } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { osText, probeLabelKey, probeReading, targetLabel, type HostProbeReading } from './hostModel';
+import { capabilityLabels, osText, probeLabelKey, probeReading, sessionCountText, targetLabel, type HostProbeReading } from './hostModel';
 
 type Props = {
   host: SavedHost;
@@ -44,11 +44,21 @@ const HostCard: React.FC<Props> = ({ host, refreshing, failure, onRefresh, onEdi
         {host.username ? `${host.username}@` : ''}
         {host.hostname}:{host.port}
       </div>
+      <div className='flex flex-wrap items-center gap-6px'>
+        <span className='text-11px leading-16px text-t-tertiary'>{sessionCountText(host, t)}</span>
+        {/* A target this build cannot run an Agent in says so, instead of being offered as if it worked. */}
+        {host.target_supported === false && (
+          <span role='alert' className='text-11px leading-16px text-danger-6'>
+            {t('settings.hosts.targetUnsupportedNote')}
+          </span>
+        )}
+      </div>
 
       {host.detection.agents.length > 0 ? (
         <div className='flex flex-col gap-6px'>
           {host.detection.agents.map((agent) => {
             const reading = probeReading(agent, refreshing);
+            const capabilities = capabilityLabels(agent.capabilities);
             return (
               <div key={agent.id} className='flex flex-col gap-2px'>
                 <div className='flex flex-wrap items-center gap-6px'>
@@ -65,6 +75,19 @@ const HostCard: React.FC<Props> = ({ host, refreshing, failure, onRefresh, onEdi
                     {t('settings.hosts.version', { version: agent.version })}
                   </span>
                 )}
+                <span className='flex flex-wrap items-center gap-4px' data-testid={`host-capabilities-${host.id}-${agent.id}`}>
+                  <span className='text-11px leading-16px text-t-tertiary'>{t('settings.hosts.capabilities')}</span>
+                  {capabilities.length > 0 ? (
+                    capabilities.map((capability) => (
+                      <span key={capability} className={badge}>
+                        {capability}
+                      </span>
+                    ))
+                  ) : (
+                    // No capability is a dash, never a capability this build invented.
+                    <span className='text-11px leading-16px text-t-tertiary'>{t('settings.hosts.valueNone')}</span>
+                  )}
+                </span>
                 {/* The probe's own reason stays readable, and is never shown as a verdict of this refresh. */}
                 {agent.error && !refreshing && (
                   <span className='break-all text-11px leading-16px text-danger-6'>{agent.error}</span>

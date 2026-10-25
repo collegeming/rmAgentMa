@@ -119,6 +119,8 @@ class ProbeBridge(
                 "challenges.answer" -> setOf("challengeId")
                 "project.read" -> setOf("projectId")
                 "hosts.update", "hosts.delete", "detection.refresh", "hosts.refresh" -> setOf("hostId")
+                // A queued message is withdrawn by the id this host assigned when it queued it.
+                "queue.cancel" -> setOf("queueId")
                 // A terminal command is asked for either the open conversation or one saved host, and its
                 // directory travels in the body because the bridge carries only string parameters.
                 "terminal.open", "terminal.command.start" -> setOf("conversationId", "hostId")
@@ -212,6 +214,9 @@ class ProbeBridge(
             "artifacts.list", "projects.list", "project.read", "hosts.list", "hosts.create",
             "hosts.update", "hosts.delete", "detection.refresh", "hosts.refresh",
             "challenges.read", "challenges.answer", "terminal.open", "terminal.command.start",
+            // Cross-conversation state: one search over index rows and remote transcripts, the read-only attention
+            // inbox, the message queue that never sends by itself, one bounded context pack and the index cache.
+            "search.sessions", "inbox.list", "queue.list", "queue.send", "queue.cancel", "reference.pack", "index.clear",
             "assistants.list", "agents.list",
             "providers.list", "mcp.list", "skills.list", "cron.list", "teams.list", "adapters.list",
             "events.subscribe", "events.unsubscribe", "runtime.snapshot", "draft.load", "draft.save",
@@ -229,7 +234,7 @@ class ProbeBridge(
             "terminal.open", "terminal.command.start",
         )
         private val CONVERSATION_ACTIONS = ACTIONS.filter { action ->
-            action.substringBefore('.') in setOf("conversation", "messages", "runtime", "config", "turn", "approvals", "commands", "usage", "artifacts", "draft", "attachment", "events", "terminal")
+            action.substringBefore('.') in setOf("conversation", "messages", "runtime", "config", "turn", "approvals", "commands", "usage", "artifacts", "draft", "attachment", "events", "terminal", "reference")
         }.toSet()
 
         fun isOrigin(value: String): Boolean = try {

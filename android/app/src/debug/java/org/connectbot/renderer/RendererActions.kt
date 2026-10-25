@@ -20,9 +20,14 @@ package org.connectbot.renderer
 import kotlinx.coroutines.CancellationException
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConfigBusyException
+import org.connectbot.agent.AgentMessageKind
+import org.connectbot.agent.agentAttentionSignals
+import org.connectbot.agent.projectAgentAttentionInbox
+import org.connectbot.agent.searchAgentSessions
 import org.connectbot.data.entity.Host
 import org.connectbot.ui.screens.agents.AgentHostState
 import org.connectbot.ui.screens.agents.agentHostChoices
+import org.connectbot.ui.screens.agents.filterAgentSessions
 import org.connectbot.ui.screens.agents.projectQuestion
 import org.connectbot.ui.screens.agents.validAgentCwd
 import org.connectbot.ui.screens.agents.validQuestionAnswer
@@ -97,6 +102,13 @@ internal class RendererActions(private val source: RendererSource) {
         "hosts.delete" -> deleteHost(params)
         "hosts.refresh" -> refreshHost(params)
         "detection.refresh" -> refreshDetection(params)
+        "search.sessions" -> searchSessions(query)
+        "inbox.list" -> inbox()
+        "queue.list" -> queue()
+        "queue.send" -> sendToQueue(body)
+        "queue.cancel" -> cancelQueued(params)
+        "reference.pack" -> reference(params)
+        "index.clear" -> clearIndex()
         "terminal.open" -> terminal(params, body)
         "terminal.command.start" -> terminal(params, body)
         "assistants.list" -> success(RendererProjection.assistants(source.snapshot().availability))
@@ -399,7 +411,7 @@ internal class RendererActions(private val source: RendererSource) {
         val text = answer as? String
         if (text != null && text.length > MAX_SECRET_CHARS) return fail(422, "INVALID_ANSWER", "答案超出长度限制。")
         // An absent answer, like an empty one, cancels the request, exactly as the Compose dialog's cancel does.
-        if (!source.respondChallenge(id, text.takeIf { it.isNotEmpty() })) return fail(409, "CHALLENGE_NOT_PENDING", "该凭据请求已不再挂起。")
+        if (!source.respondChallenge(id, text?.takeIf { it.isNotEmpty() })) return fail(409, "CHALLENGE_NOT_PENDING", "该凭据请求已不再挂起。")
         return success(json("answered" to true, "challenge_id" to id))
     }
 
@@ -618,7 +630,7 @@ internal class RendererActions(private val source: RendererSource) {
      */
     private suspend fun listHosts(): ProbeResult {
         val snapshot = source.snapshot()
-        val items = RendererProjection.hostRows(snapshot.hosts, snapshot.availability)
+        val items = RendererProjection.hostRows(snapshot.hosts, snapshot.availability, sessionCounts(snapshot))
         return success(json("items" to items, "total" to items.length(), "has_more" to false))
     }
 
@@ -645,7 +657,7 @@ internal class RendererActions(private val source: RendererSource) {
         } catch (error: Exception) {
             return fail(500, "HOST_SAVE_FAILED", "主机未能保存：${reason(error)}")
         }
-        return success(RendererProjection.hostRow(saved, source.snapshot().availability))
+        return success(savedHostRow(saved))
     }
 
     /**
@@ -678,7 +690,7 @@ internal class RendererActions(private val source: RendererSource) {
         } catch (error: Exception) {
             return fail(500, "HOST_SAVE_FAILED", "主机未能保存：${reason(error)}")
         }
-        return success(RendererProjection.hostRow(saved, source.snapshot().availability))
+        return success(savedHostRow(saved))
     }
 
     /**
@@ -754,6 +766,255 @@ internal class RendererActions(private val source: RendererSource) {
     private suspend fun requestedHost(params: JSONObject): Host? {
         val hostId = RendererProjection.hostId(params.optString("hostId")) ?: return null
         return source.snapshot().hosts.firstOrNull { it.id == hostId }
+    }
+
+    /**
+     * One search across conversations, in the two ways this product can honestly search: the index's own title,
+     * preview and directory fields, and the *content* of the selected transcripts read remotely once per host,
+     * bounded and read-only. Partial results stay usable, and the coverage of the pass travels with them — a source
+     * that failed, a scan the remote clock cut short, a history that is not a file this build can name and a session
+     * whose directory was not found are each reported as themselves, so no caller reads this as a history without
+     * that text. Nothing is opened, sent or written by a search.
+     */
+    private suspend fun searchSessions(query: JSONObject): ProbeResult {
+        val text = query.optString("q").ifEmpty { query.optString("query") }.trim()
+        if (text.isEmpty() || text.length > MAX_QUERY || text.any { it.isISOControl() }) {
+            return fail(422, "INVALID_QUERY", "搜索词不能为空、不能包含控制字符，且不得超过 $MAX_QUERY 个字符。")
+        }
+        val limit = if (query.has("limit")) query.optString("limit").toIntOrNull() ?: -1 else DEFAULT_PAGE
+        if (limit !in 1..MAX_PAGE) return fail(422, "INVALID_QUERY", "limit 必须是 1..$MAX_PAGE 的整数。")
+        val snapshot = source.snapshot()
+        val hostFilter = query.optString("host_id").ifEmpty { query.optString("hostId") }
+        val hostId = if (hostFilter.isEmpty()) {
+            null
+        } else {
+            RendererProjection.hostId(hostFilter)?.takeIf { id -> snapshot.hosts.any { it.id == id } }
+                ?: return hostNotFound()
+        }
+        val requestedAgent = query.optString("agent")
+        val agent = if (requestedAgent.isEmpty()) null else AgentKind.fromWire(requestedAgent) ?: return fail(422, "AGENT_UNKNOWN", "未知的 Agent：$requestedAgent。")
+        val selected = filterAgentSessions(heldSessions(snapshot), hostId, agent, "")
+        val index = searchAgentSessions(selected, text, snapshot.scannedSources)
+        val outcome = try {
+            source.searchTranscripts(text, selected)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "SEARCH_FAILED", "跨会话搜索未能完成：${reason(error)}")
+        }
+        val held = heldSessions(snapshot).map { RendererConversationId.of(it) }.toSet()
+        val items = JSONArray()
+        // The index rows are the cheap half and name where the conversation lives; the content hits name the file
+        // and line inside it, so the two kinds are answered together under one bound.
+        index.hits.take(limit).forEach { items.put(RendererProjection.indexHit(it, held)) }
+        val content = outcome.hits.take(limit)
+        content.forEach { items.put(RendererProjection.contentHit(it, held)) }
+        val hasMore = index.hits.size > limit || outcome.hits.size > limit || outcome.truncated
+        return success(
+            json(
+                "query" to text,
+                "items" to items,
+                "total" to items.length(),
+                "has_more" to hasMore,
+                "coverage" to RendererProjection.searchCoverage(outcome, index.scope),
+            ),
+        )
+    }
+
+    /**
+     * The attention inbox: a read-only projection over the one conversation this host can honestly report on,
+     * because it is the only one whose approvals, questions, failure and running turn are loaded here. Another
+     * conversation's approvals are unknown from here — only opening it could show them — so no row is invented for
+     * it, and nothing in this route answers, approves or changes any request.
+     */
+    private suspend fun inbox(): ProbeResult {
+        val snapshot = source.snapshot()
+        val items = JSONArray()
+        projectAgentAttentionInbox(
+            agentAttentionSignals(
+                session = snapshot.session,
+                events = snapshot.events,
+                busy = snapshot.busy,
+                conversationActive = snapshot.active,
+                hasEarlier = snapshot.hasEarlier,
+            ),
+        ).forEach { items.put(RendererProjection.inboxItem(it)) }
+        return success(json("items" to items, "total" to items.length(), "read_only" to true, "scope" to "open_conversation"))
+    }
+
+    /**
+     * The cross-conversation queue as the product holds it. Reading it neither sends nor delivers anything: a
+     * request is handed to its conversation only when that conversation is next opened, so this route can never be
+     * a second delivery path.
+     */
+    private suspend fun queue(): ProbeResult {
+        val rows = try {
+            source.queued()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "QUEUE_UNAVAILABLE", "消息队列不可读：${reason(error)}")
+        }
+        val stats = try {
+            source.queueStats()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "QUEUE_UNAVAILABLE", "消息队列不可读：${reason(error)}")
+        }
+        val items = JSONArray()
+        rows.forEach { items.put(RendererProjection.queued(it)) }
+        return success(json("items" to items, "total" to items.length(), "stats" to RendererProjection.queueStats(stats)))
+    }
+
+    /**
+     * Queues one message for another conversation. The target has to be a conversation the product already holds —
+     * a message for a session nobody knows could never be delivered — the kind is one of the queue's own two, and
+     * the text is non-empty and bounded like every other user input. Nothing is sent to any model here: the queue
+     * delivers a request when its conversation is next opened and idle, and this answer only reports what is queued.
+     */
+    private suspend fun sendToQueue(body: JSONObject): ProbeResult {
+        val snapshot = source.snapshot()
+        val target = queuedTarget(snapshot, body) ?: return fail(404, "CONVERSATION_NOT_FOUND", "队列的目标会话不在产品已持有的会话中。")
+        val kind = when (body.optString("kind").lowercase()) {
+            "notify" -> AgentMessageKind.NOTIFY
+            "request" -> AgentMessageKind.REQUEST
+            else -> return fail(422, "INVALID_KIND", "kind 只能是 notify 或 request。")
+        }
+        val text = body.opt("text")
+        if (text !is String || text.isBlank() || text.length > ProbeLimits.CONTENT_UNITS || text.toByteArray(Charsets.UTF_8).size > ProbeLimits.CONTENT_BYTES) {
+            return fail(422, "INVALID_CONTENT", "消息内容为空或超出长度限制。")
+        }
+        val id = try {
+            source.queue(target, kind, text)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "QUEUE_UNAVAILABLE", "消息未能入队：${reason(error)}")
+        }
+        if (id == null) return fail(422, "QUEUE_REFUSED", "队列拒绝了这条消息（目标或内容不符合它的要求）。")
+        return success(
+            json(
+                "queue_id" to id,
+                "conversation_id" to RendererConversationId.of(target),
+                "host_id" to RendererProjection.projectId(target.hostId),
+                "agent" to target.agent.wireName,
+                "session_id" to target.sessionId,
+                "kind" to kind.name.lowercase(),
+                "state" to "pending",
+                // Queued is all this host can honestly report: nothing has been delivered yet.
+                "queued" to true,
+                "delivered" to false,
+            ),
+        )
+    }
+
+    /**
+     * Withdraws one queued message the user no longer wants delivered. Only a message the queue still holds as
+     * pending is withdrawn: one its conversation already took is refused as itself, because a delivered message is
+     * the product's own conversation content and not this queue's to undo.
+     */
+    private suspend fun cancelQueued(params: JSONObject): ProbeResult {
+        val id = params.optString("queueId")
+        if (id.isEmpty() || id.length > MAX_QUEUE_ID || id.any { it.isISOControl() }) {
+            return fail(422, "INVALID_QUEUE_ID", "队列条目 id 无效。")
+        }
+        val rows = try {
+            source.queued()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "QUEUE_UNAVAILABLE", "消息队列不可读：${reason(error)}")
+        }
+        if (rows.none { it.id == id }) return fail(404, "QUEUE_NOT_FOUND", "队列中没有这条待投消息。")
+        val withdrawn = try {
+            source.withdrawQueued(id)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "QUEUE_UNAVAILABLE", "消息未能撤回：${reason(error)}")
+        }
+        if (!withdrawn) return fail(409, "QUEUE_NOT_PENDING", "该消息已被它的会话取走，无法撤回。")
+        return success(json("cancelled" to true, "queue_id" to id, "delivered" to false))
+    }
+
+    /**
+     * One bounded context pack of the open conversation, built by the same `AgentSessionReference` projection the
+     * Compose quote uses, so the two surfaces quote a window the same way. Only the open conversation can be quoted:
+     * its loaded window is what the pack is made of, and a different row has no window here to quote. The pack is
+     * returned as text and nothing else happens — no model call is started.
+     */
+    private suspend fun reference(params: JSONObject): ProbeResult {
+        val conversationId = params.optString("conversationId")
+        val snapshot = source.snapshot()
+        val session = snapshot.session ?: return notFound()
+        if (!namesOpen(snapshot, conversationId)) {
+            return if (target(snapshot, conversationId) != null) {
+                fail(409, "CONVERSATION_NOT_OPEN", "只能引用当前打开的会话；请先打开它。")
+            } else {
+                notFound()
+            }
+        }
+        if (!snapshot.active) return fail(409, "CONVERSATION_NOT_OPEN", "该会话尚未就绪；稍后再生成引用包。")
+        val host = snapshot.hosts.firstOrNull { it.id == session.hostId }
+        return success(RendererProjection.reference(session, host?.nickname.orEmpty(), snapshot.events, conversationId))
+    }
+
+    /**
+     * Drops the session index cache through the product's own clear entry and answers what the index holds
+     * afterwards. The confirmation a user must give is the front end's own step; this host really clears the cache
+     * and reports the count the product now holds, and a clear that failed is answered as a failure rather than as
+     * a cleanup that happened. Nothing else is touched: hosts, detections, drafts and the queue are their own
+     * stores.
+     */
+    private suspend fun clearIndex(): ProbeResult {
+        val before = source.snapshot().indexedSessions.size
+        val remaining = try {
+            source.clearIndex()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "INDEX_CLEAR_FAILED", "索引缓存未能清理：${reason(error)}")
+        }
+        return success(json("cleared" to true, "sessions_before" to before, "sessions" to remaining))
+    }
+
+    /**
+     * The row one host write answers with: the stored host and the number of conversations the product holds for it
+     * now, read back from the same snapshot the hosts page reads.
+     */
+    private suspend fun savedHostRow(host: Host): JSONObject {
+        val snapshot = source.snapshot()
+        return RendererProjection.hostRow(host, snapshot.availability, sessionCounts(snapshot)[host.id] ?: 0)
+    }
+
+    /** Every conversation the product holds: the open one plus every indexed row, each counted once. */
+    private fun heldSessions(snapshot: RendererSnapshot): List<AgentSession> =
+        (snapshot.indexedSessions + listOfNotNull(snapshot.session)).distinctBy { RendererConversationId.of(it) }
+
+    /** One body field as text; an absent field and an explicit null both carry nothing rather than the word "null". */
+    private fun bodyText(body: JSONObject, key: String): String = body.opt(key) as? String ?: ""
+
+    /** How many conversations the index holds per host, so a host row's count is the product's own number. */
+    private fun sessionCounts(snapshot: RendererSnapshot): Map<Long, Int> = heldSessions(snapshot).groupingBy { it.hostId }.eachCount()
+
+    /**
+     * The conversation one queue request addresses, or null when the product holds no such conversation. The target
+     * travels in the body because the bridge carries only string parameters, and it is looked up in the product's
+     * own rows, so a message can never be queued for a session nobody could deliver to.
+     */
+    private fun queuedTarget(snapshot: RendererSnapshot, body: JSONObject): AgentSession? {
+        val rows = heldSessions(snapshot)
+        val conversationId = bodyText(body, "conversation_id").ifEmpty { bodyText(body, "conversationId") }
+        if (conversationId.isNotEmpty()) {
+            val parsed = RendererConversationId.parse(conversationId) ?: return null
+            return rows.firstOrNull { it.sameConversation(parsed) }
+        }
+        val hostId = RendererProjection.hostId(bodyText(body, "host_id").ifEmpty { bodyText(body, "hostId") }) ?: return null
+        val agent = AgentKind.fromWire(bodyText(body, "agent")) ?: return null
+        val sessionId = bodyText(body, "session_id").ifEmpty { bodyText(body, "sessionId") }
+        if (sessionId.isBlank()) return null
+        return rows.firstOrNull { it.hostId == hostId && it.agent == agent && it.sessionId == sessionId }
     }
 
     /**
@@ -1007,5 +1268,11 @@ internal class RendererActions(private val source: RendererSource) {
 
         /** A credential answer is bounded like every other user input; a passphrase or password stays far shorter. */
         const val MAX_SECRET_CHARS = 4096
+
+        /** One search query is bounded because every transcript line a host holds is compared against it. */
+        const val MAX_QUERY = 256
+
+        /** A queue id is the uuid this host wrote when it queued the message; anything longer names no row. */
+        const val MAX_QUEUE_ID = 64
     }
 }

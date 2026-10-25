@@ -29,8 +29,14 @@ import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConversationState
 import org.connectbot.agent.AgentDraftStore
 import org.connectbot.agent.AgentIndexStore
+import org.connectbot.agent.AgentLinkState
+import org.connectbot.agent.AgentMessageKind
+import org.connectbot.agent.AgentMessageQueue
+import org.connectbot.agent.AgentMessageQueueStats
+import org.connectbot.agent.AgentQueuedMessage
 import org.connectbot.agent.AgentRepository
 import org.connectbot.agent.AgentSshPool
+import org.connectbot.agent.AgentTranscriptOutcome
 import org.connectbot.data.HostRepository
 import org.connectbot.data.entity.Host
 import org.connectbot.di.CoroutineDispatchers
@@ -63,6 +69,7 @@ class AgentRendererSource @Inject constructor(
     private val index: AgentIndexStore,
     private val pool: AgentSshPool,
     private val drafts: AgentDraftStore,
+    private val messages: AgentMessageQueue,
     private val preferences: SharedPreferences,
     private val dispatchers: CoroutineDispatchers,
 ) : RendererSource {
@@ -74,6 +81,8 @@ class AgentRendererSource @Inject constructor(
     private var identity = ""
     private var sequence = 0L
     private var lastRuntime = ""
+    private var lastBoundary = ""
+    private var lastLinkKind = ""
     private var collector: Job? = null
 
     @Volatile
@@ -130,17 +139,27 @@ class AgentRendererSource @Inject constructor(
             events = repository.events.value,
             active = active(),
             loading = repository.conversationState.value == AgentConversationState.Loading,
+            busy = repository.busy.value,
             turnId = turn,
             cancelling = cancelling,
             hasEarlier = repository.hasEarlier.value,
             hosts = allHosts,
             availability = repository.availability.value,
+            linkStates = linkStates(),
+            scannedSources = repository.scannedSources.value,
             epoch = synchronized(lock) { epoch },
             seq = synchronized(lock) { sequence },
             theme = theme(),
             indexedSessions = indexedSessions,
         )
     }
+
+    /**
+     * What the product holds about each host's link: the live state of this process wins over the recorded one, and
+     * a host neither names was never connected here, so it is reported as unknown instead of reachable.
+     */
+    private fun linkStates(): Map<Long, AgentLinkState> =
+        repository.linkRecords.value.filter { it.agent == null }.associate { it.hostId to it.state } + repository.liveLinkStates.value
 
     /** The conversation the renderer should load first: whatever the product has open or selected right now. */
     fun conversationId(): String? = currentSession()?.let(RendererConversationId::of)
@@ -277,6 +296,41 @@ class AgentRendererSource @Inject constructor(
         return repository.availability.value.filter { it.hostId == hostId }
     }
 
+    /**
+     * The repository's own cross-conversation content search: it names each session's transcript root and file with
+     * bounded read-only listings and then reads only those files, so a host this app cannot reach or a history that
+     * is not a file keeps its own reason inside the outcome instead of reading as history without that text.
+     */
+    override suspend fun searchTranscripts(query: String, sessions: List<AgentSession>): AgentTranscriptOutcome =
+        repository.searchTranscripts(query, sessions)
+
+    /**
+     * Queued messages are read from, and written to, the product's own queue file: this seam sends nothing, and the
+     * queue hands a request to its conversation only when that conversation is next opened.
+     */
+    override suspend fun queued(): List<AgentQueuedMessage> = messages.pending()
+
+    override suspend fun queueStats(): AgentMessageQueueStats = messages.stats()
+
+    override suspend fun queue(target: AgentSession, kind: AgentMessageKind, text: String): String? =
+        messages.enqueue(target.hostId, target.agent.wireName, target.sessionId, kind, text)
+
+    /**
+     * Withdraws one queued message before its conversation can take it. The queue's only terminal write is the
+     * "taken by its conversation" mark, so a withdrawn message is recorded that way and can never be delivered
+     * later; nothing here reports a delivery, because none happened.
+     */
+    override suspend fun withdrawQueued(id: String): Boolean = messages.withdraw(id)
+
+    /**
+     * The session index cache is dropped through the repository's own entry, which also updates the in-memory index
+     * the renderer lists conversations from, and the count answered here is read back from the store itself.
+     */
+    override suspend fun clearIndex(): Int {
+        repository.clearIndex()
+        return index.read().size
+    }
+
     private fun theme(): String = ThemeMode.fromString(preferences.getString(PreferenceConstants.THEME_MODE, null)).name.lowercase()
 
     private fun active(): Boolean = repository.conversationState.value == AgentConversationState.Ready && repository.activeSession.value != null
@@ -291,6 +345,8 @@ class AgentRendererSource @Inject constructor(
             }
         }
         launch { repository.busy.collect { publishRuntime() } }
+        // The product's own link bookkeeping drives the disconnect notice: no poll of its own is started here.
+        launch { repository.liveLinkStates.collect { publishLinkState(it) } }
     }
 
     /**
@@ -350,15 +406,56 @@ class AgentRendererSource @Inject constructor(
             announcedPermissions.addAll(live)
             if (published.size > PUBLISHED_LIMIT) published.keys.retainAll(events.map { it.historyKey }.toSet())
         }
-        val last = events.lastOrNull()
-        if (last?.type == "complete" && turn != null) {
-            val cancelled = last.status == "cancelled"
-            val finished = turn
-            turn = null
-            if (finished != null) {
-                publishTurnCompleted(finished, if (cancelled) "cancelled" else "completed", if (cancelled) "stopped" else "ai_waiting_input")
+        // The turn boundary the Agent itself stated is announced once per boundary, whether or not this host
+        // accepted the turn: a completion that arrived while no turn was tracked is then not lost either.
+        val boundary = events.lastOrNull { it.type == "complete" }?.takeIf { event ->
+            val fingerprint = fingerprint(event)
+            synchronized(lock) {
+                if (lastBoundary == fingerprint) {
+                    false
+                } else {
+                    lastBoundary = fingerprint
+                    true
+                }
             }
         }
+        if (boundary != null) {
+            val cancelled = boundary.status == "cancelled"
+            val finished = turn ?: RendererProjection.messageId(boundary.historyKey)
+            turn = null
+            publishTurnCompleted(finished, if (cancelled) "cancelled" else "completed", if (cancelled) "stopped" else "ai_waiting_input")
+        }
+    }
+
+    /**
+     * Reports the open conversation's host link as the renderer reads it: the product's own reconnect bookkeeping
+     * decides the state, and a frame is published only when the kind of that state changes — connected, offline, or
+     * waiting for the user — so a retry loop cannot turn into a stream of notices. `realtime.reconnected` is the name
+     * the renderer already reconciles its history and approvals on; the offline side is published as itself, and a
+     * host the product holds no state for is left alone because nothing was observed about it.
+     */
+    private fun publishLinkState(states: Map<Long, AgentLinkState>) {
+        val conversation = syncIdentity() ?: return
+        val session = currentSession() ?: return
+        val state = states[session.hostId] ?: return
+        val kind = when (state) {
+            AgentLinkState.CONNECTED -> LINK_CONNECTED
+            AgentLinkState.NEEDS_USER -> LINK_NEEDS_USER
+            else -> LINK_OFFLINE
+        }
+        if (kind == synchronized(lock) { lastLinkKind }) return
+        synchronized(lock) { lastLinkKind = kind }
+        publish(
+            if (kind == LINK_CONNECTED) "realtime.reconnected" else "realtime.disconnected",
+            json(
+                "conversation_id" to conversation,
+                "host_id" to RendererProjection.projectId(session.hostId),
+                "state" to kind,
+                "link_state" to state.name.lowercase(),
+                "reconnected" to (kind == LINK_CONNECTED),
+                "needs_user" to (kind == LINK_NEEDS_USER),
+            ),
+        )
     }
 
     private fun publishRuntime() {
@@ -405,6 +502,7 @@ class AgentRendererSource @Inject constructor(
         events = events,
         active = active(),
         loading = repository.conversationState.value == AgentConversationState.Loading,
+        busy = repository.busy.value,
         turnId = turn,
         cancelling = cancelling,
         hasEarlier = repository.hasEarlier.value,
@@ -432,6 +530,8 @@ class AgentRendererSource @Inject constructor(
             published.clear()
             announcedPermissions.clear()
             lastRuntime = ""
+            lastBoundary = ""
+            lastLinkKind = ""
             turn = null
             cancelling = false
         }
@@ -451,5 +551,10 @@ class AgentRendererSource @Inject constructor(
 
     private companion object {
         const val PUBLISHED_LIMIT = 4096
+
+        /** The three kinds of link state a disconnect notice reports, collapsed from the product's own states. */
+        const val LINK_CONNECTED = "connected"
+        const val LINK_OFFLINE = "offline"
+        const val LINK_NEEDS_USER = "needs_user"
     }
 }
