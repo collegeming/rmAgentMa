@@ -223,7 +223,8 @@ jobs:
   renderer-probe:
     name: Fixed renderer and isolated host-probe APK
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # The job also builds the release APK from the same audited assets, which adds R8 and resource shrinking.
+    timeout-minutes: 120
     steps:
       - name: Checkout history and tags
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -267,9 +268,11 @@ jobs:
           ./gradlew --no-daemon --no-configuration-cache --stacktrace --profile --continue \
             -PciDebug=true \
             "-PRendererAssetsDir=$RUNNER_TEMP/probe-renderer" \
+            -PRendererAssetsRelease=true \
             :host-probe:lint :host-probe:check :host-probe:test \
             :host-probe:assembleDebug :host-probe:assembleDebugAndroidTest \
             :app:assembleOssDebug \
+            :app:assembleOssRelease \
             2>&1 | tee ci-reports/renderer-probe-gradle.txt
 
       - name: Verify APK assets and package source, hashes, licenses and certificate fingerprints

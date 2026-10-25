@@ -10,139 +10,13 @@ import { claimOutput, verifyBuild } from './run.mjs';
 const origin = 'https://appassets.androidplatform.net';
 const entry = '/assets/renderer/';
 const C = 'conv-probe-1';
-const P = 'project-probe-1';
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const envelope = (data, status = 200) => ({ status, body: { success: true, data } });
 const error = (status, code) => Object.assign(new Error(code), { status, code });
-const required = ['native-handshake', 'real-sendbox-loading-id', 'native-draft-refresh', 'native-send-failure-preserves-draft', 'native-attachment-send', 'native-attachment-draft-refresh', 'native-document-refresh', 'native-no-network'];
+const required = ['native-handshake', 'real-sendbox-loading-id', 'native-draft-refresh', 'native-send-failure-preserves-draft', 'native-attachment-send', 'native-attachment-draft-refresh', 'native-attachment-contract', 'native-queue-withdrawal', 'native-host-targets-and-index', 'native-document-refresh', 'native-no-network'];
 
-export class NativeProbeDTO {
-  constructor() {
-    this.epoch = randomUUID();
-    this.seq = 0;
-    this.phase = 'idle';
-    this.turn = '';
-    this.draft = '';
-    this.draftFiles = [];
-    this.model = 'probe-model-a';
-    this.messages = [];
-    this.ledger = new Map();
-    this.uploads = new Map();
-    this.attachments = new Map();
-    this.failNextSend = false;
-  }
-  runtime() {
-    return { state: this.phase, can_send_message: this.phase === 'idle', has_task: this.phase === 'running', is_processing: this.phase === 'running', pending_confirmations: 0, turn_id: this.turn, epoch: this.epoch, seq: this.seq, supports_midturn_delivery: false };
-  }
-  config() { return [{ id: 'model', name: '探针模型', category: 'model', type: 'select', current_value: this.model, options: [{ value: 'probe-model-a', name: '本地合成模型甲' }, { value: 'probe-model-b', name: '本地合成模型乙' }] }]; }
-  conversation() {
-    return { id: C, name: '中文宿主探针', type: 'acp', project_id: P, created_at: 1, modified_at: Date.now(), model: { provider_id: 'fake', use_model: this.model, model: this.model }, status: this.phase === 'running' ? 'running' : 'finished', fork_capability: { at_turn: false }, prompt_capability: { image: false, audio: false }, extra: { workspace: '/probe', backend: 'dsh', agent_name: 'dsh', custom_workspace: true, cached_config_options: this.config() }, runtime: this.runtime() };
-  }
-  snapshot() { return { conversation_id: C, epoch: this.epoch, seq: this.seq, runtime: this.runtime(), messages: this.messages, pending: [], draft: { text: this.draft, files: this.draftFiles }, config_options: this.config(), backgroundVerified: false }; }
-  publish(name, data) { this.seq++; this.deliver?.({ type: 'event', name, data, epoch: this.epoch, seq: this.seq }); }
-  validateFiles(files) {
-    assert.ok(Array.isArray(files) && files.length <= 4, 'INVALID_ATTACHMENT');
-    for (const file of files) {
-      if (file?.kind !== 'upload' || !this.attachments.has(file.path)) throw error(422, 'ATTACHMENT_SOURCE_NOT_ALLOWED');
-    }
-  }
-  async handle(action, payload, documentId) {
-    const { params, query, body: rawBody } = payload;
-    const body = rawBody ?? {};
-    if (params.conversationId !== undefined && params.conversationId !== C) throw error(404, 'CONVERSATION_NOT_FOUND');
-    if (action === 'auth.read') return { status: 200, body: { success: true, user: { id: 'probe-user-1', username: 'offline-probe' } } };
-    if (action === 'settings.client.read' || action === 'settings.read') return envelope({ language: 'zh-CN', theme: 'light', colorScheme: 'default', notificationEnabled: false, cronNotificationEnabled: false, keepAwake: false, saveUploadToWorkspace: false });
-    if (action === 'settings.client.write') return envelope(body.settings ?? body);
-    if (action === 'conversations.list') return envelope({ items: [this.conversation()], total: 1, has_more: false });
-    if (action === 'conversation.read') return envelope(this.conversation());
-    if (action === 'projects.list') return envelope([{ project_id: P, name: '隔离探针项目' }]);
-    if (action === 'project.read') return envelope({ project_id: P, name: '隔离探针项目', explorer: { workspace_pe_id: null, entries: [] } });
-    if (action === 'messages.list') return envelope({ items: structuredClone(this.messages), oldest_cursor: this.messages[0]?.id ?? null, newest_cursor: this.messages.at(-1)?.id ?? null, has_more_before: false, has_more_after: false });
-    if (action === 'messages.latest') return envelope([...this.messages].reverse().find((message) => message.type === query.type) ?? null);
-    if (action === 'runtime.ensure') return envelope({ recovered: false, config_options: this.config(), runtime: this.runtime() });
-    if (action === 'config.read') return envelope({ config_options: this.config() });
-    if (action === 'config.set') {
-      if (!['probe-model-a', 'probe-model-b'].includes(body.value)) throw error(422, 'MODEL_NOT_ALLOWED');
-      this.model = body.value;
-      return envelope({ confirmation: 'observed', config_options: this.config() });
-    }
-    if (action === 'events.subscribe' || action === 'runtime.snapshot') {
-      queueMicrotask(() => this.publish('runtime.snapshot', this.snapshot()));
-      return { status: 200, body: this.snapshot() };
-    }
-    if (action === 'events.unsubscribe') return { status: 200, body: { runtime: this.runtime() } };
-    if (action === 'runtime.visible') return envelope({ runtime: this.runtime(), expires_at: Date.now() + 60000 });
-    if (action === 'draft.load') return { status: 200, body: { text: this.draft, files: this.draftFiles, conversation_id: C } };
-    if (action === 'draft.save') {
-      if (typeof body.text !== 'string' || body.text.length > 16384) throw error(413, 'DRAFT_TOO_LARGE');
-      this.validateFiles(body.files ?? this.draftFiles);
-      this.draft = body.text;
-      this.draftFiles = structuredClone(body.files ?? this.draftFiles);
-      return { status: 200, body: { text: this.draft, files: this.draftFiles, saved: true } };
-    }
-    if (action.startsWith('attachment.')) return this.attachment(action, body, documentId);
-    if (action === 'messages.send') {
-      if (typeof body.loading_id !== 'string' || !body.loading_id || body.loading_id.length > 128) throw error(400, 'INVALID_loading_id');
-      if (typeof body.content !== 'string' || !body.content.trim() || body.content.length > 8192) throw error(422, 'INVALID_CONTENT');
-      if (this.failNextSend) { this.failNextSend = false; throw error(503, 'TEST_SEND_FAILURE'); }
-      this.validateFiles(body.files ?? []);
-      if (body.sessions?.length || body.inject_skills?.length) throw error(422, 'UNSUPPORTED_REFERENCE');
-      const fingerprint = JSON.stringify({ content: body.content, files: body.files ?? [], sessions: body.sessions ?? [] });
-      const previous = this.ledger.get(body.loading_id);
-      if (previous) {
-        if (previous.fingerprint !== fingerprint) throw error(409, 'SEND_ID_CONFLICT');
-        return envelope(previous.result);
-      }
-      if (this.phase !== 'idle') throw error(409, 'TURN_BUSY');
-      this.turn = randomUUID();
-      this.phase = 'running';
-      const turn = this.turn;
-      const msgId = randomUUID();
-      this.messages.push({ id: msgId, msg_id: msgId, conversation_id: C, turn_id: turn, type: 'text', position: 'right', status: 'finish', created_at: Date.now(), content: { content: body.content, files: body.files ?? [] } });
-      const result = { msg_id: msgId, turn_id: turn, runtime: this.runtime() };
-      this.ledger.set(body.loading_id, { fingerprint, result });
-      queueMicrotask(() => {
-        this.publish('message.userCreated', { conversation_id: C, msg_id: msgId, client_msg_id: body.loading_id, turn_id: turn, content: body.content, position: 'right', status: 'finish', hidden: false, created_at: Date.now() });
-        this.publish('message.stream', { type: 'start', data: {}, msg_id: `${turn}-start`, conversation_id: C, turn_id: turn });
-        const answerId = `answer-${turn}`;
-        this.messages.push({ id: answerId, msg_id: answerId, conversation_id: C, turn_id: turn, type: 'text', position: 'left', status: 'finish', created_at: Date.now(), content: { content: '中文分块：宿主已收到合成任务。' } });
-        for (const content of ['中文分块：', '宿主已收到合成任务。']) this.publish('message.stream', { type: 'text', data: { content }, msg_id: answerId, conversation_id: C, turn_id: turn });
-        this.phase = 'idle';
-        this.publish('message.stream', { type: 'finish', data: { stop_reason: 'end_turn' }, msg_id: `${turn}-finish`, conversation_id: C, turn_id: turn });
-        this.publish('turn.completed', { conversation_id: C, session_id: C, turn_id: turn, status: 'finished', outcome: 'completed', state: 'ai_waiting_input', runtime: this.runtime() });
-      });
-      return envelope(result, 202);
-    }
-    if (action === 'approvals.list') return envelope([]);
-    if (action === 'usage.read') return envelope(null);
-    if (['commands.list', 'artifacts.list', 'assistants.list', 'agents.list', 'providers.list', 'mcp.list', 'skills.list', 'cron.list', 'teams.list', 'adapters.list'].includes(action)) return envelope([]);
-    throw error(404, 'UNKNOWN_ACTION');
-  }
-  attachment(action, body, documentId) {
-    if (action === 'attachment.begin') {
-      if (!['text/plain', 'image/png', 'image/jpeg', 'image/webp', 'application/pdf'].includes(body.mime) || !Number.isSafeInteger(body.size) || body.size > 8 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(body.sha256)) throw error(422, 'INVALID_UPLOAD');
-      const uploadId = randomUUID();
-      this.uploads.set(uploadId, { documentId, ...body, chunks: [], length: 0 });
-      return { status: 201, body: { uploadId, chunkBytes: 12288, expiresInMs: 300000 } };
-    }
-    const upload = this.uploads.get(body.uploadId);
-    if (!upload || upload.documentId !== documentId) throw error(410, 'UPLOAD_EXPIRED');
-    if (action === 'attachment.chunk') {
-      const bytes = Buffer.from(body.data, 'base64');
-      if (body.offset !== upload.length || bytes.length > 12288 || !bytes.length || upload.length + bytes.length > upload.size) throw error(409, 'UPLOAD_OFFSET_CONFLICT');
-      upload.chunks.push(bytes);
-      upload.length += bytes.length;
-      return { status: 200, body: { offset: upload.length } };
-    }
-    if (action === 'attachment.abort') { this.uploads.delete(body.uploadId); return { status: 200, body: { aborted: true } }; }
-    const bytes = Buffer.concat(upload.chunks);
-    if (bytes.length !== upload.size || sha(bytes) !== upload.sha256) throw error(422, 'UPLOAD_HASH_MISMATCH');
-    const attachmentRef = `probe-upload:${body.uploadId}`;
-    this.attachments.set(attachmentRef, { ...upload, bytes });
-    this.uploads.delete(body.uploadId);
-    return { status: 201, body: { attachmentRef, path: attachmentRef, name: upload.name, mime: upload.mime, size: upload.size, sha256: upload.sha256, source: 'mobile-upload' } };
-  }
-}
+// The offline host the bridge probe drives: one reusable fixture, shared with the unit tests under
+// renderer/tests/ so the contract it answers is asserted without a browser.
+import { NativeProbeDTO } from './native-fixture.mjs';
 
 export async function runNativeBrowserChecks(options) {
   await claimOutput(options.output);
@@ -186,6 +60,8 @@ export async function runNativeBrowserChecks(options) {
         const reply = (result) => ({ requestId: request.requestId, documentId, ok: result.status >= 200 && result.status < 300, ...result });
         if (request.action === 'host.handshake') {
           assert.equal(request.documentId, '');
+          // A new document replaces the old one, whose half-written uploads are dropped with it.
+          if (documentId) fixture.uploads.invalidate(documentId);
           documentId = randomUUID();
           seen.clear();
           record.response = reply({ status: 200, body: { documentId, protocolVersion: 1 } });
@@ -287,6 +163,24 @@ export async function runNativeBrowserChecks(options) {
       const [reference, uploaded] = [...fixture.attachments][0];
       assert.equal(uploaded.sha256, sha(file));
       assert.deepEqual(uploaded.bytes, file);
+      // The upload's own answer is checked field by field: this is what a message references later.
+      const begin = calls('attachment.begin').at(-1)?.response;
+      const chunks = calls('attachment.chunk');
+      const finish = calls('attachment.finish').at(-1)?.response;
+      assert.ok(begin, 'the real file input must call attachment.begin');
+      assert.equal(begin.status, 201, 'attachment.begin must answer 201 with the upload window');
+      assert.ok(Number.isSafeInteger(begin.body.chunkBytes) && begin.body.chunkBytes > 0 && begin.body.chunkBytes <= 12288, `attachment.begin field chunkBytes must be 1..12288, got ${begin.body.chunkBytes}`);
+      assert.ok(chunks.length >= 1, 'attachment.chunk must be sent for every part of the file');
+      assert.equal(chunks.at(-1).response.body.offset, file.length, 'attachment.chunk field offset must be the bytes received so far');
+      assert.ok(finish, 'the real file input must call attachment.finish');
+      assert.equal(finish.status, 201, 'attachment.finish must answer 201');
+      assert.equal(finish.body.attachmentRef, reference, 'attachment.finish field attachmentRef must be the reference the message names');
+      assert.equal(finish.body.path, reference, 'attachment.finish field path must be the same reference');
+      assert.equal(finish.body.name, '探针.txt', 'attachment.finish field name must be the uploaded name');
+      assert.equal(finish.body.mime, 'text/plain', 'attachment.finish field mime must be the declared type');
+      assert.equal(finish.body.size, file.length, 'attachment.finish field size must be the bytes received');
+      assert.equal(finish.body.sha256, sha(file), 'attachment.finish field sha256 must be the verified digest');
+      assert.equal(typeof finish.body.attachmentRef, 'string', 'attachmentRef must be one string the caller can send back');
       const text = '带受控附件的中文消息。';
       await page.getByTestId('sendbox-input').fill(text);
       const count = calls('messages.send').length;
@@ -309,20 +203,140 @@ export async function runNativeBrowserChecks(options) {
       await page.getByTestId('sendbox-input').fill(text);
       await poll(() => fixture.draft === text, 'Draft text saved before refresh');
       const reference = [...fixture.attachments].find(([, item]) => item.name === '刷新附件.txt')[0];
-      const persisted = fixture.draftFiles.some((item) => item.kind === 'upload' && item.path === reference);
+      const saved = calls('draft.save').at(-1);
+      assert.ok(saved, 'A draft save must have been attempted');
+      assert.equal(
+        JSON.parse(saved.raw).payload.body.files,
+        undefined,
+        'The draft is the text alone, so a save must not carry attachment references'
+      );
       await page.reload({ waitUntil: 'domcontentloaded' });
       await expect(page.getByTestId('sendbox-input')).toHaveValue(text);
-      assert.ok(persisted, 'Native draft.save did not preserve the actual uploaded ChatFileRef');
-      await expect(page.getByText(reference, { exact: false }).filter({ visible: true }).last()).toBeVisible();
+      // The reference belongs to the message, not to the draft: after a reload the text is back and the upload is not.
+      assert.equal(fixture.draftFiles.length, 0, 'A draft must not keep attachment references');
       const sends = calls('messages.send').length;
       await page.getByTestId('sendbox-send-btn').click();
-      await poll(() => calls('messages.send').length > sends && Boolean(calls('messages.send').at(-1).response), 'Restored attachment must actually be submitted by SendBox');
+      await poll(() => calls('messages.send').length > sends && Boolean(calls('messages.send').at(-1).response), 'A restored draft must still be sendable');
       const submitted = JSON.parse(calls('messages.send').at(-1).raw).payload.body;
       assert.equal(submitted.content, text);
-      assert.ok(submitted.files.some((item) => item.kind === 'upload' && item.path === reference));
+      assert.deepEqual(submitted.files ?? [], []);
       assert.equal(calls('messages.send').at(-1).response.status, 202);
-      await shot('native-attachment-draft-restored');
+      await shot('native-draft-text-survives-refresh');
       return { reference, submitted };
+    });
+    // The four upload actions and their failure branches, answered by the offline host exactly as the contract
+    // states them: every refusal names the action and the field it refused, so one run can say what broke.
+    await check('native-attachment-contract', async () => {
+      const bytes = Buffer.from('附件契约受控字节\n');
+      const declared = (overrides = {}) => ({ name: '契约.txt', mime: 'text/plain', size: bytes.length, sha256: sha(bytes), ...overrides });
+      const call = async (action, body) => {
+        try { return await fixture.handle(action, { params: {}, query: {}, body }, documentId); }
+        catch (failure) { return { status: failure.status, body: { success: false, code: failure.code } }; }
+      };
+      const refusals = [];
+      const refused = async (action, body, status, code) => {
+        const answer = await call(action, body);
+        assert.equal(answer.status, status, `${action} must answer ${status} ${code}, got ${answer.status} ${answer.body.code}`);
+        assert.equal(answer.body.code, code, `${action} must answer ${code}, got ${answer.body.code}`);
+        refusals.push({ action, status, code });
+      };
+      await refused('attachment.begin', declared({ size: 8 * 1024 * 1024 + 1 }), 413, 'UPLOAD_TOO_LARGE');
+      const began = await call('attachment.begin', declared());
+      assert.equal(began.status, 201, 'attachment.begin must open one upload');
+      assert.ok(typeof began.body.uploadId === 'string' && began.body.uploadId, 'attachment.begin field uploadId must identify the upload');
+      assert.ok(Number.isSafeInteger(began.body.chunkBytes) && began.body.chunkBytes > 0 && began.body.chunkBytes <= 12288, `attachment.begin field chunkBytes must be 1..12288, got ${began.body.chunkBytes}`);
+      await refused('attachment.chunk', { uploadId: began.body.uploadId, offset: 1, data: bytes.toString('base64') }, 409, 'UPLOAD_OFFSET_CONFLICT');
+      const chunk = await call('attachment.chunk', { uploadId: began.body.uploadId, offset: 0, data: bytes.toString('base64') });
+      assert.equal(chunk.status, 200, 'attachment.chunk must accept a chunk at its own offset');
+      assert.equal(chunk.body.offset, bytes.length, `attachment.chunk field offset must echo ${bytes.length} received bytes, got ${chunk.body.offset}`);
+      const finished = await call('attachment.finish', { uploadId: began.body.uploadId });
+      assert.equal(finished.status, 201, 'attachment.finish must answer the stored attachment');
+      assert.ok(typeof finished.body.attachmentRef === 'string' && finished.body.attachmentRef, `attachment.finish field attachmentRef must be one non-empty reference, got ${finished.body.attachmentRef}`);
+      assert.equal(finished.body.path, finished.body.attachmentRef, 'attachment.finish fields path and attachmentRef must name the same upload');
+      assert.equal(finished.body.name, '契约.txt', 'attachment.finish field name must be the uploaded name');
+      assert.equal(finished.body.mime, 'text/plain', 'attachment.finish field mime must be the declared type');
+      assert.equal(finished.body.size, bytes.length, 'attachment.finish field size must be the bytes received');
+      assert.equal(finished.body.sha256, sha(bytes), 'attachment.finish field sha256 must be the verified digest');
+      assert.equal(finished.body.source, 'mobile-upload', 'attachment.finish field source must name where the bytes came from');
+      fixture.validateFiles([{ kind: 'upload', path: finished.body.attachmentRef }]);
+      assert.throws(() => fixture.validateFiles([{ kind: 'upload', path: 'probe-upload:00000000-0000-0000-0000-000000000000' }]), /ATTACHMENT_NOT_FOUND/, 'a reference this host never issued must not be sendable');
+      const mismatched = await call('attachment.begin', declared({ sha256: sha(Buffer.from('另一份字节')) }));
+      await call('attachment.chunk', { uploadId: mismatched.body.uploadId, offset: 0, data: bytes.toString('base64') });
+      await refused('attachment.finish', { uploadId: mismatched.body.uploadId }, 422, 'UPLOAD_HASH_MISMATCH');
+      const incomplete = await call('attachment.begin', declared());
+      await refused('attachment.finish', { uploadId: incomplete.body.uploadId }, 409, 'UPLOAD_INCOMPLETE');
+      const aborted = await call('attachment.abort', { uploadId: incomplete.body.uploadId });
+      assert.equal(aborted.status, 200, 'attachment.abort must answer a dropped upload');
+      assert.equal(aborted.body.aborted, true, 'attachment.abort field aborted must be true');
+      await refused('attachment.finish', { uploadId: incomplete.body.uploadId }, 410, 'UPLOAD_EXPIRED');
+      // An upload belongs to the open conversation: with none open the host refuses it as unsupported.
+      fixture.openConversation = null;
+      try { await refused('attachment.begin', declared(), 501, 'ATTACHMENT_UNSUPPORTED'); } finally { fixture.openConversation = C; }
+      return { refusals, attachmentRef: finished.body.attachmentRef };
+    });
+    // One message handed to another conversation, and its withdrawal: queued is all the host claims, and the
+    // state it keeps is withdrawn rather than the mark a conversation's own delivery writes.
+    await check('native-queue-withdrawal', async () => {
+      const call = async (action, payload = {}) => {
+        try { return (await fixture.handle(action, { params: payload.params ?? {}, query: payload.query ?? {}, body: payload.body ?? null }, documentId)).body; }
+        catch (failure) { return { success: false, status: failure.status, code: failure.code }; }
+      };
+      const sent = await call('queue.send', { body: { conversation_id: C, kind: 'notify', text: '中文队列通知' } });
+      assert.ok(typeof sent.data.queue_id === 'string' && sent.data.queue_id, 'queue.send field queue_id must identify the queued message');
+      assert.equal(sent.data.conversation_id, C, 'queue.send field conversation_id must name the target conversation');
+      assert.equal(sent.data.kind, 'notify', 'queue.send field kind must be the kind that was queued');
+      assert.equal(sent.data.state, 'pending', `queue.send field state must be pending, got ${sent.data.state}`);
+      assert.equal(sent.data.queued, true, 'queue.send field queued must claim the queue it wrote');
+      assert.equal(sent.data.delivered, false, 'queue.send field delivered must stay false: nothing was delivered');
+      const listed = await call('queue.list');
+      assert.equal(listed.data.items.length, 1, 'queue.list must show the message waiting for its conversation');
+      assert.equal(listed.data.items[0].state, 'pending', 'queue.list row field state must be pending');
+      assert.equal(listed.data.items[0].pending, true, 'queue.list row field pending must be true while it waits');
+      assert.deepEqual(listed.data.stats, { stored: 1, pending: 1, delivered: 0, dropped: 0 }, 'queue.list field stats must count what the queue holds');
+      const cancelled = await call('queue.cancel', { params: { queueId: sent.data.queue_id } });
+      assert.equal(cancelled.data.cancelled, true, 'queue.cancel field cancelled must be true');
+      assert.equal(cancelled.data.queue_id, sent.data.queue_id, 'queue.cancel field queue_id must be the withdrawn message');
+      assert.equal(cancelled.data.delivered, false, 'queue.cancel field delivered must never claim a delivery');
+      assert.equal((await call('queue.list')).data.items.length, 0, 'a withdrawn message must never be listed as waiting');
+      const storedRow = fixture.queue.all().find((row) => row.queue_id === sent.data.queue_id);
+      assert.ok(storedRow, 'queue.cancel must keep the withdrawn row in the queue rather than drop it');
+      assert.equal(storedRow.state, 'withdrawn', `queue.cancel must record the row as withdrawn, got ${storedRow.state}`);
+      const refusals = [];
+      const refused = async (action, payload, code) => {
+        const answer = await call(action, payload);
+        assert.equal(answer.code, code, `${action} must answer ${code}, got ${answer.code}`);
+        refusals.push({ action, code });
+      };
+      await refused('queue.cancel', { params: { queueId: sent.data.queue_id } }, 'QUEUE_NOT_FOUND');
+      await refused('queue.cancel', { params: { queueId: 'x'.repeat(129) } }, 'INVALID_QUEUE_ID');
+      await refused('queue.send', { body: { conversation_id: C, kind: 'later', text: '中文' } }, 'INVALID_KIND');
+      await refused('queue.send', { body: { conversation_id: C, kind: 'request', text: '   ' } }, 'INVALID_CONTENT');
+      await refused('queue.send', { body: { conversation_id: 'conv-other', kind: 'notify', text: '中文' } }, 'CONVERSATION_NOT_FOUND');
+      return { queueId: sent.data.queue_id, state: storedRow.state, refusals };
+    });
+    // The index cache and the saved-host rows: the Windows host holds its own Agent under the `windows` target.
+    await check('native-host-targets-and-index', async () => {
+      const call = async (action, payload = {}) => (await fixture.handle(action, { params: payload.params ?? {}, query: payload.query ?? {}, body: payload.body ?? null }, documentId)).body;
+      const cleared = (await call('index.clear')).data;
+      assert.deepEqual(cleared, { cleared: true, sessions_before: 1, sessions: 0 }, `index.clear must report the index it held and the one it leaves, got ${JSON.stringify(cleared)}`);
+      const again = (await call('index.clear')).data;
+      assert.deepEqual(again, { cleared: true, sessions_before: 0, sessions: 0 }, 'index.clear on an empty index must report zero, not invent sessions');
+      const hosts = (await call('hosts.list')).data;
+      assert.equal(hosts.items.length, 3, 'hosts.list must list every saved host');
+      for (const row of hosts.items)
+        for (const field of ['id', 'nickname', 'hostname', 'port', 'username', 'protocol', 'os_type', 'agent_target', 'target', 'target_supported', 'session_count', 'detection'])
+          assert.ok(field in row, `hosts.list row ${row.id} must carry field ${field}`);
+      const windows = hosts.items.find((row) => row.os_type === 'windows' && row.agent_target === 'windows');
+      assert.ok(windows, "hosts.list must offer a Windows host's own Agent target under the literal windows");
+      assert.equal(windows.target, 'windows-native', `hosts.list row ${windows.id} field target must be windows-native, got ${windows.target}`);
+      assert.equal(windows.target_supported, true, `hosts.list row ${windows.id} field target_supported must be true for the windows target`);
+      const wsl = hosts.items.find((row) => String(row.agent_target).startsWith('wsl:'));
+      assert.ok(wsl, 'hosts.list must still offer a WSL distribution target');
+      assert.equal(wsl.target, wsl.agent_target, 'a WSL row names its distribution as its shell context');
+      const posix = hosts.items.find((row) => row.os_type === 'linux');
+      assert.equal(posix.agent_target, 'native', 'a Linux host keeps the native agent target');
+      assert.equal(posix.target, 'posix', 'a Linux host runs its Agent in its own POSIX shell');
+      return { cleared, again, targets: hosts.items.map((row) => `${row.os_type}/${row.agent_target}/${row.target}/${row.target_supported}`) };
     });
     await check('native-document-refresh', async () => {
       const oldDocument = documentId;
@@ -343,7 +357,7 @@ export async function runNativeBrowserChecks(options) {
     await browser?.close();
     for (const id of required) if (!report.checks.some((check) => check.id === id)) report.checks.push({ id, ok: false, notRun: true });
     report.ok = report.checks.length === required.length && report.checks.every((check) => check.ok);
-    report.fixture = { ledgerEntries: fixture.ledger.size, draft: fixture.draft, draftFiles: fixture.draftFiles, attachments: [...fixture.attachments.keys()] };
+    report.fixture = { ledgerEntries: fixture.ledger.size, draft: fixture.draft, draftFiles: fixture.draftFiles, attachments: [...fixture.attachments.keys()], queue: fixture.queue.all(), indexSessions: fixture.index.count() };
     await fs.writeFile(path.join(options.output, 'native-browser-report.json'), JSON.stringify(report, null, 2) + '\n');
   }
   console.log(JSON.stringify({ ok: report.ok, diagnosticOnly: report.diagnosticOnly, reportPath: path.join(options.output, 'native-browser-report.json'), failed: report.checks.filter((check) => !check.ok).map((check) => check.id) }));

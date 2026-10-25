@@ -8101,3 +8101,908 @@ diff --git a/packages/desktop/src/renderer/pages/conversation/GroupedHistory/ind
                                  });
                                }}
                                onKeyDown={(e) => {
+diff --git a/packages/desktop/src/renderer/components/chat/MobileActionSheet/useAttachEntry.tsx b/packages/desktop/src/renderer/components/chat/MobileActionSheet/useAttachEntry.tsx
+index 944ed9a..c60e3c8 100644
+--- a/packages/desktop/src/renderer/components/chat/MobileActionSheet/useAttachEntry.tsx
++++ b/packages/desktop/src/renderer/components/chat/MobileActionSheet/useAttachEntry.tsx
+@@ -5,7 +5,8 @@
+  */
+ 
+ import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
+-import { HOST_ATTACHMENTS_SUPPORTED } from '@/common/host/hostAttachments';
++import { HOST_ATTACHMENTS_SUPPORTED, hostAttachmentFailureText } from '@/common/host/hostAttachments';
++import { isNativeHost } from '@/common/host/hostTransport';
+ import { FileService, type FileMetadata } from '@/renderer/services/FileService';
+ import { isElectronDesktop } from '@/renderer/utils/platform';
+ import { Message } from '@arco-design/web-react';
+@@ -55,8 +56,8 @@ export const useAttachEntry = ({
+       try {
+         const processed = await FileService.processDroppedFiles(fileList, conversationContext?.conversation_id);
+         if (processed.length > 0) onLocalFilesAdded(processed);
+-      } catch {
+-        Message.error(t('common.fileAttach.failed'));
++      } catch (error) {
++        Message.error(hostAttachmentFailureText(error, t));
+       }
+       e.target.value = '';
+     },
+@@ -68,8 +69,8 @@ export const useAttachEntry = ({
+   }, []);
+ 
+   const entries = useMemo<MobileActionSheetEntry[]>(() => {
+-    // 宿主暂不支持接收附件：入口保留在原处但不可点，并写明原因，避免留下一个点了必失败的按钮。
+-    // This host cannot receive attachments yet: the entry stays in place, disabled, and says why, so no
++    // 关掉附件开关时，入口保留在原处但不可点，并写明原因，避免留下一个点了必失败的按钮。
++    // With the attachment switch off the entry stays in place, disabled, and says why, so no
+     // button here can only fail.
+     if (!HOST_ATTACHMENTS_SUPPORTED) {
+       return [
+@@ -98,6 +99,22 @@ export const useAttachEntry = ({
+       ];
+     }
+ 
++    // 本机宿主的文件就在这台手机上：只有设备自己的文件选择器，宿主没有可浏览的文件系统。
++    // On this host the files are the phone's own: the device chooser is the only entry, because the host
++    // exposes no filesystem to browse.
++    if (isNativeHost()) {
++      return [
++        {
++          key: 'attach-my-device',
++          icon: <FolderOpen theme='outline' size='16' />,
++          label: t('common.fileAttach.myDevice', { defaultValue: 'Upload from device' }),
++          variant: 'muted',
++          dividerBefore,
++          onClick: () => triggerLocalUpload(),
++        },
++      ];
++    }
++
+     return [
+       {
+         key: 'attach-host-files',
+diff --git a/packages/desktop/src/renderer/components/layout/Router.tsx b/packages/desktop/src/renderer/components/layout/Router.tsx
+index e7e0067..6d5c742 100644
+--- a/packages/desktop/src/renderer/components/layout/Router.tsx
++++ b/packages/desktop/src/renderer/components/layout/Router.tsx
+@@ -10,6 +10,7 @@ const HostsPage = React.lazy(() => import('@renderer/pages/hosts'));
+ const HostSearchPage = React.lazy(() => import('@renderer/pages/hostSearch'));
+ const HostInboxPage = React.lazy(() => import('@renderer/pages/hostInbox'));
+ const EscapeHatchSettings = React.lazy(() => import('@renderer/pages/settings/EscapeHatchSettings'));
++const HostMaintenanceSettings = React.lazy(() => import('@renderer/pages/settings/HostMaintenanceSettings'));
+ const AppearanceSettings = React.lazy(() => import('@renderer/pages/settings/AppearanceSettings'));
+ const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemSettings'));
+ const PetSettings = React.lazy(() => import('@renderer/pages/settings/PetSettings'));
+@@ -61,6 +62,8 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
+           <Route path='/inbox' element={withRouteFallback(HostInboxPage)} />
+           {/* A session is created host first, so the escape hatch addresses a saved host here. */}
+           <Route path='/settings/escape' element={withRouteFallback(EscapeHatchSettings)} />
++          {/* This host's own maintenance page: it drops the cached session index behind a confirmation. */}
++          <Route path='/settings/host' element={withRouteFallback(HostMaintenanceSettings)} />
+           <Route path='/settings/appearance' element={withRouteFallback(AppearanceSettings)} />
+           <Route path='/settings/display' element={<Navigate to='/settings/appearance' replace />} />
+           <Route path='/settings/pet' element={withRouteFallback(PetSettings)} />
+diff --git a/packages/desktop/src/renderer/components/media/FileAttachButton.tsx b/packages/desktop/src/renderer/components/media/FileAttachButton.tsx
+index 6d380a4..84035a8 100644
+--- a/packages/desktop/src/renderer/components/media/FileAttachButton.tsx
++++ b/packages/desktop/src/renderer/components/media/FileAttachButton.tsx
+@@ -6,7 +6,8 @@
+ 
+ import type { IConversationMcpStatus, IConversationMcpStatusKind } from '@/common/config/storage';
+ import { ipcBridge } from '@/common';
+-import { HOST_ATTACHMENTS_SUPPORTED } from '@/common/host/hostAttachments';
++import { HOST_ATTACHMENTS_SUPPORTED, hostAttachmentFailureText } from '@/common/host/hostAttachments';
++import { isNativeHost } from '@/common/host/hostTransport';
+ import { Button, Message, Trigger } from '@arco-design/web-react';
+ import { FolderOpen, Lightning, Paperclip, Plus, Right, Shield } from '@icon-park/react';
+ import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
+@@ -118,8 +119,8 @@ const FileAttachButton: React.FC<FileAttachButtonProps> = ({
+       try {
+         const processed = await FileService.processDroppedFiles(fileList, conversationContext?.conversation_id);
+         if (processed.length > 0) onLocalFilesAdded(processed);
+-      } catch {
+-        Message.error(t('common.fileAttach.failed'));
++      } catch (error) {
++        Message.error(hostAttachmentFailureText(error, t));
+       } finally {
+         setUploading(false);
+       }
+@@ -128,8 +129,8 @@ const FileAttachButton: React.FC<FileAttachButtonProps> = ({
+     [conversationContext?.conversation_id, onLocalFilesAdded, t]
+   );
+ 
+-  // 宿主尚不支持附件：入口保留但点不动，原因写在按钮与菜单项上。
+-  // This host cannot receive attachments yet: the entry stays where it was, disabled, and says why.
++  // 关掉附件开关时，入口保留但点不动，原因写在按钮与菜单项上。
++  // With the attachment switch off the entry stays where it was, disabled, and says why.
+   const attachUnsupported = !HOST_ATTACHMENTS_SUPPORTED;
+   const attachUnsupportedReason = t('conversation.hostTools.attachmentsUnsupported');
+   const isDesktop = isElectronDesktop();
+@@ -304,14 +305,19 @@ const FileAttachButton: React.FC<FileAttachButtonProps> = ({
+                 }}
+               />
+             )}
+-            <MenuItem
+-              icon={<Paperclip theme='outline' size={15} strokeWidth={2.5} />}
+-              label={t('common.fileAttach.addFiles', { defaultValue: 'Add files' })}
+-              onClick={() => {
+-                openFileSelector();
+-                setOpen(false);
+-              }}
+-            />
++            {/* 本机宿主的文件就在这台手机上，宿主没有可浏览的文件系统，因此只留设备自己的选择器。 */}
++            {/* On this host the files are the phone's own and the host exposes no filesystem, so the host
++                picker is not offered. */}
++            {!isNativeHost() && (
++              <MenuItem
++                icon={<Paperclip theme='outline' size={15} strokeWidth={2.5} />}
++                label={t('common.fileAttach.addFiles', { defaultValue: 'Add files' })}
++                onClick={() => {
++                  openFileSelector();
++                  setOpen(false);
++                }}
++              />
++            )}
+           </>
+         )}
+       </div>
+diff --git a/packages/desktop/src/renderer/hooks/file/useDragUpload.ts b/packages/desktop/src/renderer/hooks/file/useDragUpload.ts
+index 510c538..b7cc1f9 100644
+--- a/packages/desktop/src/renderer/hooks/file/useDragUpload.ts
++++ b/packages/desktop/src/renderer/hooks/file/useDragUpload.ts
+@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
+ import { Message } from '@arco-design/web-react';
+ import type { FileMetadata } from '@renderer/services/FileService';
+ import { isSupportedFile, FileService } from '@renderer/services/FileService';
++import { hostAttachmentFailureText } from '@/common/host/hostAttachments';
+ 
+ export interface UseDragUploadOptions {
+   supportedExts?: string[];
+@@ -97,14 +98,9 @@ export const useDragUpload = ({ supportedExts = [], onFilesAdded, conversation_i
+         }
+       } catch (err) {
+         console.error('Failed to process dropped files:', err);
+-        // 宿主暂不支持接收附件：失败原因就是它，直接说明，而不是笼统的"处理失败"。
+-        // The host cannot receive attachments yet: that refusal is the failure, and it is named as itself
+-        // instead of as a generic processing failure.
+-        Message.error(
+-          err instanceof Error && err.message === 'HOST_ATTACHMENTS_UNSUPPORTED'
+-            ? t('conversation.hostTools.attachmentsUnsupported')
+-            : t('conversation.workspace.dragFailed', 'Failed to process dropped files')
+-        );
++        // 上传失败按宿主自己的码和原因显示，而不是笼统的"处理失败"。
++        // A failed upload is shown as the host's own code and reason, instead of a generic failure.
++        Message.error(hostAttachmentFailureText(err, t));
+       }
+     },
+     [conversation_id, onFilesAdded, supportedExts, t]
+diff --git a/packages/desktop/src/renderer/hooks/file/usePasteService.ts b/packages/desktop/src/renderer/hooks/file/usePasteService.ts
+index bca959e..7ac39b2 100644
+--- a/packages/desktop/src/renderer/hooks/file/usePasteService.ts
++++ b/packages/desktop/src/renderer/hooks/file/usePasteService.ts
+@@ -1,6 +1,7 @@
+ import type { FileMetadata } from '@/renderer/services/FileService';
+ import type { UploadSource } from '@/renderer/hooks/file/useUploadState';
+ import type { ImageCounter } from '@/renderer/services/PasteService';
++import { hostAttachmentFailureText } from '@/common/host/hostAttachments';
+ import { PasteService } from '@/renderer/services/PasteService';
+ import { useCallback, useEffect, useMemo, useRef } from 'react';
+ import { useTranslation } from 'react-i18next';
+@@ -67,7 +68,7 @@ export const usePasteService = ({
+         }
+         return handled;
+       } catch (err) {
+-        Message.error(t('common.fileAttach.failed'));
++        Message.error(hostAttachmentFailureText(err, t));
+         return false;
+       }
+     },
+diff --git a/packages/desktop/src/renderer/pages/guid/components/GuidActionRow.tsx b/packages/desktop/src/renderer/pages/guid/components/GuidActionRow.tsx
+index da2a0cc..c05b009 100644
+--- a/packages/desktop/src/renderer/pages/guid/components/GuidActionRow.tsx
++++ b/packages/desktop/src/renderer/pages/guid/components/GuidActionRow.tsx
+@@ -5,7 +5,8 @@
+  */
+ 
+ import { ipcBridge } from '@/common';
+-import { HOST_ATTACHMENTS_SUPPORTED } from '@/common/host/hostAttachments';
++import { HOST_ATTACHMENTS_SUPPORTED, hostAttachmentFailureText } from '@/common/host/hostAttachments';
++import { isNativeHost } from '@/common/host/hostTransport';
+ import type { IMcpServer, IProvider, TProviderWithModel } from '@/common/config/storage';
+ import AgentModeSelector from '@/renderer/components/agent/AgentModeSelector';
+ import { DROPDOWN_SEARCH_THRESHOLD } from '@/renderer/components/agent/runtimeSelectorOptions';
+@@ -181,8 +182,8 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
+         if (processed.length > 0) {
+           onFilesUploaded(processed.map((f) => f.path));
+         }
+-      } catch {
+-        Message.error(t('common.fileAttach.failed'));
++      } catch (error) {
++        Message.error(hostAttachmentFailureText(error, t));
+       } finally {
+         setUploading(false);
+       }
+@@ -320,8 +321,8 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
+     // Match the conversation send box: WebUI offers both the backend-machine
+     // picker and an upload from the phone/current browser device.
+     //
+-    // 宿主尚不支持接收附件：入口保留在原处但不可点，并写明原因。
+-    // This host cannot receive attachments yet, so the entry stays in place, disabled, and says why.
++    // 关掉附件开关时，入口保留在原处但不可点，并写明原因。
++    // With the attachment switch off the entry stays in place, disabled, and says why.
+     if (!HOST_ATTACHMENTS_SUPPORTED) {
+       entries.push({
+         key: 'attach',
+@@ -332,6 +333,18 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
+         dividerBefore: true,
+         disabled: true,
+       });
++    } else if (isNativeHost()) {
++      // 本机宿主的文件就在这台手机上：只有设备自己的文件选择器，宿主没有可浏览的文件系统。
++      // On this host the files are the phone's own: the device chooser is the only entry, because the host
++      // exposes no filesystem to browse.
++      entries.push({
++        key: 'attach-my-device',
++        icon: <FolderOpen theme='outline' size='16' />,
++        label: t('common.fileAttach.myDevice', { defaultValue: 'Upload from device' }),
++        variant: 'muted',
++        dividerBefore: true,
++        onClick: () => fileInputRef.current?.click(),
++      });
+     } else if (isWebUI) {
+       entries.push(
+         {
+@@ -464,8 +477,8 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
+       }}
+     >
+       {!HOST_ATTACHMENTS_SUPPORTED ? (
+-        // 宿主尚不支持接收附件：入口保留但点不动，原因写在菜单项上。
+-        // This host cannot receive attachments yet: the entry stays, disabled, and names the reason.
++        // 关掉附件开关时，入口保留但点不动，原因写在菜单项上。
++        // With the attachment switch off the entry stays, disabled, and names the reason.
+         <Menu.Item key='file' disabled>
+           <div className='flex items-center gap-8px'>
+             <UploadOne theme='outline' size='16' fill={iconColors.secondary} style={{ lineHeight: 0 }} />
+@@ -473,6 +486,13 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
+             <span className='text-12px text-t-tertiary'>{t('conversation.hostTools.attachmentsUnsupported')}</span>
+           </div>
+         </Menu.Item>
++      ) : isNativeHost() ? (
++        <Menu.Item key='device'>
++          <div className='flex items-center gap-8px'>
++            <UploadOne theme='outline' size='16' fill={iconColors.secondary} style={{ lineHeight: 0 }} />
++            <span>{t('common.fileAttach.myDevice')}</span>
++          </div>
++        </Menu.Item>
+       ) : isWebUI ? (
+         <>
+           <Menu.Item key='file'>
+diff --git a/packages/desktop/src/renderer/pages/settings/components/SettingsPageWrapper.tsx b/packages/desktop/src/renderer/pages/settings/components/SettingsPageWrapper.tsx
+index 593f238..e5ee0c9 100644
+--- a/packages/desktop/src/renderer/pages/settings/components/SettingsPageWrapper.tsx
++++ b/packages/desktop/src/renderer/pages/settings/components/SettingsPageWrapper.tsx
+@@ -18,6 +18,7 @@ import {
+   LinkCloud,
+   Puzzle,
+   Robot,
++  Server,
+   System,
+   Terminal,
+   Toolkit,
+@@ -46,6 +47,12 @@ export function getBuiltinSettingsNavItems(isDesktop: boolean, t: TranslateFn):
+       icon: <Terminal theme='outline' size='16' />,
+       path: 'escape',
+     },
++    host: {
++      id: 'host',
++      label: t('settings.hostMaintenance.title'),
++      icon: <Server theme='outline' size='16' />,
++      path: 'host',
++    },
+     model: { id: 'model', label: t('settings.model'), icon: <LinkCloud theme='outline' size='16' />, path: 'model' },
+     assistants: {
+       id: 'assistants',
+diff --git a/packages/desktop/src/renderer/pages/settings/components/SettingsSider.tsx b/packages/desktop/src/renderer/pages/settings/components/SettingsSider.tsx
+index 2b3febe..66782c9 100644
+--- a/packages/desktop/src/renderer/pages/settings/components/SettingsSider.tsx
++++ b/packages/desktop/src/renderer/pages/settings/components/SettingsSider.tsx
+@@ -12,6 +12,7 @@ import {
+   Lightning,
+   LinkCloud,
+   Puzzle,
++  Server,
+   Speed,
+   System,
+   Terminal,
+@@ -27,6 +28,7 @@ import { getSiderTooltipProps } from '@/renderer/utils/ui/siderTooltip';
+ /** Builtin settings tab IDs in display order (must match router paths). */
+ export const BUILTIN_TAB_IDS = [
+   'escape',
++  'host',
+   'agent',
+   'model',
+   'skills',
+@@ -100,6 +102,7 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
+     // Build builtin items
+     const builtinMap: Record<string, SiderItem> = {
+       escape: { id: 'escape', label: t('settings.escape.title'), icon: <Terminal />, path: 'escape' },
++      host: { id: 'host', label: t('settings.hostMaintenance.title'), icon: <Server />, path: 'host' },
+       model: { id: 'model', label: t('settings.model'), icon: <LinkCloud />, path: 'model' },
+       agent: {
+         id: 'agent',
+diff --git a/packages/desktop/src/renderer/services/FileService.ts b/packages/desktop/src/renderer/services/FileService.ts
+index 68fa449..99747f1 100644
+--- a/packages/desktop/src/renderer/services/FileService.ts
++++ b/packages/desktop/src/renderer/services/FileService.ts
+@@ -350,6 +350,12 @@ class FileServiceClass {
+           // User-initiated abort: drop this file silently (the UI already reflects it).
+           continue;
+         }
++        // 宿主拒绝的上传就是拒绝本身：带上它自己的码和原因交给调用方，而不是让这个文件悄悄消失。
++        // A refusal from this host is that refusal, with the host's own code and reason, so the caller reports
++        // it instead of a file that quietly never appears.
++        if (isNativeHost()) {
++          throw error;
++        }
+         console.error('Failed to upload file:', error);
+         continue;
+       } finally {
+diff --git a/packages/desktop/src/renderer/services/PasteService.ts b/packages/desktop/src/renderer/services/PasteService.ts
+index b436173..d8cdd09 100644
+--- a/packages/desktop/src/renderer/services/PasteService.ts
++++ b/packages/desktop/src/renderer/services/PasteService.ts
+@@ -5,6 +5,7 @@
+  */
+ 
+ import type { FileMetadata } from './FileService';
++import { isNativeHost } from '@/common/host/hostTransport';
+ import { getFileExtension, UPLOAD_ABORTED_ERROR, uploadFileViaHttp } from './FileService';
+ import { trackUpload, type UploadSource } from '@/renderer/hooks/file/useUploadState';
+ 
+@@ -237,6 +238,12 @@ class PasteServiceClass {
+               if (error instanceof Error && error.message === 'FILE_TOO_LARGE') {
+                 throw error;
+               }
++              // 本机宿主拒绝的上传就是拒绝本身：交给调用方显示它的码和原因，附件不会悄悄消失。
++              // A refusal from this host travels to the caller with its own code and reason, instead of an
++              // attachment that quietly never appears.
++              if (isNativeHost()) {
++                throw error;
++              }
+               console.error('创建临时文件失败:', error);
+             }
+           } else {
+@@ -289,6 +296,12 @@ class PasteServiceClass {
+               if (error instanceof Error && error.message === 'FILE_TOO_LARGE') {
+                 throw error;
+               }
++              // 本机宿主拒绝的上传就是拒绝本身：交给调用方显示它的码和原因，附件不会悄悄消失。
++              // A refusal from this host travels to the caller with its own code and reason, instead of an
++              // attachment that quietly never appears.
++              if (isNativeHost()) {
++                throw error;
++              }
+               console.error('上传粘贴文件失败:', error);
+             }
+           } else {
+@@ -339,6 +352,12 @@ class PasteServiceClass {
+               if (error instanceof Error && error.message === 'FILE_TOO_LARGE') {
+                 throw error;
+               }
++              // 本机宿主拒绝的上传就是拒绝本身：交给调用方显示它的码和原因，附件不会悄悄消失。
++              // A refusal from this host travels to the caller with its own code and reason, instead of an
++              // attachment that quietly never appears.
++              if (isNativeHost()) {
++                throw error;
++              }
+               console.error('创建临时文件失败:', error);
+             }
+           } else {
+diff --git a/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts b/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
+index 698f78b..0b34b06 100644
+--- a/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
++++ b/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
+@@ -788,8 +788,14 @@ export type I18nKey =
+   | 'conversation.hostTools.queueKindRequest'
+   | 'conversation.hostTools.queueKindRequestHint'
+   | 'conversation.hostTools.queueMenu'
++  | 'conversation.hostTools.queueNoWithdraw'
++  | 'conversation.hostTools.queuePending'
++  | 'conversation.hostTools.queuePendingEmpty'
+   | 'conversation.hostTools.queueSend'
+   | 'conversation.hostTools.queueSent'
++  | 'conversation.hostTools.queueStatePending'
++  | 'conversation.hostTools.queueStateTaken'
++  | 'conversation.hostTools.queueStateWithdrawn'
+   | 'conversation.hostTools.queueTarget'
+   | 'conversation.hostTools.queueTargetNone'
+   | 'conversation.hostTools.queueTargetRequired'
+@@ -797,6 +803,8 @@ export type I18nKey =
+   | 'conversation.hostTools.queueTextPlaceholder'
+   | 'conversation.hostTools.queueTextRequired'
+   | 'conversation.hostTools.queueTitle'
++  | 'conversation.hostTools.queueWithdraw'
++  | 'conversation.hostTools.queueWithdrawConfirm'
+   | 'conversation.hostTools.reconnecting'
+   | 'conversation.hostTools.referenceMenu'
+   | 'conversation.hostTools.retry'
+@@ -812,6 +820,7 @@ export type I18nKey =
+   | 'conversation.hostTools.searchQueryRequired'
+   | 'conversation.hostTools.searchTitle'
+   | 'conversation.hostTools.searchUntitled'
++  | 'conversation.hostTools.uploadFailed'
+   | 'conversation.mcp.loaded'
+   | 'conversation.mcp.managementHint'
+   | 'conversation.mcp.openSettings'
+@@ -2126,6 +2135,13 @@ export type I18nKey =
+   | 'settings.healthCheck'
+   | 'settings.healthStatusCleared'
+   | 'settings.helpDocumentation'
++  | 'settings.hostMaintenance.clearIndex'
++  | 'settings.hostMaintenance.clearIndexConfirm'
++  | 'settings.hostMaintenance.clearIndexDone'
++  | 'settings.hostMaintenance.clearIndexHint'
++  | 'settings.hostMaintenance.clearIndexOk'
++  | 'settings.hostMaintenance.description'
++  | 'settings.hostMaintenance.title'
+   | 'settings.hosts.add'
+   | 'settings.hosts.address'
+   | 'settings.hosts.addressRequired'
+@@ -2167,9 +2183,9 @@ export type I18nKey =
+   | 'settings.hosts.sessionCount'
+   | 'settings.hosts.targetLinuxHint'
+   | 'settings.hosts.targetNative'
+-  | 'settings.hosts.targetNativeHint'
+-  | 'settings.hosts.targetNativeUnsupported'
+   | 'settings.hosts.targetUnsupportedNote'
++  | 'settings.hosts.targetWindowsHint'
++  | 'settings.hosts.targetWindowsNative'
+   | 'settings.hosts.targetWsl'
+   | 'settings.hosts.title'
+   | 'settings.hosts.username'
+diff --git a/packages/desktop/src/renderer/services/i18n/index.ts b/packages/desktop/src/renderer/services/i18n/index.ts
+index 7438597..01c4d8c 100644
+--- a/packages/desktop/src/renderer/services/i18n/index.ts
++++ b/packages/desktop/src/renderer/services/i18n/index.ts
+@@ -93,7 +93,10 @@ function getInitialLanguage(): SupportedLanguage {
+   const hint = backendStartupFailed
+     ? injectedLanguage || localStorageLanguage || systemLanguage
+     : localStorageLanguage || injectedLanguage;
+-  return normalizeLanguageCode(hint || DEFAULT_LANGUAGE);
++  // 产品默认界面语言是简体中文：首屏也如此，只有用户自己选过的语言（localStorage 或注入值）才会改变它。
++  // The product's default interface language is Simplified Chinese, and the first paint follows it too: only
++  // a language the user chose themselves (a localStorage or injected hint) changes that default.
++  return normalizeLanguageCode(hint || 'zh-CN');
+ }
+ 
+ async function loadLocaleModules(locale: string): Promise<Record<string, unknown>> {
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/en-US/conversation.json b/packages/desktop/src/renderer/services/i18n/locales/en-US/conversation.json
+index cf5a813..0e0baaa 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/en-US/conversation.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/en-US/conversation.json
+@@ -142,6 +142,15 @@
+     "queueTextRequired": "Write the message first.",
+     "queueSend": "Queue it",
+     "queueSent": "Queued for {{target}}.",
++    "queuePending": "Messages still waiting",
++    "queuePendingEmpty": "Nothing is waiting in this queue.",
++    "queueStatePending": "Waiting",
++    "queueStateWithdrawn": "Withdrawn",
++    "queueStateTaken": "Taken",
++    "queueWithdraw": "Withdraw",
++    "queueWithdrawConfirm": "A withdrawn message is never sent to that conversation.",
++    "queueNoWithdraw": "This message is no longer waiting, so it cannot be withdrawn.",
++    "uploadFailed": "Upload failed: the host answered {{code}} ({{reason}})",
+     "referenceMenu": "Quote into a new conversation",
+     "openFailed": "This conversation could not be opened: {{reason}}",
+     "reconnecting": "Connection lost — reconnecting automatically…",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json b/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json
+index b98d6c3..b3a798f 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/en-US/settings.json
+@@ -844,8 +844,8 @@
+     "osLinux": "Linux",
+     "osWindows": "Windows",
+     "targetNative": "This host",
+-    "targetNativeUnsupported": "Windows itself (not supported)",
+-    "targetNativeHint": "An Agent on Windows itself has no entry in this app yet, so this target cannot be saved.",
++    "targetWindowsNative": "Windows itself",
++    "targetWindowsHint": "The Agent runs on that Windows host itself. Whether one answers there is what the probe decides, through the host's own commands; this target has not been verified on a real device yet.",
+     "targetLinuxHint": "A Linux host runs its Agent in its own shell.",
+     "targetWsl": "WSL distribution",
+     "wslDistribution": "WSL distribution name",
+@@ -878,6 +878,15 @@
+     "valueNone": "—",
+     "targetUnsupportedNote": "Target not supported: this app has no Agent entry for what this host would run, so no session can start on it."
+   },
++  "hostMaintenance": {
++    "title": "Host maintenance",
++    "description": "What the host process on this phone holds, and the one action that drops its cached session index. Your saved hosts, their probe results, drafts and the message queue are separate stores and are not touched.",
++    "clearIndex": "Clear the cached session index",
++    "clearIndexHint": "The index is dropped and rebuilt the next time sessions are read; the conversations it points at are not deleted. Ask for it again in the confirmation, and the counts before and after are shown.",
++    "clearIndexConfirm": "Clear the cached session index now? The host drops what it has indexed and rescans every saved host on the next read. This cannot be undone.",
++    "clearIndexOk": "Clear",
++    "clearIndexDone": "Session index cache cleared: {{before}} → {{after}} conversations."
++  },
+   "escape": {
+     "title": "Escape hatch",
+     "description": "A terminal on a saved host: an SSH shell of your own, or the Agent's own TUI command started in a terminal. The host builds that command, so the Agent runs exactly as it does in its session here.",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json
+index baa3374..e16c7bc 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json
+@@ -142,6 +142,15 @@
+     "queueTextRequired": "请先填写消息内容。",
+     "queueSend": "入队",
+     "queueSent": "已投递到 {{target}}。",
++    "queuePending": "待发消息",
++    "queuePendingEmpty": "当前没有待发消息。",
++    "queueStatePending": "待发",
++    "queueStateWithdrawn": "已撤回",
++    "queueStateTaken": "已取走",
++    "queueWithdraw": "撤回",
++    "queueWithdrawConfirm": "撤回后这条消息不会再发送给目标会话。",
++    "queueNoWithdraw": "这条消息已不在待发中，无法撤回。",
++    "uploadFailed": "上传失败：宿主返回 {{code}}（{{reason}}）",
+     "referenceMenu": "引用到新会话",
+     "openFailed": "无法打开该会话：{{reason}}",
+     "reconnecting": "连接中断，正在自动重连…",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
+index eac0116..762d334 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
+@@ -844,8 +844,8 @@
+     "osLinux": "Linux",
+     "osWindows": "Windows",
+     "targetNative": "本机",
+-    "targetNativeUnsupported": "Windows 本机（不支持）",
+-    "targetNativeHint": "Windows 本机目标尚未实现，无法保存该组合。",
++    "targetWindowsNative": "Windows 本机",
++    "targetWindowsHint": "Agent 直接在目标 Windows 主机上运行。是否可用由宿主用本机命令探测决定；该目标尚未在真机上验证。",
+     "targetLinuxHint": "Linux 主机的 Agent 运行在主机自身的 Shell 中。",
+     "targetWsl": "WSL 发行版",
+     "wslDistribution": "WSL 发行版名称",
+@@ -878,6 +878,15 @@
+     "valueNone": "—",
+     "targetUnsupportedNote": "不支持该目标：本应用尚无对应的 Agent 入口，无法在其上启动会话。"
+   },
++  "hostMaintenance": {
++    "title": "宿主维护",
++    "description": "本机宿主进程自己持有的数据，以及唯一会清空它的动作——清空会话索引缓存。已保存的主机、探测结果、草稿与消息队列是各自独立的存储，不受影响。",
++    "clearIndex": "清空会话索引缓存",
++    "clearIndexHint": "清空后，下次读取会话时会重新扫描并重建索引；索引里指向的会话本身不会被删除。执行前需要二次确认，结果会显示清理前后的会话数。",
++    "clearIndexConfirm": "确定清空会话索引缓存吗？宿主会丢弃已建立的索引，并在下次读取时重新扫描全部已保存主机。此操作无法撤销。",
++    "clearIndexOk": "清空",
++    "clearIndexDone": "已清空会话索引缓存：会话数 {{before}} → {{after}}。"
++  },
+   "escape": {
+     "title": "逃生舱",
+     "description": "在已保存的主机上打开终端：一个是自用的 SSH Shell，一个是在终端中启动该 Agent 自带的 TUI 命令。该命令由宿主生成，Agent 的运行方式与在此处的会话中一致。",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json b/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json
+index 99c3faa..e81f286 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-TW/settings.json
+@@ -844,8 +844,6 @@
+     "osLinux": "Linux",
+     "osWindows": "Windows",
+     "targetNative": "本機",
+-    "targetNativeUnsupported": "Windows 本機（不支援）",
+-    "targetNativeHint": "Windows 本機目標尚未實作，無法儲存此組合。",
+     "targetLinuxHint": "Linux 主機的 Agent 在自己的 Shell 中執行。",
+     "targetWsl": "WSL 發行版",
+     "wslDistribution": "WSL 發行版名稱",
+diff --git a/tests/unit/renderer/GuidActionRow.dom.test.tsx b/tests/unit/renderer/GuidActionRow.dom.test.tsx
+index 84fc08c..6f7639a 100644
+--- a/tests/unit/renderer/GuidActionRow.dom.test.tsx
++++ b/tests/unit/renderer/GuidActionRow.dom.test.tsx
+@@ -11,7 +11,7 @@ import GuidActionRow from '@/renderer/pages/guid/components/GuidActionRow';
+ import type { IMcpServer } from '@/common/config/storage';
+ import { ipcBridge } from '@/common';
+ 
+-const environment = vi.hoisted(() => ({ isMobile: false, isDesktop: true }));
++const environment = vi.hoisted(() => ({ isMobile: false, isDesktop: true, isNative: false }));
+ 
+ vi.mock('@/common', () => ({
+   ipcBridge: {
+@@ -56,6 +56,11 @@ vi.mock('@/renderer/utils/platform', () => ({
+   isElectronDesktop: () => environment.isDesktop,
+ }));
+ 
++vi.mock('@/common/host/hostTransport', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('@/common/host/hostTransport')>()),
++  isNativeHost: () => environment.isNative,
++}));
++
+ vi.mock('@icon-park/react', () => {
+   const Icon = () => <span aria-hidden='true' />;
+   return {
+@@ -184,30 +189,39 @@ describe('GuidActionRow skill/MCP submenu search', () => {
+     vi.clearAllMocks();
+     environment.isMobile = false;
+     environment.isDesktop = true;
++    environment.isNative = false;
+   });
+ 
+-  // This host cannot receive attachments, so the mobile WebUI sheet offers neither the host-machine picker
+-  // nor the device upload: it keeps one entry that names the reason and cannot be used.
+-  it('offers only the disabled attach entry in the mobile WebUI action sheet', () => {
++  // WebUI keeps both entry points: the backend machine's own picker and an upload from this device.
++  it('offers the host picker and the device upload in the mobile WebUI action sheet', () => {
+     environment.isMobile = true;
+     environment.isDesktop = false;
+     renderActionRow({ allSkills: [], mcpServers: [] });
+ 
+-    expect(screen.getByTestId('attach')).toHaveTextContent('Add files');
+-    expect(screen.queryByTestId('attach-host-files')).not.toBeInTheDocument();
+-    expect(screen.queryByTestId('attach-my-device')).not.toBeInTheDocument();
++    expect(screen.getByTestId('attach-host-files')).toHaveTextContent('Add files');
++    expect(screen.getByTestId('attach-my-device')).toHaveTextContent('Upload from device');
+   });
+ 
+-  it('opens no host picker from the mobile WebUI attach entry', async () => {
++  it('opens the host picker from the mobile WebUI attach entry', async () => {
+     environment.isMobile = true;
+     environment.isDesktop = false;
+-    const onFilesPicked = vi.fn();
+-    renderActionRow({ allSkills: [], mcpServers: [], onFilesPicked });
++    renderActionRow({ allSkills: [], mcpServers: [] });
++
++    fireEvent.click(screen.getByTestId('attach-host-files'));
+ 
+-    fireEvent.click(screen.getByTestId('attach'));
++    await waitFor(() => expect(ipcBridge.dialog.showOpen.invoke).toHaveBeenCalled());
++  });
+ 
+-    await waitFor(() => expect(ipcBridge.dialog.showOpen.invoke).not.toHaveBeenCalled());
+-    expect(onFilesPicked).not.toHaveBeenCalled();
++  // This host has no filesystem to browse, so its files are the phone's own: the device upload is the entry.
++  it('offers only the device upload on this host', () => {
++    environment.isMobile = true;
++    environment.isDesktop = false;
++    environment.isNative = true;
++    renderActionRow({ allSkills: [], mcpServers: [] });
++
++    expect(screen.getByTestId('attach-my-device')).toHaveTextContent('Upload from device');
++    expect(screen.queryByTestId('attach-host-files')).not.toBeInTheDocument();
++    expect(screen.queryByTestId('attach')).not.toBeInTheDocument();
+   });
+ 
+   it('shows both search boxes when skills and MCP servers exceed the threshold', () => {
+diff --git a/packages/desktop/src/common/chat/chatLib.ts b/packages/desktop/src/common/chat/chatLib.ts
+index 3f28952..33b722b 100644
+--- a/packages/desktop/src/common/chat/chatLib.ts
++++ b/packages/desktop/src/common/chat/chatLib.ts
+@@ -64,6 +64,7 @@ type TMessageType =
+   | 'agent_status'
+   | 'permission'
+   | 'acp_permission'
++  | 'acp_question'
+   | 'ask'
+   | 'acp_tool_call'
+   | 'plan'
+@@ -300,6 +301,31 @@ export type IMessageAgentStatus = IMessage<
+ 
+ export type IMessageAcpPermission = IMessage<'acp_permission', AcpPermissionRequest>;
+ 
++/**
++ * One live question of the open conversation, as the host projects it: the opaque reference an answer has to
++ * quote, the options and fields the Agent stated, and the schema the answer is validated against. A row whose
++ * `requested_schema` is null has no structure this build can read, so it is visible without being answerable.
++ */
++export type AcpQuestionContent = {
++  session_id?: string;
++  conversation_id?: string;
++  question_id: string;
++  request_id?: string;
++  epoch?: number | string;
++  turn_id?: string | null;
++  title?: string;
++  message?: string;
++  options?: Array<{ option_id: string; name?: string }>;
++  fields?: Array<{ name: string; label?: string; type?: string; required?: boolean; choices?: string[] }>;
++  single_string?: boolean;
++  requested_schema?: Record<string, unknown> | null;
++  live?: boolean;
++  readonly?: boolean;
++  state?: string;
++};
++
++export type IMessageAcpQuestion = IMessage<'acp_question', AcpQuestionContent>;
++
+ /** One structured question inside an `ask` frame (claude AskUserQuestion shape;
+  *  qwen/grok converged on the same layout — cross-vendor contract). */
+ export interface IAskQuestion {
+@@ -425,6 +451,7 @@ export type TMessage =
+   | IMessageAgentStatus
+   | IMessagePermission
+   | IMessageAcpPermission
++  | IMessageAcpQuestion
+   | IMessageAsk
+   | IMessageAcpToolCall
+   | IMessagePlan
+diff --git a/packages/desktop/src/renderer/components/layout/Layout.tsx b/packages/desktop/src/renderer/components/layout/Layout.tsx
+index 962ee2d..f78bddc 100644
+--- a/packages/desktop/src/renderer/components/layout/Layout.tsx
++++ b/packages/desktop/src/renderer/components/layout/Layout.tsx
+@@ -38,6 +38,7 @@ import { cleanupSiderTooltips } from '@renderer/utils/ui/siderTooltip';
+ import { useConversationShortcuts } from '@renderer/hooks/ui/useConversationShortcuts';
+ import { isElectronDesktop } from '@renderer/utils/platform';
+ import { isNativeHost } from '@/common/host/hostTransport';
++import HostChallengePrompt from '@renderer/host/HostChallengePrompt';
+ import { IS_DISCONTINUED_BUILD } from '@/renderer/utils/discontinuedBuild';
+ import UpdateMigrationDialog from '@/renderer/components/settings/UpdateMigrationDialog';
+ import '@renderer/styles/layout.css';
+@@ -437,6 +438,9 @@ const Layout: React.FC<{
+               >
+                 <Outlet />
+                 <PwaPullToRefresh />
++                {/* A connection that waits for a host key, a password or a key passphrase: the prompt sits above
++                    every route, because the connection it belongs to is not a route of its own. */}
++                {isNativeHost() && <HostChallengePrompt />}
+                 {IS_DISCONTINUED_BUILD && <UpdateMigrationDialog />}
+               </ArcoLayout.Content>
+               {/* Hoisted preview region (project conversations only). Structurally
+diff --git a/packages/desktop/src/renderer/pages/conversation/Messages/MessageList.tsx b/packages/desktop/src/renderer/pages/conversation/Messages/MessageList.tsx
+index 764a82d..edaf3b8 100644
+--- a/packages/desktop/src/renderer/pages/conversation/Messages/MessageList.tsx
++++ b/packages/desktop/src/renderer/pages/conversation/Messages/MessageList.tsx
+@@ -15,6 +15,7 @@ import { collectAiCopyRows, type TurnCopyItem } from '@/renderer/utils/chat/turn
+ import { Image } from '@arco-design/web-react';
+ import { Down } from '@icon-park/react';
+ import MessageAcpPermission from '@renderer/pages/conversation/Messages/acp/MessageAcpPermission';
++import HostQuestionCard from '@renderer/host/HostQuestionCard';
+ import MessageQuestion from './MessageQuestion';
+ import MessagePermission from './components/MessagePermission';
+ import MessageAcpTerminalOutput from '@renderer/pages/conversation/Messages/acp/MessageAcpTerminalOutput';
+@@ -294,6 +295,9 @@ const MessageItem: React.FC<{
+           return <MessagePermission message={message}></MessagePermission>;
+         case 'acp_permission':
+           return <MessageAcpPermission message={message}></MessageAcpPermission>;
++        case 'acp_question':
++          // The host's own question card: its answer goes to the host's interaction route, not to the ask channel.
++          return <HostQuestionCard message={message}></HostQuestionCard>;
+         case 'ask':
+           return <MessageQuestion message={message}></MessageQuestion>;
+         case 'acp_tool_call':
+diff --git a/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts b/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
+index 0b34b06..eb9ef1e 100644
+--- a/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
++++ b/packages/desktop/src/renderer/services/i18n/i18n-keys.d.ts
+@@ -767,6 +767,13 @@ export type I18nKey =
+   | 'conversation.historySearch.untitled'
+   | 'conversation.hostTools.attachmentsUnsupported'
+   | 'conversation.hostTools.cached'
++  | 'conversation.hostTools.challengeAccept'
++  | 'conversation.hostTools.challengeConfirm'
++  | 'conversation.hostTools.challengeReject'
++  | 'conversation.hostTools.challengeSecret'
++  | 'conversation.hostTools.challengeTitle'
++  | 'conversation.hostTools.challengeUnavailable'
++  | 'conversation.hostTools.challengeUnknown'
+   | 'conversation.hostTools.filterAgent'
+   | 'conversation.hostTools.filterAll'
+   | 'conversation.hostTools.filterHost'
+@@ -1309,6 +1316,11 @@ export type I18nKey =
+   | 'messages.fork.errorTurnInFlight'
+   | 'messages.fork.errorUnsupported'
+   | 'messages.hostConnectionFailed'
++  | 'messages.hostQuestionAnswer'
++  | 'messages.hostQuestionJson'
++  | 'messages.hostQuestionJsonHint'
++  | 'messages.hostQuestionRequired'
++  | 'messages.hostQuestionUnsupported'
+   | 'messages.imageGenerationModelDetected'
+   | 'messages.imageLoadFailed'
+   | 'messages.noOptionsAvailable'
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/en-US/conversation.json b/packages/desktop/src/renderer/services/i18n/locales/en-US/conversation.json
+index 0e0baaa..e05ef82 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/en-US/conversation.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/en-US/conversation.json
+@@ -158,7 +158,14 @@
+     "attachmentsUnsupported": "This host cannot receive attachments yet, so this build offers no attach button.",
+     "inboxScope": "This host reports the waiting-work scope as: {{scope}}",
+     "inboxPending": "{{approvals}} approvals · {{questions}} questions waiting",
+-    "searchCoverageProblems": "Parts of the search that were not read: {{problems}}"
++    "searchCoverageProblems": "Parts of the search that were not read: {{problems}}",
++    "challengeTitle": "This connection needs your answer",
++    "challengeSecret": "Credential (never stored or echoed)",
++    "challengeAccept": "Accept and continue",
++    "challengeReject": "Reject",
++    "challengeConfirm": "Confirm",
++    "challengeUnknown": "This credential request ({{kind}}) is not one this build can answer.",
++    "challengeUnavailable": "The credential request of this host could not be read: {{reason}}"
+   },
+   "dropdown": {
+     "cliAgents": "CLI Agents",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/en-US/messages.json b/packages/desktop/src/renderer/services/i18n/locales/en-US/messages.json
+index 51e5b35..bc7524a 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/en-US/messages.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/en-US/messages.json
+@@ -73,6 +73,11 @@
+   "approvalReadOnly": "This approval is read-only or its pending state has not been confirmed.",
+   "hostConnectionFailed": "Host connection failed. No session was started.",
+   "draftUnsaved": "Draft not saved. Keep this page open and retry after checking the connection or draft size.",
++  "hostQuestionAnswer": "Answer",
++  "hostQuestionJson": "Answer (JSON object)",
++  "hostQuestionJsonHint": "Answer with the fields above, e.g. {\"name\": \"value\"}.",
++  "hostQuestionRequired": "Required",
++  "hostQuestionUnsupported": "This question has no answerable structure this host can read.",
+   "confirmation": {
+     "applyChange": "Apply this change?",
+     "allowExecution": "Allow execution?",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json
+index e16c7bc..ee6fe45 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json
+@@ -158,7 +158,14 @@
+     "attachmentsUnsupported": "宿主暂不支持接收附件，因此本构建不提供附件入口。",
+     "inboxScope": "宿主报告的待办范围：{{scope}}",
+     "inboxPending": "待审批 {{approvals}} · 待回答 {{questions}}",
+-    "searchCoverageProblems": "未读取到的部分：{{problems}}"
++    "searchCoverageProblems": "未读取到的部分：{{problems}}",
++    "challengeTitle": "连接需要你确认",
++    "challengeSecret": "凭据（不会保存或回显）",
++    "challengeAccept": "接受并继续",
++    "challengeReject": "拒绝",
++    "challengeConfirm": "确认",
++    "challengeUnknown": "无法识别的凭据请求（{{kind}}），无法作答。",
++    "challengeUnavailable": "无法读取本机的凭据请求：{{reason}}"
+   },
+   "dropdown": {
+     "cliAgents": "CLI Agents",
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/messages.json b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/messages.json
+index a169183..9317511 100644
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/messages.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/messages.json
+@@ -73,6 +73,11 @@
+   "approvalReadOnly": "此审批为只读记录，或当前待决状态尚未确认。",
+   "hostConnectionFailed": "宿主连接失败，未启动会话。",
+   "draftUnsaved": "草稿未保存，请保留此页面；检查连接或草稿长度后重试。",
++  "hostQuestionAnswer": "回答",
++  "hostQuestionJson": "回答（JSON 对象）",
++  "hostQuestionJsonHint": "请按上方字段作答，例如 {\"name\": \"value\"}。",
++  "hostQuestionRequired": "必填",
++  "hostQuestionUnsupported": "该提问没有本机可读的作答结构，无法在此作答。",
+   "confirmation": {
+     "applyChange": "应用此更改？",
+     "allowExecution": "允许执行？",
+diff --git a/packages/desktop/src/common/chat/chatLib.ts b/packages/desktop/src/common/chat/chatLib.ts
+index 33b722b..b336998 100644
+--- a/packages/desktop/src/common/chat/chatLib.ts
++++ b/packages/desktop/src/common/chat/chatLib.ts
+@@ -867,6 +867,18 @@
+         content: message.data as any,
+       };
+     }
++    case 'acp_question': {
++      // The live question the host publishes: the card reads its options, fields and schema from this payload.
++      return {
++        id: uuid(),
++        type: 'acp_question',
++        msg_id: message.msg_id,
++        position: 'left',
++        conversation_id: message.conversation_id,
++        created_at,
++        content: message.data as AcpQuestionContent,
++      };
++    }
+     case 'acp_terminal_output': {
+       const terminal = message.data as any;
+       return {
+diff --git a/packages/desktop/src/renderer/hooks/system/notification/browserNotificationCore.ts b/packages/desktop/src/renderer/hooks/system/notification/browserNotificationCore.ts
+index 437f6d5..7f2431b 100644
+--- a/packages/desktop/src/renderer/hooks/system/notification/browserNotificationCore.ts
++++ b/packages/desktop/src/renderer/hooks/system/notification/browserNotificationCore.ts
+@@ -90,9 +90,10 @@
+ 
+ // Stream `type` values that represent the agent blocking on the user: a tool
+ // permission request (`acp_permission` from ACP; `permission` too from aionrs)
+-// or a structured question (`ask`, AskUserQuestion). All surface the same
+-// "needs your input" notification.
+-const CONFIRMATION_TYPES = new Set(['acp_permission', 'permission', 'ask']);
++// or a structured question (`ask`, AskUserQuestion; `acp_question` is the
++// question this host publishes itself). All surface the same "needs your input"
++// notification.
++const CONFIRMATION_TYPES = new Set(['acp_permission', 'permission', 'ask', 'acp_question']);
+ 
+ export const createBrowserNotificationController = (deps: BrowserNotificationDeps) => {
+   // Track the last turn we actually notified for, so repeated finish events

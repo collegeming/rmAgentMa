@@ -44,7 +44,9 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.connectbot.R
+import org.connectbot.di.CoroutineDispatchers
 import org.connectbot.ui.MainActivity
 import org.json.JSONObject
 import org.rmagentma.rendererhost.ProbeAssets
@@ -52,6 +54,7 @@ import org.rmagentma.rendererhost.ProbeBridge
 import org.rmagentma.rendererhost.ProbeResult
 import org.rmagentma.rendererhost.json
 import timber.log.Timber
+import java.io.File
 import java.util.concurrent.Executors
 import javax.inject.Inject
 
@@ -78,6 +81,9 @@ class RendererHostActivity : ComponentActivity() {
 
         /** The WebView render process holding the renderer exited. */
         const val FAILURE_RENDER_PROCESS_GONE = "renderer_gone"
+
+        /** Where the renderer's unfinished attachment uploads are buffered, inside the app's own private state. */
+        const val UPLOAD_DIRECTORY = "agent-renderer-uploads"
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -97,7 +103,14 @@ class RendererHostActivity : ComponentActivity() {
     @Inject
     lateinit var source: AgentRendererSource
 
-    private val actions by lazy { RendererActions(source) }
+    @Inject
+    lateinit var dispatchers: CoroutineDispatchers
+
+    private val actions by lazy {
+        // Uploads buffer under this host's own noBackupFilesDir: never the product database, never the system
+        // backup, and gone with the app's private state like the drafts.
+        RendererActions(source, RendererAttachments(File(noBackupFilesDir, UPLOAD_DIRECTORY), source), terminal())
+    }
 
     // Product projects are saved hosts (`host-<id>`) and conversations are the product's derived session ids,
     // so the bridge must not pin either of the probe's synthetic ids.
@@ -289,6 +302,26 @@ class RendererHostActivity : ComponentActivity() {
     }
 
     private fun granted(permission: String): Boolean = ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * The product's own terminal surface behind a renderer hand-over. The console is started on the main thread,
+     * which is where an activity launch belongs, and the answer is that launch's real outcome: a host whose
+     * console cannot be started is reported as that instead of as opened. The command reaches the console as its
+     * own pending command, so the user still confirms it there before it is typed into the session.
+     */
+    private fun terminal(): RendererTerminal = object : RendererTerminal {
+        override suspend fun start(hostId: Long, command: String): RendererTerminal.Result = withContext(dispatchers.main) {
+            val request = Intent(this@RendererHostActivity, MainActivity::class.java)
+                .putExtra(MainActivity.EXTRA_TERMINAL_HOST_ID, hostId)
+                .putExtra(MainActivity.EXTRA_TERMINAL_COMMAND, command)
+            try {
+                startActivity(request)
+                RendererTerminal.Result.Started
+            } catch (error: Exception) {
+                RendererTerminal.Result.Failed(error.message ?: error.javaClass.simpleName)
+            }
+        }
+    }
 
     /** Makes the degraded local-network access visible on the surface instead of leaving the routes to fail alone. */
     private fun showNetworkNotice() {

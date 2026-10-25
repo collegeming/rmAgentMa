@@ -1,21 +1,134 @@
 {
   "schemaVersion": 1,
-  "deniedPaths": [
-    "channel-logos",
-    "catppuccin",
-    "vscode-icons",
-    "pet-states",
-    "/pet/",
-    "assets/logo.svg",
-    "assets/logos/",
-    "/pwa/",
-    "/katex/",
-    "@sentry/",
-    "sharp-libvips",
-    "/sharp/",
-    "@monaco-editor/loader"
+  "requiredRules": [
+    "brand-or-channel-assets",
+    "unadmitted-icon-set",
+    "unadmitted-pet-assets",
+    "formula-font-degradation",
+    "unaccounted-font",
+    "unaccounted-static-asset",
+    "unadmitted-module",
+    "unmapped-copied-asset",
+    "build-tool-only",
+    "non-free-native",
+    "unverified-cdn-loader"
   ],
-  "deniedOutputExtensions": [".ttf", ".otf", ".woff", ".woff2", ".node", ".exe", ".dll", ".so", ".map"],
+  "deniedPaths": [
+    {
+      "rule": "brand-or-channel-assets",
+      "match": "channel-logos",
+      "reason": "Upstream channel artwork has no separate image grant; the first release excludes the channel entries and their assets (19/12 §2, L2)."
+    },
+    {
+      "rule": "brand-or-channel-assets",
+      "match": "assets/logo.svg",
+      "reason": "An AionUi product mark: Apache-2.0 §6 grants no trademark right, so the product supplies its own mark (19/12 §2)."
+    },
+    {
+      "rule": "brand-or-channel-assets",
+      "match": "assets/logos/",
+      "reason": "AionUi brand images and provider logos the first release does not distribute (19/12 §2)."
+    },
+    {
+      "rule": "brand-or-channel-assets",
+      "match": "/pwa/",
+      "reason": "Upstream PWA icons and manifest carry AionUi branding and are replaced by product-owned assets (19/12 §2)."
+    },
+    {
+      "rule": "unadmitted-icon-set",
+      "match": "catppuccin",
+      "reason": "The file-icon JSON has no recorded upstream commit or licence; only admitted generic icons may ship (19/12 §3)."
+    },
+    {
+      "rule": "unadmitted-icon-set",
+      "match": "vscode-icons",
+      "reason": "Package metadata says MIT while the icon set itself states CC BY-SA 4.0 and per-brand terms; the conflict is unresolved (19/12 §3)."
+    },
+    {
+      "rule": "unadmitted-pet-assets",
+      "match": "pet-states",
+      "reason": "Pet assets are outside the shipped feature set and are not copied (19/12 §2)."
+    },
+    {
+      "rule": "unadmitted-pet-assets",
+      "match": "/pet/",
+      "reason": "The pet HTML entrypoints are removed from the renderer config (19/12 §2)."
+    },
+    {
+      "rule": "formula-font-degradation",
+      "match": "/katex/",
+      "reason": "KaTeX ships SIL OFL fonts whose source chain is unclosed, so formulas stay source-only instead of shipping unaccounted fonts (19/12 §4, 19 §5)."
+    },
+    {
+      "rule": "build-tool-only",
+      "match": "@sentry/",
+      "reason": "Sentry CLI is FSL-1.1-MIT build tooling and never product content (19/12 §4)."
+    },
+    {
+      "rule": "non-free-native",
+      "match": "sharp-libvips",
+      "reason": "LGPL native imaging packages are not distributed with the product (19/12 §4)."
+    },
+    {
+      "rule": "non-free-native",
+      "match": "/sharp/",
+      "reason": "sharp and its native dependencies stay build/back-end only (19/12 §4)."
+    },
+    {
+      "rule": "unverified-cdn-loader",
+      "match": "@monaco-editor/loader",
+      "reason": "Its default configuration fetches from a CDN, which an offline product cannot use (19/12 §4)."
+    }
+  ],
+  "contentRules": [
+    {
+      "rule": "brand-or-channel-assets",
+      "pattern": "channel-logos",
+      "reason": "An inlined or referenced channel asset means the channel exclusion is incomplete (19/12 §2, L2)."
+    },
+    {
+      "rule": "brand-or-channel-assets",
+      "pattern": "logos/brand/",
+      "reason": "A reference to upstream brand images means the brand exclusion is incomplete (19/12 §2, L2)."
+    },
+    {
+      "rule": "unadmitted-icon-set",
+      "pattern": "catppuccin(?:Latte|Macchiato)",
+      "reason": "The unadmitted file-icon data is still reachable from the bundle (19/12 §3)."
+    },
+    {
+      "rule": "unadmitted-icon-set",
+      "pattern": "vscode-icons",
+      "reason": "The unadmitted icon set is still reachable from the bundle (19/12 §3)."
+    }
+  ],
+  "deniedOutputExtensions": {
+    ".node": {
+      "rule": "runtime-native-module",
+      "reason": "Native runtime modules are never renderer assets (19/12 §4)."
+    },
+    ".exe": {
+      "rule": "runtime-native-module",
+      "reason": "Host executables are never renderer assets (19/12 §4)."
+    },
+    ".dll": {
+      "rule": "runtime-native-module",
+      "reason": "Host libraries are never renderer assets (19/12 §4)."
+    },
+    ".so": {
+      "rule": "runtime-native-module",
+      "reason": "Shared libraries are never renderer assets (19/12 §4)."
+    },
+    ".map": {
+      "rule": "debug-artifact",
+      "reason": "Source maps are build evidence and are not distributed (L2)."
+    }
+  },
+  "fontDecision": {
+    "decision": "source-only-formulas",
+    "reason": "KaTeX carries SIL OFL 1.1 fonts whose source chain and reserved-font-name handling are unclosed (19/12 §4), so formulas render as their source text and no font ships.",
+    "gate": "No font file may enter the product under this decision; admitting one requires closing its licence chain (source, sha256, copyright, offline OFL text) and changing this decision together with the audit rule."
+  },
   "allowedPackageLicenses": [
     "MIT",
     "Apache-2.0",

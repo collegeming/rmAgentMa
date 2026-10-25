@@ -26,9 +26,11 @@ private const val NEARBY_SDK = 36
 private const val LOCAL_NETWORK_SDK = 37
 
 /**
- * Actions that reach a host over the LAN by probing it or by reading its state, and are therefore the first need
- * for the local-network grants. Every other route is answered from the product's own stores or handed over as text,
- * so it is served without any grant.
+ * Actions that reach a host over the LAN by probing it, reading its state, writing a file it holds or opening
+ * its terminal — a console connects to that host itself — and are therefore the first need for the local-network
+ * grants. Every other route is answered from the product's own stores, so it is served without any grant —
+ * including the upload steps that only buffer a file on this phone, which is why only `attachment.finish` is
+ * listed here.
  */
 internal val NETWORK_ACTIONS = setOf(
     "detection.refresh",
@@ -36,6 +38,9 @@ internal val NETWORK_ACTIONS = setOf(
     "conversations.create",
     "project.read",
     "search.sessions",
+    "attachment.finish",
+    "terminal.open",
+    "terminal.command.start",
 )
 
 /** The code a network route answers with until the grants it needs are there, so a caller can grant and retry. */

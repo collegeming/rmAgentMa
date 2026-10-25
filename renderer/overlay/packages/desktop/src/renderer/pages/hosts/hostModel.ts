@@ -5,6 +5,7 @@
  */
 import {
   AGENT_TARGET_NATIVE,
+  AGENT_TARGET_WINDOWS,
   AGENT_TARGET_WSL_PREFIX,
   HOST_OS_LINUX,
   HOST_OS_WINDOWS,
@@ -48,7 +49,7 @@ export function osText(osType: string, t: TFunction): string {
   return osType;
 }
 
-/** The shell context one host runs its Agent in: the host's own, or one named WSL distribution. */
+/** The shell context one host runs its Agent in: the host's own, one named WSL distribution, or Windows. */
 export function targetLabel(host: SavedHost): { key: string; values?: Record<string, string> } {
   if (host.os_type === HOST_OS_WINDOWS && host.agent_target.startsWith(AGENT_TARGET_WSL_PREFIX)) {
     return {
@@ -56,7 +57,7 @@ export function targetLabel(host: SavedHost): { key: string; values?: Record<str
       values: { distribution: host.agent_target.slice(AGENT_TARGET_WSL_PREFIX.length) },
     };
   }
-  if (host.os_type === HOST_OS_WINDOWS) return { key: 'settings.hosts.targetNativeUnsupported' };
+  if (host.os_type === HOST_OS_WINDOWS) return { key: 'settings.hosts.targetWindowsNative' };
   return { key: 'settings.hosts.targetNative' };
 }
 
@@ -135,38 +136,38 @@ export function draftFromHost(host: SavedHost): HostDraft {
 }
 
 /** What stops this draft from being saved; the message each case reads is DRAFT_PROBLEM_KEYS. */
-export type DraftProblem = { kind: 'nickname' | 'hostname' | 'port' | 'distribution' | 'unsupportedTarget' };
+export type DraftProblem = { kind: 'nickname' | 'hostname' | 'port' | 'distribution' };
 
 export const DRAFT_PROBLEM_KEYS: Record<DraftProblem['kind'], string> = {
   nickname: 'settings.hosts.nicknameRequired',
   hostname: 'settings.hosts.addressRequired',
   port: 'settings.hosts.portInvalid',
   distribution: 'settings.hosts.distributionRequired',
-  unsupportedTarget: 'settings.hosts.targetNativeHint',
 };
 
 /**
- * The one problem that blocks a save, or null. A Windows host whose Agent would run on Windows itself is
- * refused here: this app has no entry for that target, so the combination is never saved.
+ * The one problem that blocks a save, or null. A Windows host may run its Agent on Windows itself or in one
+ * WSL distribution; a distribution is required for the WSL target, because the host quotes it into the
+ * Windows shell and its shell context is what the Agent is launched in.
  */
 export function draftProblem(draft: HostDraft): DraftProblem | null {
   if (!draft.nickname.trim()) return { kind: 'nickname' };
   if (!draft.hostname.trim()) return { kind: 'hostname' };
   if (!validPort(draft.port)) return { kind: 'port' };
-  if (draft.osType === HOST_OS_WINDOWS) {
-    if (draft.target === 'native') return { kind: 'unsupportedTarget' };
-    if (!validWslDistribution(draft.distribution.trim())) return { kind: 'distribution' };
-  }
+  if (draft.osType === HOST_OS_WINDOWS && draft.target === 'wsl' && !validWslDistribution(draft.distribution.trim()))
+    return { kind: 'distribution' };
   return null;
 }
 
-/** The request body of one create or update; a Linux host keeps the only target it can run an Agent in. */
+/** The request body of one create or update: the OS, and the Agent target that OS can run an Agent in. */
 export function hostFields(draft: HostDraft): HostFields {
   const osType = draft.osType === HOST_OS_WINDOWS ? HOST_OS_WINDOWS : HOST_OS_LINUX;
   const agentTarget =
-    osType === HOST_OS_WINDOWS && draft.target === 'wsl'
-      ? AGENT_TARGET_WSL_PREFIX + draft.distribution.trim()
-      : AGENT_TARGET_NATIVE;
+    osType !== HOST_OS_WINDOWS
+      ? AGENT_TARGET_NATIVE
+      : draft.target === 'wsl'
+        ? AGENT_TARGET_WSL_PREFIX + draft.distribution.trim()
+        : AGENT_TARGET_WINDOWS;
   return {
     nickname: draft.nickname.trim(),
     hostname: draft.hostname.trim(),

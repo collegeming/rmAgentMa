@@ -37,8 +37,12 @@ import javax.inject.Singleton
 /** What the sender asks of the receiving conversation: something to read, or something to act on. */
 enum class AgentMessageKind { NOTIFY, REQUEST }
 
-/** A message is delivered only once the receiving conversation took it, so a hand-off is never reported early. */
-enum class AgentMessageState { PENDING, DELIVERED }
+/**
+ * A message is delivered only once the receiving conversation took it, so a hand-off is never reported early.
+ * A message the sender withdrew before its conversation could take it ends as [WITHDRAWN]: it is never handed
+ * over, never counted as delivered, and stays readable as its own terminal state.
+ */
+enum class AgentMessageState { PENDING, DELIVERED, WITHDRAWN }
 
 /** One message waiting for the conversation named by [hostId], [agent] and [sessionId]. */
 data class AgentQueuedMessage(
@@ -57,15 +61,18 @@ data class AgentMessageQueueStats(
     val stored: Int,
     val pending: Int,
     val delivered: Int,
+    val withdrawn: Int = 0,
     val dropped: Int,
 )
 
 /**
  * Persists the messages one conversation addressed to another, under `noBackupFilesDir`, and hands them to the
  * receiving conversation the next time it is opened. Nothing here delivers on its own: there is no background
- * service, and a session picks up its own queue and confirms each message it took. Only the message text and the
- * tuple that addresses it are stored; no credential, key material or other session content reaches this file,
- * which is also why it stays out of the system backup.
+ * service, and a session picks up its own queue and confirms each message it took. A message its sender withdrew
+ * before that is never handed over and stays recorded as [AgentMessageState.WITHDRAWN].
+ *
+ * Only the message text and the tuple that addresses it are stored; no credential, key material or other session
+ * content reaches this file, which is also why it stays out of the system backup.
  */
 @Singleton
 class AgentMessageQueue @Inject constructor(
@@ -133,6 +140,18 @@ class AgentMessageQueue @Inject constructor(
         }
     }
 
+    /**
+     * Every message this queue still holds, whatever its terminal state, oldest first. Reading it applies nothing:
+     * a pending message is still handed over only when its conversation is next opened, and the rows that are done
+     * are the record of what happened to them.
+     */
+    suspend fun held(): List<AgentQueuedMessage> = withContext(io) {
+        mutex.withLock {
+            load()
+            rows.sortedBy { it.createdAtMillis }
+        }
+    }
+
     /** What the conversation named by [hostId], [agent] and [sessionId] has waiting for it, oldest first. */
     suspend fun pendingFor(hostId: Long, agent: String, sessionId: String): List<AgentQueuedMessage> {
         if (!validTarget(hostId, agent, sessionId)) return emptyList()
@@ -140,8 +159,9 @@ class AgentMessageQueue @Inject constructor(
     }
 
     /**
-     * Marks the message [id] as taken by its conversation, and reports false when it is unknown or was already
-     * delivered, so a retried hand-off cannot turn one message into two.
+     * Marks the message [id] as taken by its conversation, and reports false when it is unknown, already
+     * delivered or withdrawn, so a retried hand-off cannot turn one message into two and a message the sender
+     * took back is never reported as handed over.
      */
     suspend fun delivered(id: String): Boolean = withContext(io) {
         if (!validId(id)) return@withContext false
@@ -153,7 +173,7 @@ class AgentMessageQueue @Inject constructor(
                 return@withLock false
             }
             val row = rows.firstOrNull { it.id == id } ?: return@withLock false
-            if (row.state == AgentMessageState.DELIVERED) return@withLock false
+            if (row.state != AgentMessageState.PENDING) return@withLock false
             val updated = rows.map { if (it.id == id) it.copy(state = AgentMessageState.DELIVERED) else it }
             persist(updated, dropped)
             rows = updated
@@ -162,9 +182,11 @@ class AgentMessageQueue @Inject constructor(
     }
 
     /**
-     * Drops the message [id] so it can never be delivered later, and reports false when it is unknown or was already
-     * delivered: a message the receiving conversation took belongs to that conversation, and [delivered] is the only
-     * entry that may claim a hand-off. A withdrawal is not counted as a drop, which stays the cap's own count.
+     * Withdraws the message [id]: its state becomes [AgentMessageState.WITHDRAWN], so it is never handed to its
+     * conversation and never counted as delivered. Only a message still waiting can be withdrawn — one the
+     * conversation already took belongs to that conversation and [delivered] is the only entry that claims a
+     * hand-off — so anything else reports false. A withdrawal is not counted as a drop, which stays the cap's own
+     * count.
      */
     suspend fun withdraw(id: String): Boolean = withContext(io) {
         if (!validId(id)) return@withContext false
@@ -176,8 +198,8 @@ class AgentMessageQueue @Inject constructor(
                 return@withLock false
             }
             val row = rows.firstOrNull { it.id == id } ?: return@withLock false
-            if (row.state == AgentMessageState.DELIVERED) return@withLock false
-            val updated = rows.filterNot { it.id == id }
+            if (row.state != AgentMessageState.PENDING) return@withLock false
+            val updated = rows.map { if (it.id == id) it.copy(state = AgentMessageState.WITHDRAWN) else it }
             persist(updated, dropped)
             rows = updated
             true
@@ -211,6 +233,7 @@ class AgentMessageQueue @Inject constructor(
                 stored = rows.size,
                 pending = rows.count { it.state == AgentMessageState.PENDING },
                 delivered = rows.count { it.state == AgentMessageState.DELIVERED },
+                withdrawn = rows.count { it.state == AgentMessageState.WITHDRAWN },
                 dropped = dropped,
             )
         }

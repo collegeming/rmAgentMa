@@ -145,12 +145,12 @@ const HostEditorDialog: React.FC<Props> = ({ visible, host, onClose, onSaved }) 
                 value={draft.target}
                 onChange={(value: 'native' | 'wsl') => patch({ target: value })}
               >
-                {/* Windows itself has no entry in this app, so the option says so before it is picked. */}
-                <Radio value='native'>{t('settings.hosts.targetNativeUnsupported')}</Radio>
+                <Radio value='native'>{t('settings.hosts.targetWindowsNative')}</Radio>
                 <Radio value='wsl'>{t('settings.hosts.targetWsl')}</Radio>
               </Radio.Group>
               {draft.target === 'native' ? (
-                <p className='m-0 text-12px leading-18px text-danger-6'>{t('settings.hosts.targetNativeHint')}</p>
+                // Windows itself is a real target now; whether an Agent answers there is the probe's question.
+                <p className='m-0 text-12px leading-18px text-t-tertiary'>{t('settings.hosts.targetWindowsHint')}</p>
               ) : (
                 <>
                   <Input

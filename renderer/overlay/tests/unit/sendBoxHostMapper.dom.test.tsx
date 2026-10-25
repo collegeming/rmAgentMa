@@ -16,6 +16,9 @@ import AcpSendBox from '@/renderer/pages/conversation/platforms/acp/AcpSendBox';
 import { initializeHost } from '@/common/host/hostTransport';
 import type { UseAcpMessageReturn } from '@/renderer/pages/conversation/platforms/acp/useAcpMessage';
 
+/** One bridged request as the host receives it. */
+type RecordedRequest = { action: string; requestId?: string; payload: { body: Record<string, unknown> } };
+
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key, i18n: { language: 'zh-CN' } }) }));
 vi.mock('@/renderer/hooks/context/LayoutContext', () => ({ useLayoutContext: () => ({ isMobile: false }) }));
 vi.mock('@/renderer/hooks/context/ConversationContext', () => ({
@@ -138,7 +141,8 @@ vi.mock('@/renderer/pages/conversation/platforms/useConversationCommandQueue', (
 vi.mock('@/renderer/utils/emitter', () => ({ emitter: { emit: vi.fn() }, useAddEventListener: vi.fn() }));
 
 describe('real SendBox to native v1 mapper', () => {
-  it('clicks the actual send button and passes the real ACP, HTTP and host mappings', async () => {
+  /** One offline host on `window.RmAgentHost`, answering the handshake and whatever `answer` returns. */
+  const startHost = async (answer: (request: RecordedRequest) => { status: number; body: unknown }) => {
     const original = window;
     const nativeWindow = new Proxy(original, {
       get(target, key) {
@@ -147,39 +151,20 @@ describe('real SendBox to native v1 mapper', () => {
       },
     });
     vi.stubGlobal('window', nativeWindow);
-    const requests: { action: string; payload: { body: Record<string, unknown> } }[] = [];
+    const requests: RecordedRequest[] = [];
     const host = {
       postMessage(raw: string) {
-        const request = JSON.parse(raw);
+        const request = JSON.parse(raw) as RecordedRequest;
         requests.push(request);
-        let status = 200;
-        let body: unknown = { success: true, data: [] };
-        if (request.action === 'host.handshake') body = { documentId: 'real-sendbox-document', protocolVersion: 1 };
-        if (request.action === 'draft.load')
-          body = { success: true, data: { conversation_id: 'conv-probe-1', text: '', files: [] } };
-        if (request.action === 'messages.send') {
-          const valid =
-            typeof request.payload.body.loading_id === 'string' && request.payload.body.loading_id.length > 0;
-          status = valid ? 202 : 400;
-          body = valid
-            ? {
-                success: true,
-                data: {
-                  msg_id: 'accepted-msg',
-                  turn_id: 'accepted-turn',
-                  runtime: { state: 'running', can_send_message: false },
-                },
-              }
-            : { success: false, error: 'INVALID_REQUEST' };
-        }
+        const answered = answer(request);
         queueMicrotask(() =>
           host.onmessage?.({
             data: JSON.stringify({
-              requestId: request.requestId,
+              requestId: (request as { requestId?: string }).requestId,
               documentId: 'real-sendbox-document',
-              ok: status < 300,
-              status,
-              body,
+              ok: answered.status < 300,
+              status: answered.status,
+              body: answered.body,
             }),
           } as MessageEvent<string>)
         );
@@ -187,22 +172,56 @@ describe('real SendBox to native v1 mapper', () => {
       onmessage: undefined as ((event: MessageEvent<string>) => void) | undefined,
     };
     window.RmAgentHost = host;
+    await initializeHost();
+    return requests;
+  };
+
+  const renderSendBox = (conversationId = 'conv-probe-1') => {
+    const state = {
+      aiProcessing: false,
+      setAiProcessing: vi.fn(),
+      resetState: vi.fn(),
+      hasThinkingMessage: false,
+      slashCommands: [],
+      tokenUsage: null,
+    } as unknown as UseAcpMessageReturn;
+    const cache = new Map();
+    render(
+      <SWRConfig value={{ provider: () => cache, errorRetryCount: 0 }}>
+        <AcpSendBox conversation_id={conversationId} backend='dsh' messageState={state} />
+      </SWRConfig>
+    );
+  };
+
+  const acceptedSend = {
+    status: 202,
+    body: {
+      success: true,
+      data: {
+        msg_id: 'accepted-msg',
+        turn_id: 'accepted-turn',
+        runtime: { state: 'running', can_send_message: false },
+      },
+    },
+  };
+
+  it('clicks the actual send button and passes the real ACP, HTTP and host mappings', async () => {
     try {
-      await initializeHost();
-      const state = {
-        aiProcessing: false,
-        setAiProcessing: vi.fn(),
-        resetState: vi.fn(),
-        hasThinkingMessage: false,
-        slashCommands: [],
-        tokenUsage: null,
-      } as unknown as UseAcpMessageReturn;
-      const cache = new Map();
-      render(
-        <SWRConfig value={{ provider: () => cache, errorRetryCount: 0 }}>
-          <AcpSendBox conversation_id='conv-probe-1' backend='dsh' messageState={state} />
-        </SWRConfig>
-      );
+      const requests = await startHost((request) => {
+        if (request.action === 'host.handshake')
+          return { status: 200, body: { documentId: 'real-sendbox-document', protocolVersion: 1 } };
+        if (request.action === 'draft.load')
+          return {
+            status: 200,
+            body: { success: true, data: { conversation_id: 'conv-probe-1', text: '', files: [] } },
+          };
+        if (request.action === 'messages.send')
+          return typeof request.payload.body.loading_id === 'string' && request.payload.body.loading_id.length > 0
+            ? acceptedSend
+            : { status: 400, body: { success: false, error: 'INVALID_REQUEST' } };
+        return { status: 200, body: { success: true, data: [] } };
+      });
+      renderSendBox();
       const input = await screen.findByTestId('sendbox-input');
       fireEvent.change(input, { target: { value: '实际输入中文' } });
       fireEvent.click(screen.getByTestId('sendbox-send-btn'));
@@ -211,6 +230,59 @@ describe('real SendBox to native v1 mapper', () => {
       expect(submitted).toMatchObject({ content: '实际输入中文', loading_id: expect.any(String), files: [] });
       expect((submitted.loading_id as string).length).toBeGreaterThan(0);
       await waitFor(() => expect(input).toHaveValue(''));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps the attachment the box holds while the draft it saves carries the text alone', async () => {
+    // The absolute remote path the host's own attachment.finish answers with, held by this conversation's box.
+    const ref = '/home/ci/work/probe.txt';
+    try {
+      const requests = await startHost((request) => {
+        if (request.action === 'host.handshake')
+          return { status: 200, body: { documentId: 'real-sendbox-document', protocolVersion: 1 } };
+        if (request.action === 'draft.load')
+          return {
+            status: 200,
+            body: {
+              success: true,
+              data: { conversation_id: 'conv-probe-2', text: '带附件的旧草稿', files: [{ kind: 'upload', path: ref }] },
+            },
+          };
+        // The product host stores the text alone: a draft that carried a file list answers 422, so a request
+        // that brings one fails here exactly as it does on a device.
+        if (request.action === 'draft.save')
+          return ((request.payload.body.files ?? []) as unknown[]).length > 0
+            ? { status: 422, body: { success: false, code: 'ATTACHMENT_UNSUPPORTED', error: '草稿只保存文本。' } }
+            : {
+                status: 200,
+                body: {
+                  success: true,
+                  data: { conversation_id: 'conv-probe-2', text: request.payload.body.text, files: [], saved: true },
+                },
+              };
+        if (request.action === 'messages.send') return acceptedSend;
+        return { status: 200, body: { success: true, data: [] } };
+      });
+      // A conversation of its own: the draft store and its host round trip belong to one conversation.
+      renderSendBox('conv-probe-2');
+      const input = await screen.findByTestId('sendbox-input');
+      await waitFor(() => expect(input).toHaveValue('带附件的旧草稿'));
+
+      fireEvent.change(input, { target: { value: '带附件的旧草稿（续）' } });
+      await waitFor(() => expect(requests.filter((request) => request.action === 'draft.save')).toHaveLength(1));
+      expect(requests.find((request) => request.action === 'draft.save')!.payload.body).toEqual({
+        text: '带附件的旧草稿（续）',
+      });
+      expect(screen.queryByTestId('draft-unsaved')).toBeNull();
+
+      // The attachment is still the box's own: sending the message names it, and the draft never held it.
+      fireEvent.click(screen.getByTestId('sendbox-send-btn'));
+      await waitFor(() => expect(requests.filter((request) => request.action === 'messages.send')).toHaveLength(1));
+      expect(requests.find((request) => request.action === 'messages.send')!.payload.body.files).toEqual([
+        { kind: 'upload', path: ref },
+      ]);
     } finally {
       vi.unstubAllGlobals();
     }

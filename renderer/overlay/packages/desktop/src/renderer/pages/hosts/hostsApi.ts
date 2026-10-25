@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { httpRequest, isBackendHttpError } from '@/common/adapter/httpBridge';
-import type { HostDeletion, HostDetectionRefresh, HostFields, SavedHost } from '@/common/host/hostTransport';
+import type { HostDeletion, HostFields, HostRefresh, SavedHost } from '@/common/host/hostTransport';
 import type { TFunction } from 'i18next';
 
 const HOSTS_PATH = '/api/hosts';
@@ -46,9 +46,13 @@ export function deleteHost(hostId: string): Promise<HostDeletion> {
   return httpRequest<HostDeletion>('DELETE', hostPath(hostId));
 }
 
-/** Probes one host's Agent target again; the answer carries the verdicts it just recorded. */
-export function refreshDetection(hostId: string): Promise<HostDetectionRefresh> {
-  return httpRequest<HostDetectionRefresh>('POST', `${hostPath(hostId)}/detection/refresh`);
+/**
+ * Refreshes one host: probes its Agent target again *and* rescans the session index it holds, which is the
+ * entry the page's refresh is for — a probe alone leaves the history list untouched. The answer carries the
+ * verdicts it recorded and the session count the rescan left behind.
+ */
+export function refreshHost(hostId: string): Promise<HostRefresh> {
+  return httpRequest<HostRefresh>('POST', `${hostPath(hostId)}/refresh`);
 }
 
 /**

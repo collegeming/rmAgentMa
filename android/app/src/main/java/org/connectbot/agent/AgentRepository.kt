@@ -258,9 +258,6 @@ class AgentRepository @Inject constructor(
     fun hostLinkStates(): Map<Long, AgentLinkState> =
         mutableLinkRecords.value.filter { it.agent == null }.associate { it.hostId to it.state } + mutableLiveLinkStates.value
 
-    /** Index rows this app holds per host right now, so a caller reports this app's own row count as it stands. */
-    fun sessionCounts(): Map<Long, Int> = mutableSessions.value.groupingBy { it.hostId }.eachCount()
-
     private suspend fun probeHost(hostId: Long, interactive: Boolean, force: Boolean): List<AgentAvailability> = probeMutex.withLock {
         val cached = mutableAvailability.value.filter { it.hostId == hostId }
         if (!force && cached.size == AgentKind.entries.size) return@withLock cached
@@ -363,9 +360,9 @@ class AgentRepository @Inject constructor(
             mutableRefreshingHosts.update { it + host.id }
             try {
                 val available = probeHost(host.id, interactive, force = true)
-                // A target the app cannot enter holds no readable session list either, so the refresh stops at the
-                // probe verdict instead of failing once per Agent.
-                if (!remoteTargetOf(host.osType, host.agentTarget).supported) continue
+                // A target that does not run the app's POSIX commands holds no readable session list either, so
+                // the refresh stops at the probe verdict instead of failing once per Agent.
+                if (!remoteTargetOf(host.osType, host.agentTarget).posixCommands) continue
                 for (agent in AgentKind.entries) {
                     currentCoroutineContext().ensureActive()
                     // Only a completed read promotes this pair to remote-loaded; any path out of the try leaves the
@@ -448,12 +445,18 @@ class AgentRepository @Inject constructor(
                 // default stands in for it: the session fails here instead of starting an executable nobody found.
                 val executable = runtime.executable.takeIf { it.isNotBlank() }
                     ?: throw java.io.IOException("${session.agent.wireName} executable not found: the probe detected no installation")
+                // The launch text this app builds is POSIX shell text, so a target that does not run one has no
+                // launch here yet: saying that is better than handing the host a line its own shell cannot read.
+                val target = hostTarget(session.hostId)
+                if (!target.posixCommands) {
+                    throw java.io.IOException("${session.agent.wireName} cannot start on ${target.id}: this build has no launch command for that target")
+                }
                 val remote = pool.hostSession(session.hostId)
                 // The directory is checked before an Agent process exists for this session, on the same host session
                 // the Agent is launched on: a directory the host cannot use fails as itself, leaves the cached probe
                 // verdict untouched and opens no half-ready handle, so the user corrects the path and retries.
                 trace("cwd_check_start")
-                RemoteWorkingDirectoryCheck(dispatchers.io).verify(remote, session.cwd)
+                RemoteWorkingDirectoryCheck(dispatchers.io).verify(remote, session.cwd, target)
                 trace("cwd_check_end")
                 trace("prepare_start")
                 val opened: AgentSessionHandle = when (session.agent) {

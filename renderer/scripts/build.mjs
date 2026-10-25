@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { args, assertPrepared, files, isolatedEnv, readJson, rendererRoot, sha256, writeJson } from './common.mjs';
 import { auditAssets, emitLicenses } from './check-assets.mjs';
+import { verifyLicenseClosure } from './check-licenses.mjs';
 
 async function execute(workdir, command, argv, label, env) {
   const { createWriteStream } = await import('node:fs');
@@ -79,6 +80,7 @@ export async function build(options) {
       await copyFile(path.join(original, name), path.join(output, name));
     }
     await emitLicenses(output, audit, workdir, metadata);
+    const closure = await verifyLicenseClosure(output);
     const records = [];
     for (const name of await files(output)) {
       const bytes = await readFile(path.join(output, name));
@@ -110,6 +112,22 @@ export async function build(options) {
       assetPolicySha256: sha256(await readFile(path.join(rendererRoot, 'assets/policy.json'))),
       assetManifestSha256: sha256(await readFile(path.join(output, 'asset-manifest.json'))),
       checks: results.map(({ log: _log, ...result }) => result),
+      assetAudit: {
+        schemaVersion: 1,
+        ok: true,
+        policySha256: audit.policySha256,
+        rules: audit.rules,
+        fontDecision: audit.fontDecision,
+      },
+      licenseClosure: {
+        schemaVersion: 1,
+        ok: closure.ok,
+        entries: closure.entries,
+        components: closure.components,
+        licenseTexts: Object.keys(closure.texts).length,
+        coverageSha256: sha256(await readFile(path.join(output, 'licenses/coverage.json'))),
+        fontDecision: closure.fontDecision,
+      },
       entry: 'index.html',
       files: records.length,
       components: audit.components.length,

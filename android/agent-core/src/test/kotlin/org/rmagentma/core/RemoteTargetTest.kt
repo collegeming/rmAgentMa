@@ -53,13 +53,52 @@ class RemoteTargetTest {
     }
 
     @Test
-    fun windowsHostWithoutADistributionKeepsNoEntry() {
-        val target = remoteTargetOf(HOST_OS_WINDOWS, AGENT_TARGET_NATIVE)
+    fun windowsHostWithoutADistributionRunsTheWindowsRelay() {
+        val target = remoteTargetOf(HOST_OS_WINDOWS, AGENT_TARGET_WINDOWS)
         assertTrue(target is RemoteTarget.WindowsNative)
-        assertFalse(target.supported)
-        assertNull(target.shellCommand("true"))
+        assertTrue(target.supported)
+        // The target is entered, but it is not a POSIX shell: callers must not hand it a POSIX command line.
+        assertFalse(target.posixCommands)
+        assertEquals(WINDOWS_NATIVE_ID, target.id)
+        // A row written before the `windows` literal existed names the same shell context.
+        assertTrue(remoteTargetOf(HOST_OS_WINDOWS, AGENT_TARGET_NATIVE) is RemoteTarget.WindowsNative)
         assertTrue(remoteTargetOf(HOST_OS_WINDOWS, "wsl:ubuntu; rm -rf /") is RemoteTarget.WindowsNative)
         assertTrue(remoteTargetOf(HOST_OS_WINDOWS, null) is RemoteTarget.WindowsNative)
+    }
+
+    @Test
+    fun windowsRelayCarriesTheExactCommandIntoTheWindowsDecoder() {
+        val command = "where.exe kimi 2>\$null | Select-Object -First 1"
+        val line = RemoteTarget.WindowsNative.shellCommand(command)
+        assertTrue(line.startsWith("powershell.exe -NoProfile -NonInteractive -EncodedCommand "))
+        val payload = line.substringAfter("-EncodedCommand ")
+        // PowerShell's own decoder reads base64 of the text as UTF-16LE, so the text comes back byte for byte.
+        assertEquals(command, String(Base64.getDecoder().decode(payload), Charsets.UTF_16LE))
+        // cmd.exe parses the line first, and base64 carries nothing it would interpret.
+        assertFalse(payload.any { it in " \"'&|<>^%" })
+    }
+
+    @Test
+    fun theWindowsLookupNamesEveryAgentAndReportsItsOwnRelay() {
+        val command = windowsLookupCommand(AgentKind.entries)
+        // `where` is spelled out, because PowerShell resolves the bare word to its own Where-Object alias.
+        assertTrue(command.contains("where.exe"))
+        for (kind in AgentKind.entries) assertTrue(command.contains("'${kind.command}'"))
+        assertTrue(command.startsWith("if (-not (Get-Command where.exe -ErrorAction SilentlyContinue)) { '$WINDOWS_LOOKUP_UNAVAILABLE'; exit 0 }"))
+    }
+
+    @Test
+    fun onlyAPathWindowsCanAddressIsAWindowsAbsolutePath() {
+        assertTrue(isWindowsAbsolutePath("C:\\Users\\colle\\kimi.exe"))
+        assertTrue(isWindowsAbsolutePath("c:/work"))
+        assertTrue(isWindowsAbsolutePath("\\\\server\\share\\kimi.exe"))
+        assertFalse(isWindowsAbsolutePath("/usr/bin/kimi"))
+        assertFalse(isWindowsAbsolutePath("kimi.exe"))
+        assertFalse(isWindowsAbsolutePath("1:\\work"))
+        assertFalse(isWindowsAbsolutePath("\\\\server"))
+        assertFalse(isWindowsAbsolutePath("C:\\work\nbad"))
+        assertTrue(isAbsoluteAgentPath("/usr/bin/kimi"))
+        assertTrue(isAbsoluteAgentPath("C:\\work\\kimi.exe"))
     }
 
     @Test
@@ -87,9 +126,94 @@ class RemoteTargetTest {
                 }
             }
         }
-        val rows = RemoteAgentProbe().probe(host, target = RemoteTarget.WindowsNative)
+        val unsupported = UnsupportedTarget()
+        val rows = RemoteAgentProbe().probe(host, target = unsupported)
         assertEquals(AgentKind.entries.size, rows.size)
         assertTrue(rows.all { !it.available && it.error == WINDOWS_NATIVE_UNSUPPORTED })
         assertTrue(commands.isEmpty())
     }
+
+    /** A Windows target is probed on the Windows side, and only a path Windows really resolved is reported. */
+    @Test
+    fun windowsTargetReportsThePathsTheLookupFound() = runBlocking {
+        val commands = mutableListOf<String>()
+        val answer = "missing kimi\nfound opencode C:\\Users\\colle\\opencode.exe\nmissing dsh\nmissing omp\nmissing zcode\n"
+        val host = object : HostSession {
+            override val hostId = 9L
+            override suspend fun exec(command: String): ExecChannel {
+                commands += command
+                return object : ExecChannel {
+                    override val stdout = ByteArrayInputStream(answer.toByteArray())
+                    override val stdin = ByteArrayOutputStream()
+                    override val stderr = ByteArrayInputStream(ByteArray(0))
+                    override fun close() = Unit
+                }
+            }
+        }
+        val rows = RemoteAgentProbe().probe(host, target = RemoteTarget.WindowsNative)
+        assertEquals(AgentKind.entries.size, rows.size)
+        val found = rows.single { it.kind == AgentKind.OPENCODE }
+        assertTrue(found.available)
+        assertEquals("C:\\Users\\colle\\opencode.exe", found.executable)
+        // Nothing ran on that path, so no version and no protocol capability is claimed for it.
+        assertEquals("", found.version)
+        assertNull(found.capabilities)
+        val missing = rows.single { it.kind == AgentKind.KIMI }
+        assertFalse(missing.available)
+        assertEquals("executable_missing", missing.error)
+
+        // The lookup is the Windows text itself, which the target relays for the host.
+        val command = commands.single()
+        assertTrue(command.contains("where.exe"))
+        assertTrue(command.contains("foreach"))
+    }
+
+    /** A relay that never answered is the target having no entry, not a host holding no installation. */
+    @Test
+    fun aWindowsRelayThatNeverAnsweredIsReportedAsTheTargetHavingNoEntry() = runBlocking {
+        val host = object : HostSession {
+            override val hostId = 9L
+            override suspend fun exec(command: String): ExecChannel = object : ExecChannel {
+                override val stdout = ByteArrayInputStream("'powershell.exe' is not recognized as an internal or external command".toByteArray())
+                override val stdin = ByteArrayOutputStream()
+                override val stderr = ByteArrayInputStream(ByteArray(0))
+                override fun close() = Unit
+            }
+        }
+        val rows = RemoteAgentProbe().probe(host, target = RemoteTarget.WindowsNative)
+        assertTrue(rows.all { !it.available && it.error == WINDOWS_NATIVE_UNSUPPORTED })
+
+        // A path the app cannot address as a Windows path is not an installation it may launch either.
+        val unusable = "found kimi kimi.exe\nmissing opencode\nmissing dsh\nmissing omp\nmissing zcode\n"
+        val unreadable = object : HostSession {
+            override val hostId = 9L
+            override suspend fun exec(command: String): ExecChannel = object : ExecChannel {
+                override val stdout = ByteArrayInputStream(unusable.toByteArray())
+                override val stdin = ByteArrayOutputStream()
+                override val stderr = ByteArrayInputStream(ByteArray(0))
+                override fun close() = Unit
+            }
+        }
+        assertTrue(RemoteAgentProbe().probe(unreadable, target = RemoteTarget.WindowsNative).all { !it.available })
+    }
+
+    /** A Windows lookup that never reached the host is a connection failure, not a missing installation. */
+    @Test
+    fun aWindowsLookupThatNeverReachedTheHostReportsItsOwnTransportFailure() = runBlocking {
+        val host = object : HostSession {
+            override val hostId = 9L
+            override suspend fun exec(command: String): ExecChannel = throw java.io.IOException("Host 9 was deleted")
+        }
+        val rows = RemoteAgentProbe().probe(host, target = RemoteTarget.WindowsNative)
+        assertEquals(AgentKind.entries.size, rows.size)
+        assertTrue(rows.all { !it.available && it.error == "probe_transport_failed" })
+    }
+}
+
+/** A target this build knows it cannot enter, so a probe must report that instead of a connection failure. */
+private class UnsupportedTarget : RemoteTarget {
+    override val id = "future-target"
+    override val supported = false
+    override val posixCommands = false
+    override fun shellCommand(command: String): String? = null
 }

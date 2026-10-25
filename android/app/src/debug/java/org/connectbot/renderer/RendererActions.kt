@@ -21,11 +21,11 @@ import kotlinx.coroutines.CancellationException
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConfigBusyException
 import org.connectbot.agent.AgentMessageKind
+import org.connectbot.agent.agentAttentionSignals
 import org.connectbot.agent.projectAgentAttentionInbox
 import org.connectbot.agent.searchAgentSessions
 import org.connectbot.data.entity.Host
 import org.connectbot.ui.screens.agents.AgentHostState
-import org.connectbot.ui.screens.agents.agentAttentionSignals
 import org.connectbot.ui.screens.agents.agentHostChoices
 import org.connectbot.ui.screens.agents.filterAgentSessions
 import org.connectbot.ui.screens.agents.projectQuestion
@@ -34,6 +34,7 @@ import org.connectbot.ui.screens.agents.validQuestionAnswer
 import org.json.JSONArray
 import org.json.JSONObject
 import org.rmagentma.core.AGENT_TARGET_NATIVE
+import org.rmagentma.core.AGENT_TARGET_WINDOWS
 import org.rmagentma.core.AGENT_TARGET_WSL_PREFIX
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
@@ -54,7 +55,11 @@ import org.rmagentma.rendererhost.json
  * (not ready, not pending, stale turn). Nothing here fabricates chat history, approvals, drafts, usage or
  * settings.
  */
-internal class RendererActions(private val source: RendererSource) {
+internal class RendererActions(
+    private val source: RendererSource,
+    private val attachments: RendererAttachments = RendererAttachments.unavailable(),
+    private val terminal: RendererTerminal = RendererTerminal.None,
+) {
     suspend fun handle(action: String, payload: JSONObject): ProbeResult {
         val params = payload.optJSONObject("params") ?: JSONObject()
         val query = payload.optJSONObject("query") ?: JSONObject()
@@ -93,6 +98,9 @@ internal class RendererActions(private val source: RendererSource) {
         "config.set" -> setConfig(params, body)
         "draft.load" -> loadDraft(params)
         "draft.save" -> saveDraft(params, body)
+        // The upload store buffers one attachment on this phone and writes it into the open conversation's own
+        // directory only when the renderer finishes it; a host without a store answers all four as unsupported.
+        "attachment.begin", "attachment.chunk", "attachment.finish", "attachment.abort" -> attachments.handle(action, params, body)
         "usage.read" -> usage(params.optString("conversationId"))
         "projects.list" -> success(RendererProjection.projects(source.snapshot().hosts))
         "project.read" -> readProject(params)
@@ -192,7 +200,9 @@ internal class RendererActions(private val source: RendererSource) {
      * being dressed up with an id this host invented, because that id is what a later request has to name it by.
      */
     private suspend fun createConversation(params: JSONObject, body: JSONObject): ProbeResult {
-        val host = requestedHost(params) ?: return hostNotFound()
+        // The renderer's new-conversation entry sends the host in the body as `host_id`, while other callers name
+        // it in the route parameters; both are the same `host-<id>` identity, so either position is accepted.
+        val host = requestedHost(params, body) ?: return hostNotFound()
         val requestedAgent = (body.opt("agent") as? String).orEmpty().ifEmpty { params.optString("agent") }
         val agent = AgentKind.fromWire(requestedAgent) ?: return fail(422, "AGENT_UNKNOWN", "未知的 Agent：$requestedAgent。")
         val cwd = (body.opt("cwd") as? String).orEmpty().ifEmpty { params.optString("cwd") }
@@ -277,15 +287,27 @@ internal class RendererActions(private val source: RendererSource) {
         if (!snapshot.active || snapshot.session == null) return fail(409, "CONVERSATION_NOT_READY", "会话尚未打开或不处于可发送状态。")
         if (snapshot.turnId != null) return fail(409, "TURN_BUSY", "上一个回合尚未结束。")
         if (snapshot.pending() != null) return fail(409, "APPROVAL_PENDING", "有审批请求待回答，暂不能发送。")
-        if ((body.optJSONArray("files")?.length() ?: 0) > 0) return fail(422, "ATTACHMENT_UNSUPPORTED", "此版本只发送文本。")
+        // An uploaded file is already on the host and this send path carries text alone, so each file's absolute
+        // path travels in the prompt itself. The bytes are never sent again, and the message claims nothing beyond
+        // the paths it names.
+        val files = when (val refs = filePaths(body)) {
+            is FileRefs.Refused -> return refs.result
+            is FileRefs.Accepted -> refs.paths
+        }
         if ((body.optJSONArray("sessions")?.length() ?: 0) > 0) return fail(422, "SESSION_REFERENCES_UNSUPPORTED", "此版本不支持引用其它会话。")
         if ((body.optJSONArray("inject_skills")?.length() ?: 0) > 0) return fail(422, "SKILLS_UNSUPPORTED", "此版本不支持注入技能。")
         val content = body.opt("content")
         if (content !is String || content.isBlank() || content.length > ProbeLimits.CONTENT_UNITS || content.toByteArray(Charsets.UTF_8).size > ProbeLimits.CONTENT_BYTES) {
             return fail(422, "INVALID_CONTENT", "消息内容为空或超出长度限制。")
         }
+        val prompt = promptWithFiles(content, files)
+        // The paths are appended to the user's own text, so a prompt that no longer fits is refused whole: text cut
+        // to make room would reach the Agent as words the user never wrote.
+        if (files.isNotEmpty() && (prompt.length > ProbeLimits.CONTENT_UNITS || prompt.toByteArray(Charsets.UTF_8).size > ProbeLimits.CONTENT_BYTES)) {
+            return fail(413, "MESSAGE_TOO_LARGE", "正文加上附件路径超出消息长度限制，请缩短正文或减少附件。")
+        }
         val prepared = snapshot.session
-        val messageId = source.send(content, prepared) ?: return fail(409, "TURN_BUSY", "会话正在处理其它操作，请稍后重试。")
+        val messageId = source.send(prompt, prepared) ?: return fail(409, "TURN_BUSY", "会话正在处理其它操作，请稍后重试。")
         val accepted = source.snapshot()
         // The message was accepted for the conversation it was written for; if that conversation was replaced
         // while it was in flight, no runtime of the replacement may be reported as its result.
@@ -301,6 +323,51 @@ internal class RendererActions(private val source: RendererSource) {
                 ),
             ),
         )
+    }
+
+    /**
+     * The absolute paths of the files one send names, or the refusal that keeps an unusable reference out of the
+     * message. The renderer submits every uploaded file as the reference `attachment.finish` answered with —
+     * `{kind: "upload", path: "/abs/remote/path"}` — and a plain absolute path is accepted too, because the path is
+     * what both shapes carry. A path this host cannot hand to the Agent, and a file list longer than one message
+     * may name, are refused as themselves; a duplicate is dropped, so one file reaches the Agent once.
+     */
+    private fun filePaths(body: JSONObject): FileRefs {
+        val files = body.optJSONArray("files") ?: return FileRefs.Accepted(emptyList())
+        if (files.length() > MAX_FILES) return FileRefs.Refused(fail(422, "TOO_MANY_FILES", "一条消息最多携带 $MAX_FILES 个附件。"))
+        val paths = (0 until files.length()).map { index ->
+            filePath(files.opt(index)) ?: return FileRefs.Refused(
+                fail(422, "INVALID_FILE_REF", "附件必须是绝对路径的字符串，或 kind 为 upload 且带 path 的引用：不能包含控制字符，也不得超过 $MAX_FILE_PATH 个字符。"),
+            )
+        }
+        return FileRefs.Accepted(paths.distinct())
+    }
+
+    /** The absolute path one file entry names, or null when this host cannot hand that entry to the Agent. */
+    private fun filePath(element: Any?): String? {
+        val path = when (element) {
+            is String -> element
+            // The kind a reference declares decides what it is: only an upload reference carries a path this host
+            // could hand over, while a project reference names a file in a workspace it does not hold.
+            is JSONObject -> if (element.optString("kind", UPLOAD_KIND) != UPLOAD_KIND) null else element.opt("path") as? String
+            else -> null
+        } ?: return null
+        // The product's own absolute-path rule, the same one a working directory has to satisfy.
+        return path.takeIf { it.length <= MAX_FILE_PATH && validAgentCwd(it) }
+    }
+
+    /**
+     * The prompt the Agent receives for one send: the user's own text, then the files' absolute paths under their
+     * own title. The block is appended rather than woven in, so the text still reads as what the user wrote, and
+     * only paths travel — the file bytes stay on the host where the upload already put them.
+     */
+    private fun promptWithFiles(content: String, files: List<String>): String =
+        if (files.isEmpty()) content else content + "\n\n" + ATTACHMENT_BLOCK_TITLE + "\n" + files.joinToString("\n")
+
+    /** The file references one send carried: the paths this host accepted, or the refusal it answered instead. */
+    private sealed interface FileRefs {
+        data class Accepted(val paths: List<String>) : FileRefs
+        data class Refused(val result: ProbeResult) : FileRefs
     }
 
     private suspend fun cancel(body: JSONObject, conversationId: String): ProbeResult {
@@ -565,15 +632,17 @@ internal class RendererActions(private val source: RendererSource) {
 
     /**
      * Stores the send box's text for the open conversation. Text over the draft limit is refused rather than cut,
-     * and an attachment reference is refused too: this host issues no upload reference, so one could only name a
-     * file it never accepted.
+     * and an attachment reference is refused too: a draft is text alone, while the files a message names travel
+     * with that message and are never kept beside the draft.
      */
     private suspend fun saveDraft(params: JSONObject, body: JSONObject): ProbeResult {
         val conversationId = params.optString("conversationId")
         val snapshot = openFor(conversationId) ?: return notFound()
         val session = snapshot.session ?: return notFound()
         if (!snapshot.active) return fail(409, "CONVERSATION_NOT_OPEN", "该会话尚未打开；请重试。")
-        if ((body.optJSONArray("files")?.length() ?: 0) > 0) return fail(422, "ATTACHMENT_UNSUPPORTED", "此版本只保存文本草稿。")
+        // A draft is stored as its text alone, so a file list would be dropped rather than kept; it is refused as
+        // itself, because a draft that silently lost its attachments would read as the user's own words.
+        if ((body.optJSONArray("files")?.length() ?: 0) > 0) return fail(422, "ATTACHMENT_UNSUPPORTED", "草稿只保存文本：附件随消息一起发送，不会保留在草稿里；请先发送或移除附件。")
         val text = body.opt("text")
         if (text !is String) return fail(422, "DRAFT_INVALID", "草稿内容必须是字符串。")
         if (text.length > ProbeLimits.DRAFT_UNITS || text.toByteArray(Charsets.UTF_8).size > ProbeLimits.DRAFT_BYTES) {
@@ -713,9 +782,12 @@ internal class RendererActions(private val source: RendererSource) {
     /**
      * One probe of one saved host's Agent target, through the repository entry that also writes every executable,
      * version and capability it verified into `AgentDetectionStore`. Each Agent answers with its own state and what
-     * the probe found. A Windows host whose Agent would run on Windows itself has no entry in this app, so its
-     * Agents answer `target_unsupported` rather than looking installed, and a probe that never reached the host
-     * keeps the path it detected before instead of claiming a new one.
+     * the probe found. A Windows host whose Agent would run on Windows itself is probed for real through the
+     * Windows `where` lookup, so its Agents answer the absolute path that lookup found, or `not_installed` when it
+     * found none; only an answer this build cannot read (no PowerShell on the host, or a line it cannot parse)
+     * answers `target_unsupported`, and starting an Agent on that target is refused as that fact rather than
+     * launched, because the launch line this app builds is POSIX text a Windows shell cannot read. A probe that
+     * never reached the host keeps the path it detected before instead of claiming a new one.
      */
     private suspend fun refreshDetection(params: JSONObject): ProbeResult {
         val host = requestedHost(params) ?: return hostNotFound()
@@ -762,9 +834,14 @@ internal class RendererActions(private val source: RendererSource) {
         )
     }
 
-    /** The saved host an id names; the id is the same `host-<id>` a project row carries. */
-    private suspend fun requestedHost(params: JSONObject): Host? {
-        val hostId = RendererProjection.hostId(params.optString("hostId")) ?: return null
+    /**
+     * The saved host a request names as `host-<id>`: the route parameter `hostId`, or the body field `host_id`
+     * the renderer's own new-conversation request carries (its camelCase spelling too). A request that names
+     * neither, or names an id the product does not hold, resolves to no host at all.
+     */
+    private suspend fun requestedHost(params: JSONObject, body: JSONObject = JSONObject()): Host? {
+        val named = params.optString("hostId").ifEmpty { bodyText(body, "host_id").ifEmpty { bodyText(body, "hostId") } }
+        val hostId = RendererProjection.hostId(named) ?: return null
         return source.snapshot().hosts.firstOrNull { it.id == hostId }
     }
 
@@ -802,7 +879,7 @@ internal class RendererActions(private val source: RendererSource) {
         } catch (error: Exception) {
             return fail(500, "SEARCH_FAILED", "跨会话搜索未能完成：${reason(error)}")
         }
-        val held = heldSessions(snapshot).map { RendererConversationId.of(it) }.toSet()
+        val held = heldSessions(snapshot).associateBy { RendererConversationId.of(it) }
         val items = JSONArray()
         // The index rows are the cheap half and name where the conversation lives; the content hits name the file
         // and line inside it, so the two kinds are answered together under one bound.
@@ -843,9 +920,10 @@ internal class RendererActions(private val source: RendererSource) {
     }
 
     /**
-     * The cross-conversation queue as the product holds it. Reading it neither sends nor delivers anything: a
-     * request is handed to its conversation only when that conversation is next opened, so this route can never be
-     * a second delivery path.
+     * The cross-conversation queue as the product holds it, every row with its own state: pending, delivered or
+     * withdrawn. Reading it neither sends nor delivers anything: a request is handed to its conversation only when
+     * that conversation is next opened, so this route can never be a second delivery path, and a row that is done
+     * is answered as what it is rather than as still waiting.
      */
     private suspend fun queue(): ProbeResult {
         val rows = try {
@@ -912,7 +990,9 @@ internal class RendererActions(private val source: RendererSource) {
     /**
      * Withdraws one queued message the user no longer wants delivered. Only a message the queue still holds as
      * pending is withdrawn: one its conversation already took is refused as itself, because a delivered message is
-     * the product's own conversation content and not this queue's to undo.
+     * the product's own conversation content and not this queue's to undo. The withdrawn message is recorded under
+     * its own terminal state — `withdrawn` — so it is never handed to its conversation and is never counted as
+     * delivered.
      */
     private suspend fun cancelQueued(params: JSONObject): ProbeResult {
         val id = params.optString("queueId")
@@ -926,7 +1006,7 @@ internal class RendererActions(private val source: RendererSource) {
         } catch (error: Exception) {
             return fail(500, "QUEUE_UNAVAILABLE", "消息队列不可读：${reason(error)}")
         }
-        if (rows.none { it.id == id }) return fail(404, "QUEUE_NOT_FOUND", "队列中没有这条待投消息。")
+        if (rows.none { it.id == id }) return fail(404, "QUEUE_NOT_FOUND", "队列中已没有这条消息。")
         val withdrawn = try {
             source.withdrawQueued(id)
         } catch (cancelled: CancellationException) {
@@ -935,7 +1015,7 @@ internal class RendererActions(private val source: RendererSource) {
             return fail(500, "QUEUE_UNAVAILABLE", "消息未能撤回：${reason(error)}")
         }
         if (!withdrawn) return fail(409, "QUEUE_NOT_PENDING", "该消息已被它的会话取走，无法撤回。")
-        return success(json("cancelled" to true, "queue_id" to id, "delivered" to false))
+        return success(json("cancelled" to true, "queue_id" to id, "state" to WITHDRAWN_STATE, "delivered" to false))
     }
 
     /**
@@ -1018,16 +1098,18 @@ internal class RendererActions(private val source: RendererSource) {
     }
 
     /**
-     * The terminal launch this host can hand over for one target — either one conversation, or one saved host. The
-     * answer is the command the product's own terminal route would run, built by the same `ShellCommands.start` and
-     * wrapped once for the host's Agent target, together with the facts that name it. A conversation does not have
-     * to be open, because the TUI reads its session id from the index; a saved host has no session of its own, so
-     * its Agent and its directory have to come from somewhere else: the Agent is the one this product already uses
-     * on that host, otherwise the first its probe found installed, and the directory is the one the request names.
-     * Nothing is launched here — no intent, no activity, no command is run — so the caller decides how to show or
-     * run the text. A directory nobody named, a host holding no Agent, an unknown target and a target this app has
-     * no shell entry for each fail as themselves instead of producing a command that cannot run, and no credential
-     * is ever part of the answer.
+     * The terminal hand-over this host offers for one target — either one conversation, or one saved host. The
+     * answer is the command the product's own terminal route runs, built by the same `ShellCommands.start` and
+     * wrapped once for the host's Agent target, together with the facts that name it, and that route is really
+     * started for [Host] with the same command as its pending one: the user confirms it in the console, exactly as
+     * the Compose TUI pane hands it over. A conversation does not have to be open, because the TUI reads its
+     * session id from the index; a saved host has no session of its own, so its Agent and its directory have to
+     * come from somewhere else: the Agent is the one this product already uses on that host, otherwise the first
+     * its probe found installed, and the directory is the one the request names.
+     *
+     * A directory nobody named, a host holding no Agent, an unknown target, a target this app has no shell entry
+     * for and a build with no terminal surface at all each fail as themselves instead of producing a command that
+     * cannot run or an answer that looks opened, and no credential is ever part of the answer.
      */
     private suspend fun terminal(params: JSONObject, body: JSONObject): ProbeResult {
         val snapshot = source.snapshot()
@@ -1067,14 +1149,21 @@ internal class RendererActions(private val source: RendererSource) {
 
     /**
      * One terminal command, built the way the product's own terminal route builds it: the same `ShellCommands.start`
-     * wrapped once for the host's Agent target. A conversation names its own session id, so the command resumes it;
-     * a host-scoped command has no session to resume and therefore carries neither a conversation nor a session id
-     * instead of an invented one.
+     * wrapped once for the host's Agent target, and then really handed to that route, whose answer decides whether
+     * the terminal was opened. A conversation names its own session id, so the command resumes it; a host-scoped
+     * command has no session to resume and therefore carries neither a conversation nor a session id instead of an
+     * invented one.
+     *
+     * The start line is POSIX shell text, so a target that does not run one has no command this host could hand
+     * over: an Agent started on Windows itself would get a line its own shell cannot read.
      */
-    private fun terminalCommand(agent: AgentKind, host: Host, cwd: String, sessionId: String?, conversationId: String?): ProbeResult {
+    private suspend fun terminalCommand(agent: AgentKind, host: Host, cwd: String, sessionId: String?, conversationId: String?): ProbeResult {
         val remoteTarget = remoteTargetOf(host.osType, host.agentTarget)
+        if (!remoteTarget.posixCommands) {
+            return fail(501, TERMINAL_UNSUPPORTED, "该主机的 Agent 目标（${remoteTarget.id}）尚无本机可用的终端入口。")
+        }
         val command = remoteTarget.shellCommand(ShellCommands.start(agent, cwd, sessionId?.takeIf { it.isNotBlank() }))
-            ?: return fail(501, "TERMINAL_UNSUPPORTED", "该主机的 Agent 目标（${remoteTarget.id}）没有本机可用的终端入口。")
+            ?: return fail(501, TERMINAL_UNSUPPORTED, "该主机的 Agent 目标（${remoteTarget.id}）没有本机可用的终端入口。")
         val data = json(
             "host_id" to RendererProjection.projectId(host.id),
             "host_name" to host.nickname.ifBlank { host.hostname },
@@ -1087,8 +1176,20 @@ internal class RendererActions(private val source: RendererSource) {
             data.put("conversation_id", conversationId)
             data.put("session_id", sessionId.orEmpty())
         }
-        return success(data)
+        return openTerminal(host, command, data)
     }
+
+    /**
+     * Hands the command to the product's own terminal surface and reports what really happened: `opened` is true
+     * only once that surface was started for this host, while a build without one and a start the system refused
+     * each answer their own stable code and reason instead of a terminal nobody opened.
+     */
+    private suspend fun openTerminal(host: Host, command: String, data: JSONObject): ProbeResult =
+        when (val started = terminal.start(host.id, command)) {
+            RendererTerminal.Result.Started -> success(data.put("opened", true))
+            RendererTerminal.Result.Unsupported -> fail(501, TERMINAL_UNSUPPORTED, "本机没有可打开的终端入口。")
+            is RendererTerminal.Result.Failed -> fail(500, TERMINAL_START_FAILED, "终端未能打开：${started.reason}")
+        }
 
     private fun hostNotFound(): ProbeResult = fail(404, "HOST_NOT_FOUND", "没有这台主机。")
 
@@ -1138,19 +1239,23 @@ internal class RendererActions(private val source: RendererSource) {
     private data class HostTarget(val osType: String, val agentTarget: String)
 
     /**
-     * A Windows host may hold the Agent in one WSL distribution it names, or on Windows itself — a target this app
-     * has no entry for, which every probe reports as unsupported. A Linux host runs its Agent in its own shell, so
-     * that is the only target stored for it, and no other value is stored as a target nothing could reach.
+     * A Windows host may hold the Agent in one WSL distribution it names, or on Windows itself under
+     * [AGENT_TARGET_WINDOWS] — the literal the renderer sends — and a row written before that literal existed
+     * holds [AGENT_TARGET_NATIVE] for the same thing, so both are stored as what they name. A Linux host runs its
+     * Agent in its own shell, so that is the only target stored for it, and no other value is stored as a target
+     * nothing could reach.
      */
     private fun hostTarget(osType: String, agentTarget: String): HostTarget = when (osType) {
         HOST_OS_LINUX -> HostTarget(HOST_OS_LINUX, AGENT_TARGET_NATIVE)
 
         HOST_OS_WINDOWS -> when {
-            agentTarget == AGENT_TARGET_NATIVE -> HostTarget(HOST_OS_WINDOWS, AGENT_TARGET_NATIVE)
+            agentTarget == AGENT_TARGET_WINDOWS || agentTarget == AGENT_TARGET_NATIVE ->
+                HostTarget(HOST_OS_WINDOWS, agentTarget)
+
             agentTarget.startsWith(AGENT_TARGET_WSL_PREFIX) &&
                 validWslDistribution(agentTarget.removePrefix(AGENT_TARGET_WSL_PREFIX)) -> HostTarget(HOST_OS_WINDOWS, agentTarget)
 
-            else -> invalid("Windows 主机的 Agent 目标必须是 native 或 wsl:<发行版>。")
+            else -> invalid("Windows 主机的 Agent 目标必须是 windows、native 或 wsl:<发行版>。")
         }
 
         else -> invalid("操作系统只能是 linux 或 windows。")
@@ -1231,7 +1336,6 @@ internal class RendererActions(private val source: RendererSource) {
 
     private fun unsupported(action: String): ProbeResult = when (action) {
         "runtime.visible" -> fail(501, "LEASE_UNSUPPORTED", "本机不支持会话可见租约。")
-        "attachment.begin", "attachment.chunk", "attachment.finish", "attachment.abort" -> fail(501, "ATTACHMENT_UNSUPPORTED", "本机未开放附件上传。")
         "commands.list" -> fail(501, "COMMANDS_UNSUPPORTED", "本机未向渲染器提供斜杠命令目录。")
         "artifacts.list" -> fail(501, "ARTIFACTS_UNSUPPORTED", "本机没有会话产物列表。")
         "providers.list" -> fail(501, "PROVIDERS_UNSUPPORTED", "本机不向渲染器提供模型供应商目录。")
@@ -1274,5 +1378,20 @@ internal class RendererActions(private val source: RendererSource) {
 
         /** A queue id is the uuid this host wrote when it queued the message; anything longer names no row. */
         const val MAX_QUEUE_ID = 64
+
+        /** The terminal state a withdrawn message is recorded and reported under, as the renderer books it. */
+        const val WITHDRAWN_STATE = "withdrawn"
+
+        /** Codes of a terminal hand-over: no surface in this build, and a start the system itself refused. */
+        const val TERMINAL_UNSUPPORTED = "TERMINAL_UNSUPPORTED"
+        const val TERMINAL_START_FAILED = "TERMINAL_START_FAILED"
+
+        /** The reference kind an uploaded file arrives as, and the file list one message may carry. */
+        const val UPLOAD_KIND = "upload"
+        const val MAX_FILES = 16
+        const val MAX_FILE_PATH = 1024
+
+        /** The title one message's files arrive under, after a blank line and before one path per line. */
+        const val ATTACHMENT_BLOCK_TITLE = "附件路径（已上传到本会话目录，可直接读取）："
     }
 }

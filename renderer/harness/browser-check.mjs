@@ -11,7 +11,8 @@ const requiredChecks = [
   'chinese-stream-and-terminal', 'ui-allow-with-effect', 'duplicate-approval-rejected',
   'history-readonly-after-refresh', 'ui-reject-without-effect', 'pending-refresh-and-ui-reject',
   'pending-ui-cancel-without-effect', 'stale-approval-rejected', 'stream-ui-cancel',
-  'old-turn-cancel-cannot-stop-new-turn', 'ws-reconnect-history-recovery', 'network-and-page-errors',
+  'old-turn-cancel-cannot-stop-new-turn', 'queue-withdrawal', 'index-clear', 'host-targets',
+  'ws-reconnect-history-recovery', 'network-and-page-errors',
 ];
 
 export function isAllowedURL(input, origin, websocket = false) {
@@ -458,6 +459,77 @@ export async function runBrowserChecks({ aionuiRoot, chromeBin, output, url, bac
       await page.locator('.sendbox-stop-button').click();
       await waitIdle();
       return { turn, response };
+    });
+    // The message queue over HTTP: one message handed to another conversation is only queued, and its
+    // withdrawal keeps the state `withdrawn` instead of the mark a conversation's own delivery writes.
+    await check('queue-withdrawal', async () => {
+      const refusals = [];
+      const refused = async (label, relative, method, payload, status, code) => {
+        const result = await json(relative, { method, ...(payload === undefined ? {} : { body: JSON.stringify(payload) }) });
+        assert.equal(result.status, status, `${label} answered ${result.status}, expected ${status} ${code} (${JSON.stringify(result.body)})`);
+        assert.equal(result.body.code, code, `${label} code must be ${code}, got ${result.body.code}`);
+        refusals.push({ label, status, code });
+      };
+      const sent = await json('/api/queue', { method: 'POST', body: JSON.stringify({ conversation_id: conversationId, kind: 'notify', text: '来自离线探针的队列通知。' }) });
+      assert.equal(sent.status, 200, `queue.send answered ${sent.status} (${JSON.stringify(sent.body)})`);
+      const queued = unwrap(sent.body);
+      assert.ok(typeof queued.queue_id === 'string' && queued.queue_id, 'queue.send field queue_id must identify the queued message');
+      assert.equal(queued.conversation_id, conversationId, 'queue.send field conversation_id must name the target conversation');
+      assert.equal(queued.kind, 'notify', 'queue.send field kind must be the kind that was queued');
+      assert.equal(queued.state, 'pending', `queue.send field state must be pending, got ${queued.state}`);
+      assert.equal(queued.queued, true, 'queue.send field queued must claim the queue it wrote');
+      assert.equal(queued.delivered, false, 'queue.send field delivered must stay false: nothing was delivered');
+      const listed = unwrap((await json('/api/queue')).body);
+      assert.equal(listed.items.length, 1, 'queue.list must show the message waiting for its conversation');
+      assert.equal(listed.items[0].state, 'pending', 'queue.list row field state must be pending');
+      assert.equal(listed.items[0].pending, true, 'queue.list row field pending must be true while it waits');
+      assert.deepEqual(listed.stats, { stored: 1, pending: 1, delivered: 0, dropped: 0 }, `queue.list field stats must count what the queue holds, got ${JSON.stringify(listed.stats)}`);
+      const cancelled = await json(`/api/queue/${encodeURIComponent(queued.queue_id)}`, { method: 'DELETE', body: '{}' });
+      assert.equal(cancelled.status, 200, `queue.cancel answered ${cancelled.status} (${JSON.stringify(cancelled.body)})`);
+      const withdrawn = unwrap(cancelled.body);
+      assert.equal(withdrawn.cancelled, true, 'queue.cancel field cancelled must be true');
+      assert.equal(withdrawn.queue_id, queued.queue_id, 'queue.cancel field queue_id must be the withdrawn message');
+      assert.equal(withdrawn.delivered, false, 'queue.cancel field delivered must never claim a delivery');
+      assert.equal(unwrap((await json('/api/queue')).body).items.length, 0, 'a withdrawn message must never be listed as waiting');
+      const stored = (await probeStatus()).queue.rows.find((row) => row.queue_id === queued.queue_id);
+      assert.ok(stored, 'queue.cancel must keep the withdrawn row in the queue rather than drop it');
+      assert.equal(stored.state, 'withdrawn', `queue.cancel must record the row as withdrawn, got ${stored.state}`);
+      await refused('queue.cancel of a withdrawn id', `/api/queue/${encodeURIComponent(queued.queue_id)}`, 'DELETE', {}, 404, 'QUEUE_NOT_FOUND');
+      await refused('queue.cancel of a malformed id', `/api/queue/${'x'.repeat(129)}`, 'DELETE', {}, 422, 'INVALID_QUEUE_ID');
+      await refused('queue.send with an unknown kind', '/api/queue', 'POST', { conversation_id: conversationId, kind: 'later', text: '中文' }, 422, 'INVALID_KIND');
+      await refused('queue.send with empty text', '/api/queue', 'POST', { conversation_id: conversationId, kind: 'request', text: '   ' }, 422, 'INVALID_CONTENT');
+      await refused('queue.send to a conversation this host does not hold', '/api/queue', 'POST', { conversation_id: 'conv-other', kind: 'notify', text: '中文' }, 404, 'CONVERSATION_NOT_FOUND');
+      return { queueId: queued.queue_id, state: stored.state, refusals };
+    });
+    await check('index-clear', async () => {
+      const first = await json('/api/index/clear', { method: 'POST', body: '{}' });
+      assert.equal(first.status, 200, `index.clear answered ${first.status} (${JSON.stringify(first.body)})`);
+      const cleared = unwrap(first.body);
+      assert.deepEqual(cleared, { cleared: true, sessions_before: 1, sessions: 0 }, `index.clear must report the index it held and the one it leaves, got ${JSON.stringify(cleared)}`);
+      const second = await json('/api/index/clear', { method: 'POST', body: '{}' });
+      const again = unwrap(second.body);
+      assert.deepEqual(again, { cleared: true, sessions_before: 0, sessions: 0 }, `index.clear on an empty index must report zero, not invent sessions, got ${JSON.stringify(again)}`);
+      return { cleared, again };
+    });
+    await check('host-targets', async () => {
+      const result = await json('/api/hosts');
+      assert.equal(result.status, 200, `hosts.list answered ${result.status} (${JSON.stringify(result.body)})`);
+      const hosts = unwrap(result.body);
+      assert.ok(Array.isArray(hosts.items) && hosts.items.length === 3, `hosts.list must list every saved host, got ${JSON.stringify(hosts)}`);
+      for (const row of hosts.items)
+        for (const field of ['id', 'nickname', 'hostname', 'port', 'username', 'protocol', 'os_type', 'agent_target', 'target', 'target_supported', 'session_count', 'detection'])
+          assert.ok(field in row, `hosts.list row ${row.id} must carry field ${field}`);
+      const windows = hosts.items.find((row) => row.os_type === 'windows' && row.agent_target === 'windows');
+      assert.ok(windows, "hosts.list must offer a Windows host's own Agent target under the literal windows");
+      assert.equal(windows.target, 'windows-native', `hosts.list row ${windows.id} field target must be windows-native, got ${windows.target}`);
+      assert.equal(windows.target_supported, true, `hosts.list row ${windows.id} field target_supported must be true for the windows target`);
+      const wsl = hosts.items.find((row) => String(row.agent_target).startsWith('wsl:'));
+      assert.ok(wsl, 'hosts.list must still offer a WSL distribution target');
+      assert.equal(wsl.target, wsl.agent_target, 'a WSL row names its distribution as its shell context');
+      const posix = hosts.items.find((row) => row.os_type === 'linux');
+      assert.equal(posix.agent_target, 'native', 'a Linux host keeps the native agent target');
+      assert.equal(posix.target, 'posix', 'a Linux host runs its Agent in its own POSIX shell');
+      return { targets: hosts.items.map((row) => `${row.os_type}/${row.agent_target}/${row.target}/${row.target_supported}`) };
     });
     await check('ws-reconnect-history-recovery', async () => {
       const turn = await sendUI('慢速 slow 断流后刷新恢复中文。');

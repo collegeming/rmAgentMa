@@ -34,6 +34,8 @@ const ROUTES = [
   ['POST', '/api/conversations', 'conversations.create'],
   ['GET', '/api/conversations/:conversationId', 'conversation.read'],
   ['GET', '/api/conversations/:conversationId/messages', 'messages.list'],
+  // One older page of the history store, below the window the caller already holds.
+  ['GET', '/api/conversations/:conversationId/messages/before', 'messages.before'],
   ['GET', '/api/conversations/:conversationId/messages/latest', 'messages.latest'],
   ['POST', '/api/conversations/:conversationId/runtime/ensure', 'runtime.ensure'],
   ['GET', '/api/conversations/:conversationId/config-options', 'config.read'],
@@ -42,6 +44,11 @@ const ROUTES = [
   ['POST', '/api/conversations/:conversationId/cancel', 'turn.cancel'],
   ['GET', '/api/conversations/:conversationId/confirmations', 'approvals.list'],
   ['POST', '/api/conversations/:conversationId/confirmations/:requestRef/confirm', 'approvals.review'],
+  // The live question card of the open conversation: its answer, validated against the schema the Agent stated.
+  ['POST', '/api/conversations/:conversationId/interactions/:requestRef/review', 'interactions.review'],
+  // The connection waiting for the user — a host key to confirm, a login password or a key passphrase.
+  ['GET', '/api/challenges', 'challenges.read'],
+  ['POST', '/api/challenges/:challengeId/answer', 'challenges.answer'],
   ['POST', '/api/conversations/:conversationId/active-lease', 'runtime.visible'],
   ['GET', '/api/conversations/:conversationId/slash-commands', 'commands.list'],
   ['GET', '/api/conversations/:conversationId/usage', 'usage.read'],
@@ -57,6 +64,8 @@ const ROUTES = [
   ['POST', '/api/queue', 'queue.send'],
   ['DELETE', '/api/queue/:queueId', 'queue.cancel'],
   ['POST', '/api/conversations/:conversationId/reference', 'reference.pack'],
+  // The host's own maintenance action: it drops the cached session index and answers the two counts.
+  ['POST', '/api/index/clear', 'index.clear'],
   ['GET', '/api/projects', 'projects.list'],
   ['GET', '/api/projects/:projectId', 'project.read'],
   ['GET', '/api/hosts', 'hosts.list'],
@@ -64,6 +73,8 @@ const ROUTES = [
   ['PUT', '/api/hosts/:hostId', 'hosts.update'],
   ['DELETE', '/api/hosts/:hostId', 'hosts.delete'],
   ['POST', '/api/hosts/:hostId/detection/refresh', 'detection.refresh'],
+  // Refreshing a host is probing it *and* rescanning the session index it holds; detection.refresh only probes.
+  ['POST', '/api/hosts/:hostId/refresh', 'hosts.refresh'],
   ['POST', '/api/hosts/:hostId/terminal', 'terminal.open'],
   ['POST', '/api/hosts/:hostId/terminal/command', 'terminal.command.start'],
   ['GET', '/api/assistants', 'assistants.list'],
@@ -80,9 +91,25 @@ export function isNativeHost(): boolean {
   return typeof window !== 'undefined' && window.location?.origin === ORIGIN;
 }
 
+/**
+ * The renderer's own history paging reads one page above the window it holds by asking `/messages?before=<cursor>`
+ * — the cursor is the id the host itself answered as `oldest_cursor`. That request is the older page the host
+ * serves from its history store, which is a route of its own; a request that names no cursor, or one that names
+ * an anchor or an `after` cursor, is the loaded window itself.
+ */
+function pagedHistoryAction(method: string, url: URL): string | undefined {
+  const parts = url.pathname.split('/');
+  if (method.toUpperCase() !== 'GET' || parts.length !== 5) return undefined;
+  if (parts[1] !== 'api' || parts[2] !== 'conversations' || !parts[3] || parts[4] !== 'messages') return undefined;
+  return url.searchParams.has('before') && !url.searchParams.has('anchor_message_id') && !url.searchParams.has('after')
+    ? 'messages.before'
+    : undefined;
+}
+
 export function resolveHostRoute(method: string, path: string): { action: string; payload: HostPayload } {
   const url = new URL(path, ORIGIN);
   if (url.origin !== ORIGIN) throw new Error('HOST_ORIGIN_DENIED');
+  const paged = pagedHistoryAction(method, url);
   for (const [verb, pattern, action] of ROUTES) {
     if (verb !== method.toUpperCase()) continue;
     const actual = url.pathname.split('/');
@@ -98,7 +125,10 @@ export function resolveHostRoute(method: string, path: string): { action: string
       })
     )
       continue;
-    return { action, payload: { params, query: Object.fromEntries(url.searchParams), body: null } };
+    return {
+      action: paged && action === 'messages.list' ? paged : action,
+      payload: { params, query: Object.fromEntries(url.searchParams), body: null },
+    };
   }
   throw new Error(`HOST_ACTION_UNSUPPORTED: ${method} ${url.pathname}`);
 }
@@ -267,16 +297,17 @@ export async function retryHostEvents(): Promise<void> {
 }
 
 /**
- * The five saved-host actions this build declares, each with its route in ROUTES: `hosts.list`, `hosts.create`,
- * `hosts.update`, `hosts.delete` and `detection.refresh`. Structured fields travel in the request body, because
- * the bridge carries only string parameters.
+ * The six saved-host actions this build declares, each with its route in ROUTES: `hosts.list`, `hosts.create`,
+ * `hosts.update`, `hosts.delete`, `detection.refresh` and `hosts.refresh`. Structured fields travel in the
+ * request body, because the bridge carries only string parameters.
  */
 /** Operating system a saved host holds. */
 export const HOST_OS_LINUX = 'linux';
 export const HOST_OS_WINDOWS = 'windows';
 
-/** Agent target of a saved host: the host itself, or one WSL distribution of a Windows host. */
+/** Agent target of a saved host: the host itself, one WSL distribution, or Windows itself. */
 export const AGENT_TARGET_NATIVE = 'native';
+export const AGENT_TARGET_WINDOWS = 'windows';
 export const AGENT_TARGET_WSL_PREFIX = 'wsl:';
 
 /** The probe verdicts the host itself derives for one Agent; the renderer adds only a not-probed reading. */
@@ -342,6 +373,14 @@ export type HostDetectionRefresh = {
   detection: HostDetection;
 };
 
+/** What `hosts.refresh` answers: the probe verdicts, plus the session count its own rescan left behind. */
+export type HostRefresh = {
+  host_id: string;
+  refreshed: boolean;
+  sessions: number;
+  detection: HostDetection;
+};
+
 /** What `hosts.delete` answers once the host is gone. */
 export type HostDeletion = { deleted: boolean; host_id: string };
 
@@ -357,12 +396,35 @@ const EXTRA_ACTIONS = new Set([
   'attachment.abort',
 ]);
 
+/**
+ * A refusal of an action the host answers outside its routes. The host's own stable code and reason travel
+ * with it, so an upload the host refused is reported as that refusal instead of as a bare status.
+ */
+export class HostActionError extends Error {
+  constructor(
+    readonly action: string,
+    readonly status: number,
+    readonly code: string,
+    readonly reason: string
+  ) {
+    super(`HOST_ACTION_FAILED: ${action} (${status})${code ? ` ${code}` : ''}${reason ? `: ${reason}` : ''}`);
+    this.name = 'HostActionError';
+  }
+}
+
 export async function hostAction<T>(action: string, conversationId: string, body: unknown = null): Promise<T> {
   if (!nativeTransport) throw new Error('HOST_NOT_READY');
   if (!EXTRA_ACTIONS.has(action)) throw new Error('HOST_ACTION_UNSUPPORTED');
   const reply = await nativeTransport.call(action, { params: { conversationId }, query: {}, body });
-  if (!reply.ok || reply.status < 200 || reply.status >= 300)
-    throw new Error(`HOST_ACTION_FAILED: ${action} (${reply.status})`);
+  if (!reply.ok || reply.status < 200 || reply.status >= 300) {
+    const failure = (reply.body ?? {}) as { code?: unknown; error?: unknown };
+    throw new HostActionError(
+      action,
+      reply.status,
+      typeof failure.code === 'string' ? failure.code : '',
+      typeof failure.error === 'string' ? failure.error : ''
+    );
+  }
   const result = reply.body;
   if (result && typeof result === 'object' && 'data' in result) return result.data as T;
   return result as T;
@@ -371,6 +433,17 @@ export async function hostAction<T>(action: string, conversationId: string, body
 export function onHostEvent(listener: Listener): () => void {
   if (!nativeTransport) throw new Error('HOST_NOT_READY');
   return nativeTransport.on(listener);
+}
+
+/**
+ * The renderer's paging protocol reads the end of the history from `has_more_before`, while the host refuses the
+ * same fact as 409 HISTORY_EXHAUSTED instead of answering a page that would read like an empty history. That one
+ * code is translated into the answer the caller can act on; an unreadable page, a cursor outside the window and
+ * every other failure are left to fail as themselves, so a page that was not loaded is never drawn as the end.
+ */
+function noOlderPage(reply: { status: number; body: unknown }): boolean {
+  if (reply.status !== 409 || !reply.body || typeof reply.body !== 'object') return false;
+  return (reply.body as { code?: unknown }).code === 'HISTORY_EXHAUSTED';
 }
 
 export async function hostFetch(input: string, init: RequestInit = {}): Promise<Response> {
@@ -383,6 +456,13 @@ export async function hostFetch(input: string, init: RequestInit = {}): Promise<
     payload.body = JSON.parse(init.body) as unknown;
   }
   const reply = await nativeTransport.call(action, payload);
+  if (noOlderPage(reply)) {
+    // The same envelope a page the host really read arrives in, so a caller reads one shape either way.
+    return new Response(
+      JSON.stringify({ success: true, data: { items: [], has_more_before: false, has_more_after: true } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
   return new Response(reply.status === 204 ? null : JSON.stringify(reply.body), {
     status: reply.status,
     headers: { 'Content-Type': 'application/json' },

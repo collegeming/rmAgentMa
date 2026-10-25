@@ -30,6 +30,7 @@ import org.connectbot.di.IoDispatcher
 import org.json.JSONArray
 import org.json.JSONObject
 import org.rmagentma.core.AgentKind
+import org.rmagentma.core.isAbsoluteAgentPath
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
@@ -179,7 +180,9 @@ class AgentDetectionStore @Inject constructor(
         detection.target.isNotBlank() &&
         detection.target.length <= MAX_TARGET_LENGTH &&
         detection.target.none { it.isISOControl() } &&
-        detection.executable.startsWith('/') &&
+        // A path is stored as the absolute path it was detected at: a POSIX one, or a drive-absolute or UNC one
+        // when the target was Windows itself.
+        isAbsoluteAgentPath(detection.executable) &&
         detection.executable.length <= MAX_EXECUTABLE_LENGTH &&
         detection.executable.none { it.code < 32 || it.code == 127 } &&
         detection.updatedAtMillis >= 0

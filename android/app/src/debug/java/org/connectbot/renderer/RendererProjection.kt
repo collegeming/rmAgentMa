@@ -132,6 +132,9 @@ internal object RendererProjection {
             "id" to conversationId,
             "name" to name,
             "type" to "acp",
+            // The sidebar's Agent filter reads a row's own `agent`, so the row names the Agent's wire value
+            // instead of keeping it inside `extra` alone.
+            "agent" to session.agent.wireName,
             "project_id" to projectId(session.hostId),
             // The index carries the last observed times; a row it never timed keeps the session's own zero.
             "created_at" to (row?.createdAt?.takeIf { it > 0 } ?: session.createdAt),
@@ -235,8 +238,8 @@ internal object RendererProjection {
     fun draftKey(session: AgentSession): String = "${session.hostId}:${session.agent.wireName}:${session.sessionId}"
 
     /**
-     * A conversation's draft in the renderer's own shape. The file list is empty because this host stores none:
-     * it hands out no upload reference, so an attachment in a draft could only be one it never issued.
+     * A conversation's draft in the renderer's own shape. The file list is empty because a draft here is the text
+     * alone: the files a message names travel with that message and are never kept beside a draft.
      */
     fun draft(text: String, conversationId: String): JSONObject = json("text" to text, "files" to JSONArray(), "conversation_id" to conversationId)
 
@@ -421,16 +424,18 @@ internal object RendererProjection {
     }
 
     /**
-     * One index hit: the conversation it names, the field that matched and the snippet around the match, together
-     * with whether that row was re-read from the host in this pass or is only what the cache holds. A hit whose
-     * conversation the product no longer holds says so, because its id cannot be opened from here.
+     * One index hit: the conversation it names, the label it is shown under, the field that matched and the
+     * snippet around the match, together with whether that row was re-read from the host in this pass or is only
+     * what the cache holds. A hit whose conversation the product no longer holds says so, because its id cannot be
+     * opened from here.
      */
-    fun indexHit(hit: AgentSearchHit, held: Set<String>): JSONObject {
+    fun indexHit(hit: AgentSearchHit, held: Map<String, AgentSession>): JSONObject {
         val conversationId = RendererConversationId.of(hit.session)
         return json(
             "id" to "index:$conversationId:${hit.field.name.lowercase()}",
             "kind" to "index",
             "conversation_id" to conversationId,
+            "title" to conversationName(held[conversationId] ?: hit.session),
             "host_id" to projectId(hit.session.hostId),
             "agent" to hit.session.agent.wireName,
             "session_id" to hit.session.sessionId,
@@ -443,10 +448,11 @@ internal object RendererProjection {
     }
 
     /**
-     * One content hit read from a remote transcript: the host, Agent and directory it was found in, the snippet
-     * around the match and the anchor a later read of that part of the history is named by.
+     * One content hit read from a remote transcript: the host, Agent and directory it was found in, the label of
+     * the conversation it belongs to when the product still holds that row, the snippet around the match and the
+     * anchor a later read of that part of the history is named by.
      */
-    fun contentHit(hit: AgentTranscriptHit, held: Set<String>): JSONObject {
+    fun contentHit(hit: AgentTranscriptHit, held: Map<String, AgentSession>): JSONObject {
         val row = hit.hit
         val session = AgentSession(hostId = hit.hostId, agent = row.agent, sessionId = row.sessionId, cwd = row.directory)
         val conversationId = RendererConversationId.of(session)
@@ -454,6 +460,7 @@ internal object RendererProjection {
             "id" to "content:$conversationId:${row.anchor}",
             "kind" to "content",
             "conversation_id" to conversationId,
+            "title" to conversationName(held[conversationId] ?: session),
             "host_id" to projectId(hit.hostId),
             "agent" to row.agent.wireName,
             "session_id" to row.sessionId,
@@ -468,6 +475,14 @@ internal object RendererProjection {
             "openable" to (conversationId in held),
         )
     }
+
+    /**
+     * The label one conversation is shown under: the index's own title, else the identifiers that row really
+     * holds — the same chain a conversation row names itself with. Nothing is invented for a session the product
+     * keeps no title of.
+     */
+    private fun conversationName(session: AgentSession): String =
+        listOf(session.title, session.preview, session.sessionId, session.cwd).firstOrNull { !it.isNullOrBlank() }.orEmpty()
 
     /**
      * What one search covered, not only what it found. `complete` is false while any part of the selection stayed
@@ -523,7 +538,8 @@ internal object RendererProjection {
     /**
      * One queued message as the renderer reads it: the target conversation, what the sender asked of it and whether
      * it is still waiting. Nothing here is a delivery — a message is only ever delivered by the conversation it was
-     * addressed to, which is why a queued row reports `pending`.
+     * addressed to, which is why a queued row reports `pending` — and a message its sender withdrew reports its own
+     * terminal state, `withdrawn`, which is never a hand-off.
      */
     fun queued(row: AgentQueuedMessage): JSONObject {
         val agent = AgentKind.fromWire(row.agent)
@@ -549,6 +565,7 @@ internal object RendererProjection {
         "stored" to stats.stored,
         "pending" to stats.pending,
         "delivered" to stats.delivered,
+        "withdrawn" to stats.withdrawn,
         "dropped" to stats.dropped,
     )
 
@@ -700,6 +717,19 @@ internal object RendererProjection {
                 .put("content", json("content" to rawLine(event), "type" to TIP_INFO))
         }
         return base
+    }
+
+    /**
+     * The same event as the renderer's live-stream frame: `message.stream` carries the renderer's own
+     * `IResponseMessage`, whose payload is read from `data`, while the rows `messages.list` answers are history
+     * rows that keep it under `content`. One event therefore has one shape per consumer — a live frame and a row
+     * read back from history — and the same keys otherwise: type, position, status, msg_id, id, turn_id and
+     * conversation_id.
+     */
+    fun streamFrame(event: AgentEvent, conversationId: String, epoch: String, turnId: String?): JSONObject? {
+        val frame = message(event, conversationId, epoch, turnId) ?: return null
+        frame.put("data", frame.remove("content") ?: JSONObject.NULL)
+        return frame
     }
 
     /**

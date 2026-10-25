@@ -71,6 +71,9 @@ internal class FakeSource : RendererSource {
     /** A newer switch that wins while [open] is still returning; the requested session is then stale. */
     var replaceDuringOpen: AgentSession? = null
     val writes = mutableListOf<Triple<String, String, AgentSession>>()
+
+    /** Every prompt a route really handed to the repository, so a test can prove what the Agent would receive. */
+    val sends = mutableListOf<Pair<String, AgentSession>>()
     val responded = mutableListOf<Pair<AgentEvent, String>>()
     val draftKeys = mutableListOf<String>()
     val storedDrafts = mutableMapOf<String, String>()
@@ -137,6 +140,7 @@ internal class FakeSource : RendererSource {
 
     override suspend fun send(text: String, expected: AgentSession): String? {
         if (session?.sameConversation(expected) != true) return null
+        sends += text to expected
         turnId = "turn-1"
         return "m9"
     }
@@ -233,6 +237,21 @@ internal class FakeSource : RendererSource {
         return workspace
     }
 
+    /** Every upload a route asked to land on a host, and the path the write answers with. */
+    val writtenFiles = mutableListOf<Triple<Long, String, String>>()
+    var writeFailure: Exception? = null
+    var writtenPath: String? = null
+
+    override suspend fun writeWorkspaceFile(hostId: Long, directory: String, name: String, content: ByteArray): String {
+        wroteContent = content
+        writeFailure?.let { throw it }
+        writtenFiles += Triple(hostId, directory, name)
+        return writtenPath ?: "$directory/$name"
+    }
+
+    /** The bytes the last upload handed over, so a test can prove the file really travelled whole. */
+    var wroteContent: ByteArray? = null
+
     override suspend fun hostByNickname(nickname: String): Host? = hosts.firstOrNull { it.nickname == nickname }
 
     override suspend fun saveHost(host: Host): Host {
@@ -277,6 +296,7 @@ internal class FakeSource : RendererSource {
     val queuedWrites = mutableListOf<Triple<AgentSession, AgentMessageKind, String>>()
     val withdrawn = mutableListOf<String>()
 
+    /** Every row the queue still holds, exactly as the real queue answers it: each one with its own state. */
     override suspend fun queued(): List<AgentQueuedMessage> {
         queueFailure?.let { throw it }
         return queuedMessages
@@ -305,14 +325,17 @@ internal class FakeSource : RendererSource {
         return id
     }
 
-    /** Withdrawing really drops the row from what the queue holds, exactly as the real queue does. */
+    /**
+     * Withdrawing records the row under the queue's own terminal state, exactly as the real queue does, and only a
+     * row still pending can be withdrawn.
+     */
     override suspend fun withdrawQueued(id: String): Boolean {
         queueFailure?.let { throw it }
         if (!withdrawAccepted) return false
-        val kept = queuedMessages.filterNot { it.id == id }
-        if (kept.size == queuedMessages.size) return false
+        val row = queuedMessages.firstOrNull { it.id == id } ?: return false
+        if (row.state != AgentMessageState.PENDING) return false
+        queuedMessages = queuedMessages.map { if (it.id == id) it.copy(state = AgentMessageState.WITHDRAWN) else it }
         withdrawn += id
-        queuedMessages = kept
         return true
     }
 
@@ -327,5 +350,19 @@ internal class FakeSource : RendererSource {
         sessions = emptyList()
         indexed = null
         return sessions.size
+    }
+}
+
+/**
+ * Stands in for the product's own terminal surface: every hand-over is recorded with the host and the command it
+ * carried, and the answer is what a test set — a started console, a build without one, or a refused start.
+ */
+internal class FakeTerminal : RendererTerminal {
+    var result: RendererTerminal.Result = RendererTerminal.Result.Started
+    val starts = mutableListOf<Pair<Long, String>>()
+
+    override suspend fun start(hostId: Long, command: String): RendererTerminal.Result {
+        starts += hostId to command
+        return result
     }
 }

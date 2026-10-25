@@ -53,8 +53,9 @@ class WorkingDirectoryUnreachableException(
 
 /**
  * Read-only check that the working directory of a session is an absolute path the host still has as a directory.
- * It runs one bounded POSIX `test`, never writes to the host and never guesses a substitute directory. A failure
- * to reach the host at all keeps its own error: only an answer from the host is a verdict about the directory.
+ * It runs one bounded `test` per target — the POSIX `[ -d ]` chain, or PowerShell's `Test-Path` on a Windows
+ * target — never writes to the host and never guesses a substitute directory. A failure to reach the host at all
+ * keeps its own error: only an answer from the host is a verdict about the directory.
  */
 class RemoteWorkingDirectoryCheck(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
@@ -64,13 +65,18 @@ class RemoteWorkingDirectoryCheck(
         require(timeoutMillis > 0) { "Timeout must be positive" }
     }
 
-    suspend fun verify(host: HostSession, cwd: String) {
-        if (!cwd.startsWith('/') || cwd.any { it.code < 32 || it.code == 127 }) {
+    suspend fun verify(host: HostSession, cwd: String, target: RemoteTarget = RemoteTarget.Posix) {
+        val windows = target is RemoteTarget.WindowsNative
+        if (windows) {
+            // A Windows target addresses a drive-absolute or UNC path; a POSIX path names no directory there.
+            if (!isWindowsAbsolutePath(cwd)) throw WorkingDirectoryUnreachableException(cwd, WorkingDirectoryProblem.NOT_ABSOLUTE)
+        } else if (!cwd.startsWith('/') || cwd.any { it.code < 32 || it.code == 127 }) {
             throw WorkingDirectoryUnreachableException(cwd, WorkingDirectoryProblem.NOT_ABSOLUTE)
         }
         // Opening the channel is bounded by the connection layer's own timeouts; its failure is a connection
         // failure and is reported as such rather than as a verdict about the directory.
-        val channel = withContext(ioDispatcher) { host.exec(workingDirectoryCheckCommand(cwd)) }
+        val command = if (windows) windowsWorkingDirectoryCheckCommand(cwd) else workingDirectoryCheckCommand(cwd)
+        val channel = withContext(ioDispatcher) { host.exec(command) }
         val answer = try {
             coroutineScope {
                 val stderr = launch { runCatching { runInterruptible { drainStderr(channel.stderr) } } }
@@ -110,6 +116,19 @@ internal fun workingDirectoryCheckCommand(cwd: String): String {
     val payload = "if [ -d $path ]; then printf $DIRECTORY_ANSWER; " +
         "elif [ -e $path ]; then printf $NOT_A_DIRECTORY_ANSWER; else printf $MISSING_ANSWER; fi"
     return "/bin/sh -c ${ShellCommands.quote(payload)}"
+}
+
+/**
+ * The same three verdicts on a Windows target, from the one Windows text that reads a directory without touching
+ * it: PowerShell's `Test-Path`, whose `-LiteralPath` keeps a name holding wildcard characters from being read as
+ * a pattern. A relay that never ran answers with its own text instead, which stays [WorkingDirectoryProblem.CHECK_FAILED]
+ * rather than reading as a missing directory.
+ */
+internal fun windowsWorkingDirectoryCheckCommand(cwd: String): String {
+    require(isWindowsAbsolutePath(cwd)) { "Working directory must be a Windows absolute path" }
+    val path = powershellLiteral(cwd)
+    return "if (Test-Path -LiteralPath $path -PathType Container) { '$DIRECTORY_ANSWER' } " +
+        "elseif (Test-Path -LiteralPath $path) { '$NOT_A_DIRECTORY_ANSWER' } else { '$MISSING_ANSWER' }"
 }
 
 private const val DIRECTORY_ANSWER = "cwd_ok"

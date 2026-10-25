@@ -3,6 +3,7 @@ import { mkdirSync, readdirSync, writeFileSync, existsSync, readFileSync, realpa
 import { resolve, join, dirname } from 'node:path';
 import { AcpClient, toConfigOptions } from './acp-client.mjs';
 import { startFakeModel, fakeOverlay, LOCAL_VALUES } from './fake-model.mjs';
+import { MessageQueue, SessionIndex, fixtureHosts } from './host-fixture.mjs';
 import { SessionState, CONVERSATION_ID as C, PROJECT_ID as P, id, problem } from './session-state.mjs';
 
 const ok = (data) => ({ success: true, data });
@@ -64,6 +65,8 @@ export async function startBackend({ runDir, dshBin = '/usr/sbin/dsh', port = 0 
   const sockets = new Set();
   const tools = new Map();
   const cancelled = new Map();
+  const queue = new MessageQueue();
+  const index = new SessionIndex([{ session_id: C }]);
   const settings = { language: 'zh-CN', theme: 'light', colorScheme: 'default', notificationEnabled: false, cronNotificationEnabled: false, keepAwake: false, saveUploadToWorkspace: false };
 
   function publicApproval(approval) { const { rpc_id, ...result } = approval; return result; }
@@ -337,6 +340,8 @@ export async function startBackend({ runDir, dshBin = '/usr/sbin/dsh', port = 0 
           text_delivery: { acp: 'committed_assistant_message', token_level: false, cancellation: 'partial_commit_before_cancelled_result',
             note: '本探针下 dsh 的文本为提交级，非 token 级；取消时可能提交已接收的部分文本；backend 不拆分最终全文。' },
           isolation: { cwd: work, home: env.HOME, dsh_home: env.DSH_HOME, environment_names: Object.keys(env) },
+          queue: { rows: queue.all(), stats: queue.stats() },
+          index: { sessions: index.count() },
           side_effects: [...fake.turns.values()].map((turn) => ({ ...turn, exists: existsSync(turn.target), content: existsSync(turn.target) ? readFileSync(turn.target, 'utf8') : null })) }));
         if (method === 'GET' && path === '/api/probe/events') return json(ok(state.events.filter((event) => event.seq > Number(url.searchParams.get('since') ?? 0))));
         if (method === 'POST' && ['/api/probe/disconnect', '/api/probe/disconnect-stream'].includes(path)) {
@@ -355,6 +360,26 @@ export async function startBackend({ runDir, dshBin = '/usr/sbin/dsh', port = 0 
         if (method === 'GET' && path === '/api/conversations') return json(ok({ items: [conversation()], total: 1, has_more: false }));
         if (method === 'GET' && path === '/api/projects') return json(ok([{ project_id: P, name: '离线探针项目' }]));
         if (method === 'GET' && path === `/api/projects/${P}`) return json(ok({ project_id: P, name: '离线探针项目', explorer: { workspace_pe_id: null, entries: [] } }));
+        // The queue, the index cache and the saved hosts: state the renderer's cross-session surfaces read,
+        // answered with the contract's own field names.
+        if (method === 'GET' && path === '/api/queue') {
+          const items = queue.pending(url.searchParams.get('session_id') ?? undefined);
+          return json(ok({ items, total: items.length, stats: queue.stats() }));
+        }
+        if (method === 'POST' && path === '/api/queue') {
+          const target = body.conversation_id ?? body.session_id;
+          if (target !== C) throw problem(404, 'CONVERSATION_NOT_FOUND', 'This queue holds messages for the conversations the product already holds');
+          const queued = queue.enqueue({ conversationId: C, hostId: body.host_id, agent: body.agent, sessionId: body.session_id ?? C, kind: body.kind, text: body.text });
+          return json(ok({ queue_id: queued.queue_id, conversation_id: queued.conversation_id, host_id: queued.host_id, agent: queued.agent,
+            session_id: queued.session_id, kind: queued.kind, state: queued.state, queued: true, delivered: false }));
+        }
+        const queueEntry = path.match(/^\/api\/queue\/([^/]+)$/);
+        if (method === 'DELETE' && queueEntry) return json(ok(queue.cancel(decodeURIComponent(queueEntry[1]))));
+        if (method === 'POST' && path === '/api/index/clear') return json(ok(index.clear()));
+        if (method === 'GET' && path === '/api/hosts') {
+          const items = fixtureHosts();
+          return json(ok({ items, total: items.length }));
+        }
         if (method === 'GET' && emptyRoutes.has(path)) return json(ok([]));
         const match = path.match(/^\/api\/conversations\/([^/]+)(.*)$/);
         if (match) {

@@ -58,6 +58,9 @@ export function rendererAudit() {
         }
       }
       const external = [...this.getModuleIds()].filter((id) => this.getModuleInfo(id)?.isExternal);
+      // This file is emitted here, so the audit inventory must own it too: without a record the product copy
+      // would look like an unaccounted copied asset.
+      assets.push({ path: 'rmagent-modules.json', names: [], originalFileNames: [] });
       this.emitFile({
         type: 'asset',
         fileName: 'rmagent-modules.json',

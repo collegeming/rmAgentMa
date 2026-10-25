@@ -50,6 +50,7 @@ import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.DirectoryListing
 import org.rmagentma.core.RemoteDirectoryListing
+import org.rmagentma.core.RemoteFileWriter
 import org.rmagentma.rendererhost.json
 import java.util.UUID
 import javax.inject.Inject
@@ -155,11 +156,11 @@ class AgentRendererSource @Inject constructor(
     }
 
     /**
-     * What the product holds about each host's link: the live state of this process wins over the recorded one, and
-     * a host neither names was never connected here, so it is reported as unknown instead of reachable.
+     * What the product holds about each host's link: the repository's own bookkeeping answers it, where the live
+     * state of this process wins over the recorded one and a host neither names stays unknown rather than
+     * reported as reachable.
      */
-    private fun linkStates(): Map<Long, AgentLinkState> =
-        repository.linkRecords.value.filter { it.agent == null }.associate { it.hostId to it.state } + repository.liveLinkStates.value
+    private fun linkStates(): Map<Long, AgentLinkState> = repository.hostLinkStates()
 
     /** The conversation the renderer should load first: whatever the product has open or selected right now. */
     fun conversationId(): String? = currentSession()?.let(RendererConversationId::of)
@@ -279,6 +280,15 @@ class AgentRendererSource @Inject constructor(
     override suspend fun listWorkspace(hostId: Long, directory: String): DirectoryListing =
         RemoteDirectoryListing(dispatchers.io).list(pool.hostSession(hostId, interactive = false), directory)
 
+    /**
+     * One upload's own write: the same bounded remote commands a listing uses, on the same host session, so a
+     * host this app cannot reach fails here with its own error and a file the host already holds is never
+     * replaced. It runs non-interactively like the listing, because a file picked in a chat is not a reason to
+     * prompt for a credential.
+     */
+    override suspend fun writeWorkspaceFile(hostId: Long, directory: String, name: String, content: ByteArray): String =
+        RemoteFileWriter(dispatchers.io).write(pool.hostSession(hostId, interactive = false), directory, name, content)
+
     /** Hosts are created, renamed and removed through the same repository the Compose host editor writes to. */
     override suspend fun hostByNickname(nickname: String): Host? = hosts.findHost(mapOf("nickname" to nickname))
 
@@ -306,9 +316,11 @@ class AgentRendererSource @Inject constructor(
 
     /**
      * Queued messages are read from, and written to, the product's own queue file: this seam sends nothing, and the
-     * queue hands a request to its conversation only when that conversation is next opened.
+     * queue hands a request to its conversation only when that conversation is next opened. Every row is answered
+     * with its own state, so a message the conversation took and one the sender withdrew stay readable as what they
+     * are rather than as still waiting.
      */
-    override suspend fun queued(): List<AgentQueuedMessage> = messages.pending()
+    override suspend fun queued(): List<AgentQueuedMessage> = messages.held()
 
     override suspend fun queueStats(): AgentMessageQueueStats = messages.stats()
 
@@ -316,9 +328,9 @@ class AgentRendererSource @Inject constructor(
         messages.enqueue(target.hostId, target.agent.wireName, target.sessionId, kind, text)
 
     /**
-     * Withdraws one queued message before its conversation can take it. The queue's only terminal write is the
-     * "taken by its conversation" mark, so a withdrawn message is recorded that way and can never be delivered
-     * later; nothing here reports a delivery, because none happened.
+     * Withdraws one queued message before its conversation can take it. The queue records it under its own
+     * terminal state, `withdrawn`, so it is never handed to that conversation and never counted as delivered;
+     * nothing here reports a delivery, because none happened.
      */
     override suspend fun withdrawQueued(id: String): Boolean = messages.withdraw(id)
 
@@ -389,7 +401,9 @@ class AgentRendererSource @Inject constructor(
                 }
             }
             if (!fresh) continue
-            val frame = RendererProjection.message(event, conversation, currentEpoch, currentTurn) ?: continue
+            // A live frame is the renderer's own stream message, whose payload it reads from `data`; the row
+            // shape stays what `messages.list` answers, because the history list is drawn from those rows.
+            val frame = RendererProjection.streamFrame(event, conversation, currentEpoch, currentTurn) ?: continue
             publish("message.stream", frame)
         }
         // A permission card that left the window was answered or invalidated; the renderer must drop it.

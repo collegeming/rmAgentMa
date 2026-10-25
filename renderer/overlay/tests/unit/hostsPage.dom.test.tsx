@@ -67,7 +67,7 @@ const renderPage = () =>
 const hostError = (status: number, code: string, reason: string) =>
   new BackendHttpError({
     method: 'POST',
-    path: '/api/hosts/host-3/detection/refresh',
+    path: '/api/hosts/host-3/refresh',
     status,
     body: { success: false, code, error: reason },
   });
@@ -95,26 +95,30 @@ describe('hosts page', () => {
     expect(request).toHaveBeenCalledWith('GET', '/api/hosts');
   });
 
-  it('replaces one host verdicts with the answer of its own refresh and probes nothing else', async () => {
-    request.mockResolvedValueOnce({ items: [host()] });
+  it('refreshes one host through its own refresh entry and takes the verdicts and the session count it answers', async () => {
+    request.mockResolvedValueOnce({ items: [host({ session_count: 2 })] });
     renderPage();
     await screen.findByText('build-box');
+    expect(screen.getByText('settings.hosts.sessionCount(2)')).toBeInTheDocument();
 
     request.mockReturnValueOnce(new Promise((resolve) => (answerRefresh = resolve)));
     await userEvent.setup().click(screen.getByRole('button', { name: 'settings.hosts.refresh' }));
 
-    expect(request).toHaveBeenLastCalledWith('POST', '/api/hosts/host-3/detection/refresh');
+    // The route the contract declares for a refresh — it probes the host *and* rescans its session index.
+    expect(request).toHaveBeenLastCalledWith('POST', '/api/hosts/host-3/refresh');
     expect(screen.getAllByText('settings.hosts.refreshing').length).toBeGreaterThan(0);
 
     answerRefresh({
       host_id: 'host-3',
-      target: 'posix',
-      target_supported: true,
+      refreshed: true,
+      sessions: 5,
       detection: { checked: true, agents: [kimi('not_installed')] },
     });
     expect(await screen.findByText('settings.hosts.probeNotInstalled')).toBeInTheDocument();
     expect(screen.queryByText('settings.hosts.probeAvailable')).toBeNull();
     expect(screen.getByText('settings.hosts.executable(/home/ci/.local/bin/kimi)')).toBeInTheDocument();
+    // The rescan is the half a probe alone never did: the count the host answered is what the row shows.
+    expect(screen.getByText('settings.hosts.sessionCount(5)')).toBeInTheDocument();
   });
 
   it('keeps the verdicts it already showed when the refresh fails, and states the code and reason', async () => {
@@ -122,17 +126,29 @@ describe('hosts page', () => {
     renderPage();
     await screen.findByText('build-box');
 
-    request.mockRejectedValueOnce(hostError(500, 'DETECTION_FAILED', 'ssh unreachable'));
+    request.mockRejectedValueOnce(hostError(500, 'HOST_REFRESH_FAILED', 'ssh unreachable'));
     await userEvent.setup().click(screen.getByRole('button', { name: 'settings.hosts.refresh' }));
 
     expect(
-      await screen.findByText('settings.hosts.requestFailed(DETECTION_FAILED|ssh unreachable)')
+      await screen.findByText('settings.hosts.requestFailed(HOST_REFRESH_FAILED|ssh unreachable)')
     ).toBeInTheDocument();
     expect(screen.getByText('settings.hosts.probeAvailable')).toBeInTheDocument();
     expect(screen.getByText('settings.hosts.executable(/home/ci/.local/bin/kimi)')).toBeInTheDocument();
   });
 
-  it('refuses a Windows host whose Agent would run on Windows itself and sends no create', async () => {
+  it('refuses a refresh answer that carries no readable verdicts instead of showing an empty probe', async () => {
+    request.mockResolvedValueOnce({ items: [host()] });
+    renderPage();
+    await screen.findByText('build-box');
+
+    request.mockResolvedValueOnce({ host_id: 'host-3', refreshed: true, sessions: 5 });
+    await userEvent.setup().click(screen.getByRole('button', { name: 'settings.hosts.refresh' }));
+
+    expect(await screen.findByText('HOST_REFRESH_INVALID')).toBeInTheDocument();
+    expect(screen.getByText('settings.hosts.probeAvailable')).toBeInTheDocument();
+  });
+
+  it('saves a Windows host whose Agent runs on Windows itself, and says what that probe relies on', async () => {
     request.mockResolvedValueOnce({ items: [] });
     renderPage();
     const user = userEvent.setup();
@@ -141,12 +157,49 @@ describe('hosts page', () => {
     await user.type(screen.getByLabelText('settings.hosts.nickname'), 'win-box');
     await user.type(screen.getByLabelText('settings.hosts.address'), '10.0.0.9');
     await user.click(screen.getByText('settings.hosts.osWindows'));
-    await user.click(screen.getByText('settings.hosts.targetNativeUnsupported'));
+    // The option names the target, and the hint under it states what the probe depends on.
+    expect(screen.getByText('settings.hosts.targetWindowsHint')).toBeInTheDocument();
+
+    request.mockResolvedValueOnce(host({ id: 'host-9', nickname: 'win-box', os_type: 'windows' }));
     await user.click(screen.getByRole('button', { name: 'settings.hosts.save' }));
 
-    // The option says so before it is picked, and the refused save states it again.
-    expect(screen.getAllByText('settings.hosts.targetNativeHint').length).toBeGreaterThan(1);
-    await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(request).toHaveBeenLastCalledWith('POST', '/api/hosts', {
+        nickname: 'win-box',
+        hostname: '10.0.0.9',
+        port: 22,
+        username: '',
+        os_type: 'windows',
+        agent_target: 'windows',
+      })
+    );
+  });
+
+  it('requires the WSL distribution name and sends the target the user typed', async () => {
+    request.mockResolvedValueOnce({ items: [] });
+    renderPage();
+    const user = userEvent.setup();
+    await user.click(screen.getAllByRole('button', { name: 'settings.hosts.add' })[0]);
+
+    await user.type(screen.getByLabelText('settings.hosts.nickname'), 'wsl-box');
+    await user.type(screen.getByLabelText('settings.hosts.address'), '10.0.0.10');
+    await user.click(screen.getByText('settings.hosts.osWindows'));
+    await user.click(screen.getByText('settings.hosts.targetWsl'));
+    await user.click(screen.getByRole('button', { name: 'settings.hosts.save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('settings.hosts.distributionRequired');
+    expect(request).toHaveBeenCalledTimes(1);
+
+    await user.type(screen.getByLabelText('settings.hosts.wslDistribution'), 'Ubuntu-22.04');
+    request.mockResolvedValueOnce(host({ id: 'host-10', nickname: 'wsl-box' }));
+    await user.click(screen.getByRole('button', { name: 'settings.hosts.save' }));
+
+    await waitFor(() =>
+      expect(request).toHaveBeenLastCalledWith(
+        'POST',
+        '/api/hosts',
+        expect.objectContaining({ os_type: 'windows', agent_target: 'wsl:Ubuntu-22.04' })
+      )
+    );
   });
 
   it('creates a host with the fields of the form and shows the refusal the host returned', async () => {

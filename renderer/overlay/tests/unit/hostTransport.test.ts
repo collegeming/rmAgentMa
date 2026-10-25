@@ -116,4 +116,29 @@ describe('native host v1 transport', () => {
     expect(receive).toHaveBeenCalledTimes(2);
     h.transport.close();
   });
+
+  it('resolves the maintenance and host refresh routes the contract declares instead of refusing them', async () => {
+    expect(resolveHostRoute('POST', '/api/index/clear')).toEqual({
+      action: 'index.clear',
+      payload: { params: {}, query: {}, body: null },
+    });
+    expect(resolveHostRoute('POST', '/api/hosts/host-3/refresh')).toEqual({
+      action: 'hosts.refresh',
+      payload: { params: { hostId: 'host-3' }, query: {}, body: null },
+    });
+
+    const h = harness();
+    const ready = h.transport.initialize();
+    h.reply({ documentId: 'document-1', protocolVersion: 1 });
+    await ready;
+    const clearing = h.transport.call('index.clear');
+    expect(h.sent.at(-1)?.action).toBe('index.clear');
+    h.reply({ cleared: true, sessions_before: 2, sessions: 0 });
+    expect((await clearing).body).toEqual({ cleared: true, sessions_before: 2, sessions: 0 });
+    const refreshing = h.transport.call('hosts.refresh', { params: { hostId: 'host-3' }, query: {}, body: null });
+    expect(h.sent.at(-1)?.action).toBe('hosts.refresh');
+    h.reply({ host_id: 'host-3', refreshed: true, sessions: 4, detection: { checked: true, agents: [] } });
+    expect((await refreshing).body).toMatchObject({ refreshed: true, sessions: 4 });
+    h.transport.close();
+  });
 });

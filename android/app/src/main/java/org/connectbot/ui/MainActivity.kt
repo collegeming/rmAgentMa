@@ -60,6 +60,7 @@ import org.connectbot.service.ConnectionNotifier
 import org.connectbot.service.TerminalManager
 import org.connectbot.ui.components.DisconnectAllDialog
 import org.connectbot.ui.navigation.NavDestinations
+import org.connectbot.ui.navigation.TerminalRequest
 import org.connectbot.ui.navigation.navigateToConsole
 import org.connectbot.ui.theme.ConnectBotTheme
 import org.connectbot.util.IconStyle
@@ -87,6 +88,15 @@ class MainActivity : AppCompatActivity() {
         /** Failure code for a handover the product itself cannot perform. */
         private const val RENDERER_UNRESOLVED = "renderer_unresolved"
 
+        /**
+         * A terminal hand-over from the renderer host: the saved host whose console is to be opened and the
+         * command its own terminal route runs there. The activity that receives it keeps the Compose shell for
+         * this launch — the SSH terminal is an explicit auxiliary route — and opens that console with the command
+         * pending its confirmation, exactly as the Compose TUI pane hands one over.
+         */
+        const val EXTRA_TERMINAL_HOST_ID = "org.connectbot.extra.TERMINAL_HOST_ID"
+        const val EXTRA_TERMINAL_COMMAND = "org.connectbot.extra.TERMINAL_COMMAND"
+
         // Resolved by class name because the renderer host only exists in the debug source set.
         private const val RENDERER_HOST_ACTIVITY = "org.connectbot.renderer.RendererHostActivity"
     }
@@ -98,6 +108,10 @@ class MainActivity : AppCompatActivity() {
     private var notificationReconnect = false
     private var pendingHostConnection: Host? by mutableStateOf(null)
     private var rendererFailureCode: String? by mutableStateOf(null)
+
+    // The terminal hand-over this launch carries, read once from the intent; it keeps the shell on this activity
+    // instead of handing back to the renderer, because the console is what the user asked to open.
+    private var terminalRequest: TerminalRequest? by mutableStateOf(null)
 
     // Holds the host waiting for permission result; not compose state so it doesn't trigger navigation.
     private var hostAwaitingPermission: Host? = null
@@ -153,6 +167,7 @@ class MainActivity : AppCompatActivity() {
 
         // A renderer failure brings this activity back with the code its fallback banner shows.
         rendererFailureCode = intent?.getStringExtra(EXTRA_RENDERER_FAILURE)
+        terminalRequest = terminalRequestOf(intent)
 
         if (savedInstanceState == null) {
             requestedUri = intent?.data
@@ -338,6 +353,7 @@ class MainActivity : AppCompatActivity() {
                 onHandOverToRenderer = { handOverToRenderer() },
                 rendererFailureCode = rendererFailureCode,
                 onRetryRenderer = { rendererFailureCode = null },
+                terminalRequest = terminalRequest,
             )
         }
     }
@@ -360,6 +376,9 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+
+        // A second hand-over reaches this single-top activity here; one this activity does not carry is left alone.
+        terminalRequestOf(intent)?.let { terminalRequest = it }
 
         handleIntent(intent)
 
@@ -475,4 +494,17 @@ private fun NotificationPermissionRationaleDialog(
             }
         },
     )
+}
+
+/**
+ * The terminal hand-over an intent carries, or null for every launch that names no saved host to open a console
+ * on. Both fields have to be there: a host id alone names no command to offer for confirmation, and a command
+ * alone names no console to run it in.
+ */
+internal fun terminalRequestOf(intent: Intent?): TerminalRequest? {
+    // Saved host ids start at one, so a missing id is the default no host has.
+    val hostId = intent?.getLongExtra(MainActivity.EXTRA_TERMINAL_HOST_ID, 0L) ?: 0L
+    val command = intent?.getStringExtra(MainActivity.EXTRA_TERMINAL_COMMAND)
+    if (hostId <= 0L || command.isNullOrBlank()) return null
+    return TerminalRequest(hostId, command)
 }

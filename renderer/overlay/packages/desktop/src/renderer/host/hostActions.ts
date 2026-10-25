@@ -139,13 +139,24 @@ export async function listInbox(): Promise<InboxAnswer> {
   };
 }
 
-/** One queued message and the session it waits for. */
+/**
+ * One queued message, the conversation it waits for, and the state the host holds it in. Only a message the
+ * host still reports as pending can be withdrawn; every other one is shown with its own state and reason.
+ */
 export type QueuedMessage = {
   queueId: string;
   session: string;
+  conversationId: string;
+  hostId: string;
+  agent: string;
   title: string;
   kind: string;
   text: string;
+  /** The host's own state name, e.g. `pending` or `withdrawn`, read as it came. */
+  state: string;
+  /** Whether the host still holds this message as waiting for its conversation. */
+  pending: boolean;
+  createdAt: number | null;
 };
 
 export async function listQueue(sessionId?: string): Promise<QueuedMessage[]> {
@@ -153,13 +164,23 @@ export async function listQueue(sessionId?: string): Promise<QueuedMessage[]> {
   const answer = recordOf(await httpRequest<unknown>('GET', path));
   const rows = rowList(answer.items) ?? rowList(answer.queue);
   if (!rows) throw new Error('HOST_QUEUE_INVALID');
-  return rows.map((row) => ({
-    queueId: pick(row, 'queue_id', 'id'),
-    session: pick(row, 'session_id', 'conversation_id', 'session'),
-    title: pick(row, 'conversation_name', 'title', 'name'),
-    kind: pick(row, 'kind', 'type'),
-    text: pick(row, 'text', 'message', 'content'),
-  }));
+  return rows.map((row) => {
+    const state = pick(row, 'state', 'status');
+    return {
+      queueId: pick(row, 'queue_id', 'id'),
+      session: pick(row, 'session_id', 'conversation_id', 'session'),
+      conversationId: pick(row, 'conversation_id', 'conversation'),
+      hostId: pick(row, 'host_id', 'host'),
+      agent: pick(row, 'agent', 'agent_id'),
+      title: pick(row, 'conversation_name', 'title', 'name'),
+      kind: pick(row, 'kind', 'type'),
+      text: pick(row, 'text', 'message', 'content'),
+      state,
+      // A row that names no state is not read as pending: this page never offers a withdraw the host may refuse.
+      pending: typeof row.pending === 'boolean' ? row.pending : state === 'pending',
+      createdAt: pickNumber(row, 'created_at', 'at', 'time'),
+    };
+  });
 }
 
 /** `notify` is a notice; `request` is sent when the target conversation is next opened. */
@@ -187,8 +208,13 @@ export async function sendToQueue(input: QueueMessageInput): Promise<void> {
   });
 }
 
+/**
+ * Withdraws one queued message so it can never be delivered later. The host's answer has to say it was
+ * cancelled: an answer that does not is a failure, never a withdrawal.
+ */
 export async function cancelQueuedMessage(queueId: string): Promise<void> {
-  await httpRequest<unknown>('DELETE', `/api/queue/${encodeURIComponent(queueId)}`);
+  const answer = recordOf(await httpRequest<unknown>('DELETE', `/api/queue/${encodeURIComponent(queueId)}`));
+  if (answer.cancelled !== true) throw new Error('HOST_QUEUE_NOT_WITHDRAWN');
 }
 
 /** One packed context window: the text to fill in, and the host and directory it came from. */

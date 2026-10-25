@@ -3,13 +3,38 @@
  * Copyright 2026 rmAgentMa contributors
  * SPDX-License-Identifier: Apache-2.0
  */
-import { captureHostDocument, hostAction } from './hostTransport';
+import type { TFunction } from 'i18next';
+import { captureHostDocument, hostAction, HostActionError } from './hostTransport';
 
 /**
- * Sending attachments is not part of this host yet. Every upload entry point in the renderer reads this and
- * says so, rather than offering a button whose request can only fail.
+ * This host receives attachments: `uploadHostAttachment` below is the whole entry side, and every upload
+ * entry point in the renderer reads this switch before it offers one.
  */
-export const HOST_ATTACHMENTS_SUPPORTED = false;
+export const HOST_ATTACHMENTS_SUPPORTED = true;
+
+/** A stable code the failure itself carries, e.g. `HOST_TIMEOUT` or `FILE_TOO_LARGE`. */
+const STABLE_CODE = /^[A-Z][A-Z0-9_]*/;
+
+/**
+ * The visible text of a failed upload: the host's own stable code and reason when it answered with one, the
+ * transport's own code when the request never completed, and only then the generic upload failure. A failure
+ * is never reported as a success.
+ */
+export function hostAttachmentFailureText(error: unknown, t: TFunction): string {
+  if (error instanceof HostActionError)
+    return t('conversation.hostTools.uploadFailed', {
+      code: error.code || `HTTP ${error.status}`,
+      reason: error.reason || t('settings.hosts.reasonUnknown'),
+    });
+  const message = error instanceof Error ? error.message : String(error);
+  const code = STABLE_CODE.exec(message)?.[0];
+  if (code && code !== 'HOST_ATTACHMENTS_UNSUPPORTED')
+    return t('conversation.hostTools.uploadFailed', {
+      code,
+      reason: message.slice(code.length).replace(/^[:\s]+/, '') || t('settings.hosts.reasonUnknown'),
+    });
+  return t('common.fileAttach.failed');
+}
 
 export async function uploadHostAttachment(
   file: File,
@@ -18,9 +43,9 @@ export async function uploadHostAttachment(
   name = file.name,
   signal?: AbortSignal
 ): Promise<string> {
-  // 边界兜底：入口都已禁用并写明原因，任何绕过入口的上传在这里被拒绝，且带一个稳定的错误码。
-  // The boundary: every entry point is disabled and says why, and any upload that slips past them is refused
-  // here with a stable code instead of a confusing transport error.
+  // 边界兜底：开关关掉时，任何绕过入口的上传在这里被拒绝，且带一个稳定的错误码。
+  // The boundary: with the switch off, any upload that slips past the entries is refused here with a stable
+  // code instead of a confusing transport error.
   if (!HOST_ATTACHMENTS_SUPPORTED) throw new Error('HOST_ATTACHMENTS_UNSUPPORTED');
   const documentAlive = captureHostDocument();
   const check = () => {

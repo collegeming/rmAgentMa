@@ -173,6 +173,14 @@ interface RendererSource {
     suspend fun listWorkspace(hostId: Long, directory: String): DirectoryListing
 
     /**
+     * Writes [content] as [name] into [directory] on [hostId] through bounded remote commands on the host's own
+     * session, and answers the absolute path the file ended up at. A file the host already holds is never replaced:
+     * the write moves to a suffixed name instead. A write that failed throws with its own reason — the step that
+     * failed — and leaves no half-written file behind on the host.
+     */
+    suspend fun writeWorkspaceFile(hostId: Long, directory: String, name: String, content: ByteArray): String
+
+    /**
      * The saved host whose nickname is [nickname], whatever protocol it carries, or null. The nickname column is
      * unique across every host, so this is the conflict a create or a rename has to be checked against.
      */
@@ -204,9 +212,10 @@ interface RendererSource {
     suspend fun searchTranscripts(query: String, sessions: List<AgentSession>): AgentTranscriptOutcome
 
     /**
-     * Every message the product still holds in its cross-conversation queue, oldest first. Reading the queue
-     * neither sends nor delivers anything: a queued request is handed to its conversation only when that
-     * conversation is next opened.
+     * Every message the product still holds in its cross-conversation queue, oldest first, each with its own
+     * state: a pending one, one its conversation took and one its sender withdrew. Reading the queue neither
+     * sends nor delivers anything — a queued request is handed to its conversation only when that conversation is
+     * next opened — and only a pending row is one a caller can withdraw.
      */
     suspend fun queued(): List<AgentQueuedMessage>
 

@@ -18,6 +18,7 @@
 package org.connectbot.renderer
 
 import android.Manifest
+import android.util.Base64
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
@@ -44,7 +45,9 @@ import org.connectbot.agent.ZCODE_MODEL_OPTION
 import org.connectbot.data.entity.Host
 import org.json.JSONArray
 import org.json.JSONObject
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentConfigOption
@@ -71,9 +74,12 @@ import org.rmagentma.rendererhost.ProbeLimits
 import org.rmagentma.rendererhost.ProbeResult
 import org.rmagentma.rendererhost.json
 import java.io.IOException
+import java.security.MessageDigest
 
 @RunWith(AndroidJUnit4::class)
 class RendererActionsTest {
+    @get:Rule val temporary = TemporaryFolder()
+
     private val session = AgentSession(hostId = 7, agent = AgentKind.KIMI, sessionId = "session-a", cwd = "/workspace/app", updatedAt = 1_000)
     private val host = Host(id = 7, nickname = "工作机", username = "colle", hostname = "example.test")
 
@@ -83,6 +89,9 @@ class RendererActionsTest {
         val expected = mapOf(
             "runtime.visible" to "LEASE_UNSUPPORTED",
             "attachment.begin" to "ATTACHMENT_UNSUPPORTED",
+            "attachment.chunk" to "ATTACHMENT_UNSUPPORTED",
+            "attachment.finish" to "ATTACHMENT_UNSUPPORTED",
+            "attachment.abort" to "ATTACHMENT_UNSUPPORTED",
             "commands.list" to "COMMANDS_UNSUPPORTED",
             "artifacts.list" to "ARTIFACTS_UNSUPPORTED",
             "providers.list" to "PROVIDERS_UNSUPPORTED",
@@ -119,6 +128,8 @@ class RendererActionsTest {
         assertThat(conversation.getString("id")).isEqualTo(RendererConversationId.of(opened))
         assertThat(conversation.getString("name")).isEqualTo("索引标题")
         assertThat(conversation.getString("project_id")).isEqualTo("host-7")
+        // The sidebar's Agent filter reads the row's own `agent`, so the row carries the wire value itself.
+        assertThat(conversation.getString("agent")).isEqualTo("kimi")
         assertThat(conversation.getJSONObject("extra").getString("workspace")).isEqualTo("/workspace/app")
         assertThat(conversation.getJSONObject("extra").getString("backend")).isEqualTo("kimi")
         assertThat(conversation.getLong("created_at")).isEqualTo(500)
@@ -232,9 +243,10 @@ class RendererActionsTest {
         source.active = true
         val empty = actions.handle("messages.send", payload(conversation = true, body = mapOf("content" to "   ")))
         assertThat(empty.status).isEqualTo(422)
+        // A file reference this host cannot hand to the Agent is refused as its own reason, not as the send path.
         val files = actions.handle("messages.send", payload(conversation = true, body = mapOf("content" to "你好", "files" to JSONArray().put(jsonOf("kind" to "upload")))))
         assertThat(files.status).isEqualTo(422)
-        assertThat((files.body as JSONObject).getString("code")).isEqualTo("ATTACHMENT_UNSUPPORTED")
+        assertThat((files.body as JSONObject).getString("code")).isEqualTo("INVALID_FILE_REF")
 
         val accepted = actions.handle("messages.send", payload(conversation = true, body = mapOf("content" to "你好", "loading_id" to "loading-1")))
         assertThat(accepted.status).isEqualTo(202)
@@ -247,6 +259,107 @@ class RendererActionsTest {
         val busy = actions.handle("messages.send", payload(conversation = true, body = mapOf("content" to "再来")))
         assertThat(busy.status).isEqualTo(409)
         assertThat((busy.body as JSONObject).getString("code")).isEqualTo("TURN_BUSY")
+    }
+
+    /**
+     * A message that names uploaded files carries their absolute paths into the prompt itself, because that is the
+     * only place this host's text-only send path can put them: the files stay where the upload landed, the Agent
+     * reads the paths, and a file the caller named twice reaches it once.
+     */
+    @Test
+    fun sendCarriesTheUploadedFilePathsIntoThePromptTheAgentReceives() = runTest {
+        val source = openSource()
+        val actions = RendererActions(source)
+        val files = JSONArray()
+            .put(jsonOf("kind" to "upload", "path" to "/workspace/app/shot.png"))
+            .put("/workspace/app/data.csv")
+            .put(jsonOf("kind" to "upload", "path" to "/workspace/app/shot.png"))
+        val accepted = actions.handle("messages.send", payload(conversation = true, body = mapOf("content" to "看看这两个文件", "files" to files)))
+        assertThat(accepted.status).isEqualTo(202)
+        assertThat(source.sends.single().second).isEqualTo(session)
+        assertThat(source.sends.single().first).isEqualTo(
+            "看看这两个文件\n\n附件路径（已上传到本会话目录，可直接读取）：\n/workspace/app/shot.png\n/workspace/app/data.csv",
+        )
+    }
+
+    /** A message without files still sends exactly the text the user typed, with no block added to it. */
+    @Test
+    fun sendWithoutFilesSendsTheTextAlone() = runTest {
+        val bodies = listOf(mapOf("content" to "只有文字"), mapOf("content" to "只有文字", "files" to JSONArray()))
+        for (body in bodies) {
+            val source = openSource()
+            val accepted = RendererActions(source).handle("messages.send", payload(conversation = true, body = body))
+            assertThat(accepted.status).describedAs(body.toString()).isEqualTo(202)
+            assertThat(source.sends.single().first).isEqualTo("只有文字")
+        }
+    }
+
+    /**
+     * Every file reference this host cannot hand to the Agent is refused as itself, and nothing is sent: a path the
+     * Agent could not read, or a reference naming a file in a workspace this host does not hold.
+     */
+    @Test
+    fun sendRefusesFileReferencesThatNameNoAbsolutePath() = runTest {
+        val source = openSource()
+        val actions = RendererActions(source)
+        val refusals = mapOf(
+            "relative path" to JSONArray().put(jsonOf("kind" to "upload", "path" to "shot.png")),
+            "control character" to JSONArray().put(jsonOf("kind" to "upload", "path" to "/workspace/a\u0001b.txt")),
+            "over-long path" to JSONArray().put(jsonOf("kind" to "upload", "path" to "/" + "a".repeat(1024))),
+            "project reference" to JSONArray().put(jsonOf("kind" to "project", "pe_id" to "p1", "relative_path" to "src/a.kt")),
+            "upload reference without a path" to JSONArray().put(jsonOf("kind" to "upload")),
+            "path that is not a string" to JSONArray().put(jsonOf("kind" to "upload", "path" to 7)),
+            "empty path" to JSONArray().put(jsonOf("kind" to "upload", "path" to "")),
+            "element that is not a reference" to JSONArray().put(JSONObject.NULL),
+        )
+        for ((label, files) in refusals) {
+            val refused = actions.handle("messages.send", payload(conversation = true, body = mapOf("content" to "你好", "files" to files)))
+            assertThat(refused.status).describedAs(label).isEqualTo(422)
+            assertThat(codeOf(refused)).describedAs(label).isEqualTo("INVALID_FILE_REF")
+        }
+        assertThat(source.sends).isEmpty()
+        assertThat(source.turnId).isNull()
+    }
+
+    /** One message carries a bounded number of files; more than that is refused instead of being trimmed. */
+    @Test
+    fun sendRefusesMoreFilesThanOneMessageMayCarry() = runTest {
+        val source = openSource()
+        val actions = RendererActions(source)
+        val tooMany = JSONArray()
+        repeat(17) { tooMany.put(jsonOf("kind" to "upload", "path" to "/workspace/app/f$it.txt")) }
+        val refused = actions.handle("messages.send", payload(conversation = true, body = mapOf("content" to "你好", "files" to tooMany)))
+        assertThat(refused.status).isEqualTo(422)
+        assertThat(codeOf(refused)).isEqualTo("TOO_MANY_FILES")
+        assertThat(source.sends).isEmpty()
+
+        // Sixteen files are still one message, and each of their paths really reaches the Agent.
+        val sixteen = JSONArray()
+        repeat(16) { sixteen.put(jsonOf("kind" to "upload", "path" to "/workspace/app/f$it.txt")) }
+        val accepted = actions.handle("messages.send", payload(conversation = true, body = mapOf("content" to "你好", "files" to sixteen)))
+        assertThat(accepted.status).isEqualTo(202)
+        assertThat(source.sends.single().first).contains("/workspace/app/f0.txt").contains("/workspace/app/f15.txt")
+    }
+
+    /**
+     * The attachment block counts against the message bound, and a prompt that no longer fits is refused whole:
+     * cutting the user's text to make room would send the Agent words the user never wrote.
+     */
+    @Test
+    fun sendRefusesAPromptTheAttachmentBlockNoLongerFitsWithin() = runTest {
+        val source = openSource()
+        val actions = RendererActions(source)
+        val file = jsonOf("kind" to "upload", "path" to "/workspace/app/shot.png")
+        // The text alone fits exactly; the file block is what no longer does.
+        val text = "长".repeat(ProbeLimits.CONTENT_UNITS)
+        val tooLarge = actions.handle("messages.send", payload(conversation = true, body = mapOf("content" to text, "files" to JSONArray().put(file))))
+        assertThat(tooLarge.status).isEqualTo(413)
+        assertThat(codeOf(tooLarge)).isEqualTo("MESSAGE_TOO_LARGE")
+        assertThat(source.sends).isEmpty()
+
+        val accepted = actions.handle("messages.send", payload(conversation = true, body = mapOf("content" to "短文本", "files" to JSONArray().put(file))))
+        assertThat(accepted.status).isEqualTo(202)
+        assertThat(source.sends.single().first).startsWith("短文本").contains("/workspace/app/shot.png")
     }
 
     @Test
@@ -363,7 +476,7 @@ class RendererActionsTest {
         val windows = savedHost.copy(id = 8, nickname = "windows-box", osType = "windows", agentTarget = "native")
         val source = FakeSource().apply {
             hosts = listOf(savedHost, windows)
-            availability = listOf(availableRow(7), targetUnsupportedRow(8))
+            availability = listOf(availableRow(7), missingRow(8))
         }
         val result = RendererActions(source).handle("hosts.list", payload())
         assertThat(result.status).isEqualTo(200)
@@ -390,15 +503,17 @@ class RendererActionsTest {
         assertThat(kimi.getString("version")).isEqualTo("1.0.0")
         assertThat(kimi.getJSONObject("capabilities").getBoolean("acp")).isTrue()
 
-        // A Windows host whose Agent would run on Windows itself has no entry in this app, and its row says so.
+        // A Windows host whose Agent runs on Windows itself is entered on that host: the row names the shell
+        // context it addresses, and what the last probe found there.
         val native = rows.getJSONObject(1)
         assertThat(native.getString("os_type")).isEqualTo("windows")
         assertThat(native.getString("agent_target")).isEqualTo("native")
         assertThat(native.getString("target")).isEqualTo("windows-native")
-        assertThat(native.getBoolean("target_supported")).isFalse()
-        val unsupported = native.getJSONObject("detection").getJSONArray("agents").getJSONObject(0)
-        assertThat(unsupported.getString("state")).isEqualTo("target_unsupported")
-        assertThat(unsupported.getString("executable")).isEmpty()
+        assertThat(native.getBoolean("target_supported")).isTrue()
+        val notInstalled = native.getJSONObject("detection").getJSONArray("agents").getJSONObject(0)
+        assertThat(notInstalled.getString("state")).isEqualTo("not_installed")
+        assertThat(notInstalled.getString("error")).isEqualTo("executable_missing")
+        assertThat(notInstalled.getString("executable")).isEmpty()
     }
 
     @Test
@@ -453,6 +568,16 @@ class RendererActionsTest {
         assertThat(defaults.username).isEmpty()
         assertThat(defaults.osType).isEqualTo("linux")
         assertThat(defaults.agentTarget).isEqualTo("native")
+
+        // A Windows host that holds its Agent on Windows itself stores the literal the renderer sends for it.
+        val windows = RendererActions(source).handle(
+            "hosts.create",
+            payload(body = mapOf("nickname" to "windows-box", "hostname" to "windows.test", "os_type" to "windows", "agent_target" to "windows")),
+        )
+        assertThat(windows.status).isEqualTo(200)
+        assertThat(source.savedHosts.last().agentTarget).isEqualTo("windows")
+        assertThat(dataOf(windows).getString("target")).isEqualTo("windows-native")
+        assertThat(dataOf(windows).getBoolean("target_supported")).isTrue()
     }
 
     @Test
@@ -474,6 +599,7 @@ class RendererActionsTest {
             mapOf("nickname" to "n", "hostname" to "a.test", "username" to "col\nle"),
             mapOf("nickname" to "n", "hostname" to "a.test", "os_type" to "plan9"),
             mapOf("nickname" to "n", "hostname" to "a.test", "os_type" to "windows", "agent_target" to "Ubuntu"),
+            mapOf("nickname" to "n", "hostname" to "a.test", "os_type" to "windows", "agent_target" to "plan9"),
             mapOf("nickname" to "n", "hostname" to "a.test", "protocol" to "telnet"),
         )
         for (body in refused) {
@@ -606,23 +732,25 @@ class RendererActionsTest {
     }
 
     @Test
-    fun aWindowsHostsOwnAgentTargetIsNeverReportedAsUsable() = runTest {
-        val windows = savedHost.copy(id = 8, nickname = "windows-box", osType = "windows", agentTarget = "native")
+    fun aWindowsHostsOwnAgentTargetIsEnteredAndReportsThePathsFoundThere() = runTest {
+        val windows = savedHost.copy(id = 8, nickname = "windows-box", osType = "windows", agentTarget = "windows")
+        val detected = AgentAvailability(8L, AgentKind.KIMI, "C:\\Users\\colle\\AppData\\Local\\kimi\\kimi.exe", true)
         val source = FakeSource().apply {
             hosts = listOf(windows)
-            probeRows = mapOf(8L to AgentKind.entries.map { targetUnsupportedRow(8, it) })
+            probeRows = mapOf(8L to listOf(detected) + AgentKind.entries.filterNot { it == AgentKind.KIMI }.map { missingRow(8, it) })
         }
         val data = dataOf(RendererActions(source).handle("detection.refresh", payload(params = mapOf("hostId" to "host-8"))))
-        assertThat(data.getBoolean("target_supported")).isFalse()
+        assertThat(data.getBoolean("target_supported")).isTrue()
         assertThat(data.getString("target")).isEqualTo("windows-native")
         val agents = data.getJSONObject("detection").getJSONArray("agents")
         assertThat(agents.length()).isEqualTo(AgentKind.entries.size)
-        for (index in 0 until agents.length()) {
-            val agent = agents.getJSONObject(index)
-            assertThat(agent.getString("state")).describedAs(agent.getString("id")).isEqualTo("target_unsupported")
-            assertThat(agent.getString("executable")).describedAs(agent.getString("id")).isEmpty()
-            assertThat(agent.getString("error")).isEqualTo(WINDOWS_NATIVE_UNSUPPORTED)
-        }
+        val kimi = agents.getJSONObject(AgentKind.KIMI.ordinal)
+        assertThat(kimi.getString("state")).isEqualTo("available")
+        assertThat(kimi.getString("executable")).isEqualTo("C:\\Users\\colle\\AppData\\Local\\kimi\\kimi.exe")
+        // An Agent the Windows lookup did not find is reported as not installed, never as a guessed path.
+        val dsh = agents.getJSONObject(AgentKind.DSH.ordinal)
+        assertThat(dsh.getString("state")).isEqualTo("not_installed")
+        assertThat(dsh.getString("executable")).isEmpty()
     }
 
     @Test
@@ -984,6 +1112,8 @@ class RendererActionsTest {
         assertThat(index.getString("field")).isEqualTo("title")
         assertThat(index.getString("source")).isEqualTo("remote")
         assertThat(index.getString("conversation_id")).isEqualTo(RendererConversationId.of(dsh))
+        // A search row carries the label the conversation list shows it under, so no hit is drawn untitled.
+        assertThat(index.getString("title")).isEqualTo("部署脚本")
         assertThat(index.getBoolean("openable")).isTrue()
         val content = items.getJSONObject(1)
         assertThat(content.getString("kind")).isEqualTo("content")
@@ -991,6 +1121,7 @@ class RendererActionsTest {
         assertThat(content.getInt("line")).isEqualTo(12)
         assertThat(content.getString("snippet")).isEqualTo("部署到生产")
         assertThat(content.getString("host_id")).isEqualTo("host-7")
+        assertThat(content.getString("title")).isEqualTo("部署脚本")
         assertThat(content.getBoolean("openable")).isTrue()
         val coverage = data.getJSONObject("coverage")
         assertThat(coverage.getBoolean("complete")).isTrue()
@@ -1013,6 +1144,9 @@ class RendererActionsTest {
         val orphan = dataOf(RendererActions(gone).handle("search.sessions", payload(query = mapOf("q" to "部署")))).getJSONArray("items").getJSONObject(0)
         assertThat(orphan.getBoolean("openable")).isFalse()
         assertThat(orphan.getString("host_id")).isEqualTo("host-9")
+        // A conversation the product no longer holds has no title to report, so the row names its own session
+        // instead of borrowing a title from somewhere else.
+        assertThat(orphan.getString("title")).isEqualTo("session-gone")
     }
 
     /**
@@ -1238,8 +1372,12 @@ class RendererActionsTest {
         val cancelled = dataOf(actions.handle("queue.cancel", payload(params = mapOf("queueId" to "queue-1"))))
         assertThat(cancelled.getBoolean("cancelled")).isTrue()
         assertThat(cancelled.getBoolean("delivered")).isFalse()
+        // The withdrawal is the message's own terminal state, which the renderer books it under.
+        assertThat(cancelled.getString("state")).isEqualTo("withdrawn")
         assertThat(source.withdrawn).containsExactly("queue-1")
-        assertThat(source.queuedMessages).isEmpty()
+        // The row is still the product's own record of what happened; it is only no longer waiting for anything.
+        assertThat(source.queuedMessages.map { it.state }).containsExactly(AgentMessageState.WITHDRAWN)
+        assertThat(source.queued().map { it.state }).containsExactly(AgentMessageState.WITHDRAWN)
 
         val missing = actions.handle("queue.cancel", payload(params = mapOf("queueId" to "queue-404")))
         assertThat(missing.status).isEqualTo(404)
@@ -1257,6 +1395,278 @@ class RendererActionsTest {
         assertThat(refused.status).isEqualTo(409)
         assertThat(codeOf(refused)).isEqualTo("QUEUE_NOT_PENDING")
     }
+
+    /** A withdrawn message reports its own terminal state, is not a delivery, and is not pending again. */
+    @Test
+    fun aWithdrawnMessageKeepsItsOwnTerminalStateAndIsNeverPendingAgain() = runTest {
+        val withdrawn = AgentQueuedMessage(
+            id = "queue-2",
+            hostId = 7,
+            agent = "kimi",
+            sessionId = "session-a",
+            kind = AgentMessageKind.REQUEST,
+            text = "别发了",
+            createdAtMillis = 5,
+            state = AgentMessageState.WITHDRAWN,
+        )
+        val source = openSource().apply {
+            queuedMessages = listOf(withdrawn)
+            queuedStats = AgentMessageQueueStats(stored = 1, pending = 0, delivered = 0, withdrawn = 1, dropped = 0)
+        }
+        val actions = RendererActions(source)
+        val data = dataOf(actions.handle("queue.list", payload()))
+        val item = data.getJSONArray("items").getJSONObject(0)
+        assertThat(item.getString("state")).isEqualTo("withdrawn")
+        assertThat(item.getBoolean("pending")).isFalse()
+        assertThat(data.getJSONObject("stats").getInt("withdrawn")).isEqualTo(1)
+
+        // A withdrawn message is not waiting for anything, so it is not a pending row a second withdrawal could take.
+        val again = actions.handle("queue.cancel", payload(params = mapOf("queueId" to "queue-2")))
+        assertThat(again.status).isEqualTo(409)
+        assertThat(codeOf(again)).isEqualTo("QUEUE_NOT_PENDING")
+        assertThat(source.queuedMessages.map { it.state }).containsExactly(AgentMessageState.WITHDRAWN)
+    }
+
+    /**
+     * An upload buffers on this phone and lands in the open conversation's own directory: the same bytes, under the
+     * name the renderer sent, answered with the absolute path they ended up at, and the local buffer is gone.
+     */
+    @Test
+    fun anUploadLandsInTheOpenConversationsDirectory() = runTest {
+        val uploads = temporary.newFolder()
+        val source = openSource().apply { host = this@RendererActionsTest.host }
+        val actions = RendererActions(source, RendererAttachments(uploads, source))
+        val bytes = "截图内容".toByteArray()
+        val started = dataOf(actions.handle("attachment.begin", payload(conversation = true, body = uploadBody(bytes))))
+        assertThat(started.getInt("chunkBytes")).isEqualTo(RendererAttachments.CHUNK_BYTES)
+        assertThat(started.getInt("expiresInMs")).isEqualTo(RendererAttachments.UPLOAD_TTL_MILLIS.toInt())
+        val uploadId = started.getString("uploadId")
+
+        val ack = dataOf(
+            actions.handle(
+                "attachment.chunk",
+                payload(conversation = true, body = mapOf("uploadId" to uploadId, "offset" to 0, "data" to base64Of(bytes))),
+            ),
+        )
+        assertThat(ack.getInt("offset")).isEqualTo(bytes.size)
+
+        val finished = dataOf(actions.handle("attachment.finish", payload(conversation = true, body = mapOf("uploadId" to uploadId))))
+        assertThat(finished.getString("attachmentRef")).isEqualTo("/workspace/app/shot.png")
+        assertThat(finished.getString("path")).isEqualTo("/workspace/app/shot.png")
+        assertThat(finished.getString("name")).isEqualTo("shot.png")
+        assertThat(finished.getInt("size")).isEqualTo(bytes.size)
+        assertThat(finished.getString("sha256")).isEqualTo(sha256Of(bytes))
+        assertThat(finished.getString("source")).isEqualTo("mobile-upload")
+        assertThat(source.writtenFiles).containsExactly(Triple(7L, "/workspace/app", "shot.png"))
+        assertThat(String(source.wroteContent ?: ByteArray(0), Charsets.UTF_8)).isEqualTo("截图内容")
+        assertThat(uploads.listFiles().orEmpty()).isEmpty()
+    }
+
+    /** The write answers the path the host chose, so a name the directory already held is reported as it landed. */
+    @Test
+    fun anUploadAnsweredWithASuffixedNameReportsThatName() = runTest {
+        val uploads = temporary.newFolder()
+        val source = openSource().apply {
+            host = this@RendererActionsTest.host
+            writtenPath = "/workspace/app/shot-1.png"
+        }
+        val actions = RendererActions(source, RendererAttachments(uploads, source))
+        val bytes = "second".toByteArray()
+        val uploadId = dataOf(actions.handle("attachment.begin", payload(conversation = true, body = uploadBody(bytes)))).getString("uploadId")
+        actions.handle("attachment.chunk", payload(conversation = true, body = mapOf("uploadId" to uploadId, "offset" to 0, "data" to base64Of(bytes))))
+        val finished = dataOf(actions.handle("attachment.finish", payload(conversation = true, body = mapOf("uploadId" to uploadId))))
+        assertThat(finished.getString("attachmentRef")).isEqualTo("/workspace/app/shot-1.png")
+        assertThat(source.writtenFiles.single().third).isEqualTo("shot.png")
+        assertThat(uploads.listFiles().orEmpty()).isEmpty()
+    }
+
+    /** Every field the protocol states is checked before anything is buffered, and each refusal names itself. */
+    @Test
+    fun uploadBeginRefusesWhatCannotBeTrusted() = runTest {
+        val uploads = temporary.newFolder()
+        val source = openSource()
+        val actions = RendererActions(source, RendererAttachments(uploads, source))
+        val bytes = "content".toByteArray()
+        val refusals = listOf(
+            uploadBody(bytes, name = "a/b.png") to "INVALID_REQUEST",
+            uploadBody(bytes, name = "a\\b.png") to "INVALID_REQUEST",
+            uploadBody(bytes, name = "bad\u0001.png") to "INVALID_REQUEST",
+            uploadBody(bytes, name = ".") to "INVALID_REQUEST",
+            uploadBody(bytes, mime = "") to "INVALID_REQUEST",
+            uploadBody(bytes, size = 1.5) to "INVALID_REQUEST",
+            uploadBody(bytes, size = -1L) to "INVALID_REQUEST",
+            uploadBody(bytes, size = 8L * 1024 * 1024 + 1) to "UPLOAD_TOO_LARGE",
+            uploadBody(bytes, sha256 = "ABCDEF") to "INVALID_REQUEST",
+        )
+        for ((body, code) in refusals) {
+            val refused = actions.handle("attachment.begin", payload(conversation = true, body = body))
+            assertThat(refused.status).describedAs(body.toString()).isEqualTo(if (code == "UPLOAD_TOO_LARGE") 413 else 422)
+            assertThat(codeOf(refused)).describedAs(body.toString()).isEqualTo(code)
+        }
+        assertThat(uploads.listFiles().orEmpty()).isEmpty()
+        assertThat(source.writtenFiles).isEmpty()
+
+        // And an upload can only address the conversation that is open: another conversation's id names nothing here.
+        val other = AgentSession(hostId = 7, agent = AgentKind.DSH, sessionId = "session-b", cwd = "/workspace/app")
+        val refused = actions.handle(
+            "attachment.begin",
+            payload(params = mapOf("conversationId" to RendererConversationId.of(other)), body = uploadBody(bytes)),
+        )
+        assertThat(refused.status).isEqualTo(404)
+        assertThat(codeOf(refused)).isEqualTo("CONVERSATION_NOT_FOUND")
+    }
+
+    /** A chunk has to continue exactly where the upload ended, or the file would hold something nobody sent. */
+    @Test
+    fun chunksAndTheFinishStepRefuseAnUploadThatIsNotWhereItClaims() = runTest {
+        val uploads = temporary.newFolder()
+        val source = openSource()
+        val actions = RendererActions(source, RendererAttachments(uploads, source))
+        val bytes = "0123456789".toByteArray()
+        val uploadId = dataOf(actions.handle("attachment.begin", payload(conversation = true, body = uploadBody(bytes)))).getString("uploadId")
+
+        val gap = actions.handle("attachment.chunk", payload(conversation = true, body = mapOf("uploadId" to uploadId, "offset" to 3, "data" to base64Of(bytes))))
+        assertThat(gap.status).isEqualTo(409)
+        assertThat(codeOf(gap)).isEqualTo("UPLOAD_OFFSET_CONFLICT")
+        val notBase64 = actions.handle("attachment.chunk", payload(conversation = true, body = mapOf("uploadId" to uploadId, "offset" to 0, "data" to "***")))
+        assertThat(notBase64.status).isEqualTo(422)
+        assertThat(codeOf(notBase64)).isEqualTo("INVALID_REQUEST")
+
+        // A chunk longer than the declared file cannot belong to this upload, and the file stays where it was.
+        val overlong = actions.handle(
+            "attachment.chunk",
+            payload(conversation = true, body = mapOf("uploadId" to uploadId, "offset" to 0, "data" to base64Of(bytes + byteArrayOf(1)))),
+        )
+        assertThat(overlong.status).isEqualTo(413)
+        assertThat(codeOf(overlong)).isEqualTo("UPLOAD_TOO_LARGE")
+        assertThat(actions.handle("attachment.finish", payload(conversation = true, body = mapOf("uploadId" to uploadId))).status).isEqualTo(409)
+        assertThat(codeOf(actions.handle("attachment.finish", payload(conversation = true, body = mapOf("uploadId" to uploadId))))).isEqualTo("UPLOAD_INCOMPLETE")
+
+        val half = bytes.copyOfRange(0, 5)
+        val ack = dataOf(actions.handle("attachment.chunk", payload(conversation = true, body = mapOf("uploadId" to uploadId, "offset" to 0, "data" to base64Of(half)))))
+        assertThat(ack.getInt("offset")).isEqualTo(5)
+        val rest = dataOf(
+            actions.handle(
+                "attachment.chunk",
+                payload(conversation = true, body = mapOf("uploadId" to uploadId, "offset" to 5, "data" to base64Of(bytes.copyOfRange(5, bytes.size)))),
+            ),
+        )
+        assertThat(rest.getInt("offset")).isEqualTo(bytes.size)
+        assertThat(dataOf(actions.handle("attachment.finish", payload(conversation = true, body = mapOf("uploadId" to uploadId)))).getString("name")).isEqualTo("shot.png")
+
+        // An id this host never issued, and one it already finished, name no upload at all.
+        val unknown = actions.handle("attachment.chunk", payload(conversation = true, body = mapOf("uploadId" to "nope", "offset" to 0, "data" to base64Of(bytes))))
+        assertThat(unknown.status).isEqualTo(410)
+        assertThat(codeOf(unknown)).isEqualTo("UPLOAD_EXPIRED")
+        val expired = actions.handle("attachment.abort", payload(conversation = true, body = mapOf("uploadId" to uploadId)))
+        assertThat(expired.status).isEqualTo(410)
+        assertThat(codeOf(expired)).isEqualTo("UPLOAD_EXPIRED")
+        assertThat(uploads.listFiles().orEmpty()).isEmpty()
+    }
+
+    /** Content that does not hash to what was declared is dropped on this phone and never reaches a host. */
+    @Test
+    fun anUploadWhoseContentDoesNotMatchItsHashIsDiscarded() = runTest {
+        val uploads = temporary.newFolder()
+        val source = openSource()
+        val actions = RendererActions(source, RendererAttachments(uploads, source))
+        val sent = "sent".toByteArray()
+        val body = uploadBody("declared".toByteArray())
+        val uploadId = dataOf(actions.handle("attachment.begin", payload(conversation = true, body = body))).getString("uploadId")
+        actions.handle("attachment.chunk", payload(conversation = true, body = mapOf("uploadId" to uploadId, "offset" to 0, "data" to base64Of(sent))))
+        val mismatched = actions.handle("attachment.finish", payload(conversation = true, body = mapOf("uploadId" to uploadId)))
+        assertThat(mismatched.status).isEqualTo(422)
+        assertThat(codeOf(mismatched)).isEqualTo("UPLOAD_HASH_MISMATCH")
+        assertThat(source.writtenFiles).isEmpty()
+        assertThat(uploads.listFiles().orEmpty()).isEmpty()
+    }
+
+    /** A write the host refused is reported as that, and the local buffer is dropped with it. */
+    @Test
+    fun aWriteThatDidNotLandLeavesNothingBehind() = runTest {
+        val uploads = temporary.newFolder()
+        val source = openSource().apply { writeFailure = IOException("write_directory_missing") }
+        val actions = RendererActions(source, RendererAttachments(uploads, source))
+        val bytes = "payload".toByteArray()
+        val uploadId = dataOf(actions.handle("attachment.begin", payload(conversation = true, body = uploadBody(bytes)))).getString("uploadId")
+        actions.handle("attachment.chunk", payload(conversation = true, body = mapOf("uploadId" to uploadId, "offset" to 0, "data" to base64Of(bytes))))
+        val failed = actions.handle("attachment.finish", payload(conversation = true, body = mapOf("uploadId" to uploadId)))
+        assertThat(failed.status).isEqualTo(502)
+        assertThat(codeOf(failed)).isEqualTo("REMOTE_WRITE_FAILED")
+        assertThat((failed.body as JSONObject).getString("error")).contains("write_directory_missing")
+        assertThat(uploads.listFiles().orEmpty()).isEmpty()
+    }
+
+    /** An upload belongs to the conversation it was started on: a switched conversation discards it. */
+    @Test
+    fun anUploadIsOnlyWrittenToTheConversationItWasStartedOn() = runTest {
+        val uploads = temporary.newFolder()
+        val other = AgentSession(hostId = 8, agent = AgentKind.DSH, sessionId = "session-b", cwd = "/srv/other")
+        val source = openSource()
+        val actions = RendererActions(source, RendererAttachments(uploads, source))
+        val bytes = "payload".toByteArray()
+        val conversation = RendererConversationId.of(session)
+        val uploadId = dataOf(actions.handle("attachment.begin", payload(params = mapOf("conversationId" to conversation), body = uploadBody(bytes))))["uploadId"] as String
+        actions.handle("attachment.chunk", payload(conversation = true, body = mapOf("uploadId" to uploadId, "offset" to 0, "data" to base64Of(bytes))))
+
+        source.session = other
+        source.active = true
+        val switched = actions.handle("attachment.finish", payload(params = mapOf("conversationId" to conversation), body = mapOf("uploadId" to uploadId)))
+        assertThat(switched.status).isEqualTo(409)
+        assertThat(codeOf(switched)).isEqualTo("CONVERSATION_SWITCHED")
+        assertThat(source.writtenFiles).isEmpty()
+        assertThat(uploads.listFiles().orEmpty()).isEmpty()
+    }
+
+    /** A host whose target does not run POSIX commands has no attachment write yet, and says so instead of trying. */
+    @Test
+    fun aHostWithoutAPosixShellRefusesTheWrite() = runTest {
+        val uploads = temporary.newFolder()
+        val windows = savedHost.copy(osType = "windows", agentTarget = "windows")
+        val source = openSource().apply { host = windows }
+        val actions = RendererActions(source, RendererAttachments(uploads, source))
+        val bytes = "payload".toByteArray()
+        val uploadId = dataOf(actions.handle("attachment.begin", payload(conversation = true, body = uploadBody(bytes)))).getString("uploadId")
+        actions.handle("attachment.chunk", payload(conversation = true, body = mapOf("uploadId" to uploadId, "offset" to 0, "data" to base64Of(bytes))))
+        val refused = actions.handle("attachment.finish", payload(conversation = true, body = mapOf("uploadId" to uploadId)))
+        assertThat(refused.status).isEqualTo(502)
+        assertThat(codeOf(refused)).isEqualTo("REMOTE_WRITE_FAILED")
+        assertThat(source.writtenFiles).isEmpty()
+        assertThat(uploads.listFiles().orEmpty()).isEmpty()
+    }
+
+    /** The in-flight cap keeps the local buffer bounded, and aborting one frees its place again. */
+    @Test
+    fun theUploadCapIsVisibleAndAbortingFreesAPlace() = runTest {
+        val uploads = temporary.newFolder()
+        val source = openSource()
+        val actions = RendererActions(source, RendererAttachments(uploads, source))
+        val bytes = "payload".toByteArray()
+        val ids = (1..4).map {
+            dataOf(actions.handle("attachment.begin", payload(conversation = true, body = uploadBody(bytes)))).getString("uploadId")
+        }
+        val overflow = actions.handle("attachment.begin", payload(conversation = true, body = uploadBody(bytes)))
+        assertThat(overflow.status).isEqualTo(429)
+        assertThat(codeOf(overflow)).isEqualTo("UPLOAD_LIMIT")
+
+        val aborted = dataOf(actions.handle("attachment.abort", payload(conversation = true, body = mapOf("uploadId" to ids.first()))))
+        assertThat(aborted.getBoolean("aborted")).isTrue()
+        assertThat(actions.handle("attachment.begin", payload(conversation = true, body = uploadBody(bytes))).status).isEqualTo(201)
+        assertThat(uploads.listFiles().orEmpty()).hasSize(4)
+    }
+
+    /** One upload body as the renderer sends it: the name, the type, the size and the content's own sha256. */
+    private fun uploadBody(
+        bytes: ByteArray,
+        name: String = "shot.png",
+        mime: String = "image/png",
+        size: Any = bytes.size,
+        sha256: String = sha256Of(bytes),
+    ): Map<String, Any?> = mapOf("name" to name, "mime" to mime, "size" to size, "sha256" to sha256)
+
+    private fun sha256Of(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun base64Of(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
 
     /** A reference pack quotes the open window as bounded text and is never sent anywhere. */
     @Test
@@ -1338,10 +1748,11 @@ class RendererActionsTest {
         assertThat(networkPermissions(37)).containsExactly(nearby, local)
 
         val denied = { _: String -> false }
-        for (action in listOf("detection.refresh", "hosts.refresh", "conversations.create", "project.read", "search.sessions")) {
+        for (action in listOf("detection.refresh", "hosts.refresh", "conversations.create", "project.read", "search.sessions", "attachment.finish", "terminal.open", "terminal.command.start")) {
             assertThat(localNetworkRefused(action, networkPermissions(37), denied)).describedAs(action).isTrue()
         }
-        for (action in listOf("conversations.list", "queue.list", "inbox.list", "index.clear", "messages.list")) {
+        // The upload steps that only buffer a file on this phone reach no host, so no grant holds them back.
+        for (action in listOf("conversations.list", "queue.list", "inbox.list", "index.clear", "messages.list", "attachment.begin", "attachment.chunk", "attachment.abort")) {
             assertThat(localNetworkRefused(action, networkPermissions(37), denied)).describedAs(action).isFalse()
         }
         // Once the user granted what the route needs it runs again, and a system that needs no grant is never refused.
@@ -1513,6 +1924,27 @@ class RendererActionsTest {
         }
         assertThat(source.createdConversations).hasSize(1)
 
+        // The renderer's own new-conversation entry names the host in the body — `host_id`, and the camelCase
+        // spelling too — so a create that carries it there is served like one that carries it in the parameters.
+        for (request in listOf(
+            payload(body = mapOf("host_id" to "host-7", "agent" to "kimi", "cwd" to "/workspace/new")),
+            payload(body = mapOf("hostId" to "host-7", "agent" to "kimi", "cwd" to "/workspace/new")),
+            payload(params = mapOf("hostId" to "host-7", "agent" to "kimi", "cwd" to "/workspace/new")),
+        )) {
+            val perCase = FakeSource().apply {
+                hosts = listOf(savedHost)
+                created = AgentSession(hostId = 7, agent = AgentKind.KIMI, sessionId = "native-42", cwd = "/workspace/new")
+            }
+            val result = RendererActions(perCase).handle("conversations.create", request)
+            assertThat(result.status).describedAs(request.toString()).isEqualTo(200)
+            assertThat(perCase.createdConversations).describedAs(request.toString()).containsExactly(Triple(7L, AgentKind.KIMI, "/workspace/new"))
+            assertThat(dataOf(result).getString("session_id")).describedAs(request.toString()).isEqualTo("native-42")
+        }
+        // A host named nowhere is still a host nobody saved, whichever spelling a request tried.
+        val unnamed = RendererActions(source).handle("conversations.create", payload(body = mapOf("agent" to "kimi", "cwd" to "/workspace/new")))
+        assertThat(unnamed.status).isEqualTo(404)
+        assertThat(codeOf(unnamed)).isEqualTo("HOST_NOT_FOUND")
+
         // A directory the host cannot use is reported with the repository's own reason, not as a created session.
         val unreachable = FakeSource().apply {
             hosts = listOf(savedHost)
@@ -1541,7 +1973,8 @@ class RendererActionsTest {
             session = this@RendererActionsTest.session
             active = true
         }
-        val open = RendererActions(source).handle("terminal.open", payload(conversation = true))
+        val surface = FakeTerminal()
+        val open = RendererActions(source, terminal = surface).handle("terminal.open", payload(conversation = true))
         assertThat(open.status).isEqualTo(200)
         val data = dataOf(open)
         assertThat(data.getString("host_id")).isEqualTo("host-7")
@@ -1553,14 +1986,18 @@ class RendererActionsTest {
         assertThat(data.getString("target")).isEqualTo("posix")
         // The command is the product's own terminal route command for this session, unchanged on a POSIX host.
         assertThat(data.getString("command")).isEqualTo("cd -- '/workspace/app' && exec kimi --session 'session-a'")
-        // Nothing is launched here, and no credential leaves the host: the payload names the command alone.
+        // That command is what the product's own console was really started with, and only then says opened.
+        assertThat(data.getBoolean("opened")).isTrue()
+        assertThat(surface.starts).containsExactly(7L to "cd -- '/workspace/app' && exec kimi --session 'session-a'")
+        // No credential leaves the host: the payload names the command and nothing to log in with.
         assertThat(data.keys().asSequence().toList())
             .doesNotContain("intent", "activity", "component", "password", "key", "secret", "token")
 
         // A directory the caller typed is the directory the terminal is asked to start in.
-        val typed = dataOf(RendererActions(source).handle("terminal.open", payload(conversation = true, body = mapOf("cwd" to "/srv/app"))))
+        val typed = dataOf(RendererActions(source, terminal = surface).handle("terminal.open", payload(conversation = true, body = mapOf("cwd" to "/srv/app"))))
         assertThat(typed.getString("cwd")).isEqualTo("/srv/app")
         assertThat(typed.getString("command")).isEqualTo("cd -- '/srv/app' && exec kimi --session 'session-a'")
+        assertThat(surface.starts.last()).isEqualTo(7L to "cd -- '/srv/app' && exec kimi --session 'session-a'")
 
         // The TUI route answers the same command for a conversation that is indexed but not open, because the
         // TUI reads its session id from the index.
@@ -1568,14 +2005,17 @@ class RendererActionsTest {
             hosts = listOf(savedHost)
             sessions = listOf(this@RendererActionsTest.session)
         }
+        val tuiSurface = FakeTerminal()
         val tui = dataOf(
-            RendererActions(indexedOnly).handle(
+            RendererActions(indexedOnly, terminal = tuiSurface).handle(
                 "terminal.command.start",
                 payload(params = mapOf("conversationId" to RendererConversationId.of(this@RendererActionsTest.session))),
             ),
         )
         assertThat(tui.getString("session_id")).isEqualTo("session-a")
         assertThat(tui.getString("command")).isEqualTo("cd -- '/workspace/app' && exec kimi --session 'session-a'")
+        assertThat(tui.getBoolean("opened")).isTrue()
+        assertThat(tuiSurface.starts).containsExactly(7L to "cd -- '/workspace/app' && exec kimi --session 'session-a'")
 
         // A WSL host runs the same command through the Windows entry of its target.
         val wslSession = this@RendererActionsTest.session.copy(hostId = 8)
@@ -1583,29 +2023,64 @@ class RendererActionsTest {
             hosts = listOf(savedHost.copy(id = 8, nickname = "windows-box", osType = "windows", agentTarget = "wsl:Ubuntu-24.04"))
             sessions = listOf(wslSession)
         }
-        val wrapped = dataOf(RendererActions(wsl).handle("terminal.open", payload(params = mapOf("conversationId" to RendererConversationId.of(wslSession)))))
+        val wslSurface = FakeTerminal()
+        val wrapped = dataOf(RendererActions(wsl, terminal = wslSurface).handle("terminal.open", payload(params = mapOf("conversationId" to RendererConversationId.of(wslSession)))))
         assertThat(wrapped.getString("target")).isEqualTo("wsl:Ubuntu-24.04")
         assertThat(wrapped.getString("command")).startsWith("wsl.exe --distribution \"Ubuntu-24.04\"")
+        assertThat(wrapped.getBoolean("opened")).isTrue()
+        assertThat(wslSurface.starts.single().first).isEqualTo(8L)
 
         // A target this app has no shell entry for, and a directory nobody ever learned, each fail as themselves.
         val windowsNative = FakeSource().apply {
             hosts = listOf(savedHost.copy(id = 8, osType = "windows", agentTarget = "native"))
             sessions = listOf(wslSession)
         }
-        val unsupported = RendererActions(windowsNative).handle("terminal.open", payload(params = mapOf("conversationId" to RendererConversationId.of(wslSession))))
+        val refused = FakeTerminal()
+        val unsupported = RendererActions(windowsNative, terminal = refused).handle("terminal.open", payload(params = mapOf("conversationId" to RendererConversationId.of(wslSession))))
         assertThat(unsupported.status).isEqualTo(501)
         assertThat(codeOf(unsupported)).isEqualTo("TERMINAL_UNSUPPORTED")
+        // A target nothing can open a shell on is never handed to the console either.
+        assertThat(refused.starts).isEmpty()
         val noDirectory = FakeSource().apply {
             hosts = listOf(savedHost)
             sessions = listOf(this@RendererActionsTest.session.copy(cwd = ""))
         }
-        val unknownWorkspace = RendererActions(noDirectory).handle(
+        val unknownWorkspace = RendererActions(noDirectory, terminal = FakeTerminal()).handle(
             "terminal.open",
             payload(params = mapOf("conversationId" to RendererConversationId.of(this@RendererActionsTest.session.copy(cwd = "")))),
         )
         assertThat(unknownWorkspace.status).isEqualTo(409)
         assertThat(codeOf(unknownWorkspace)).isEqualTo("WORKSPACE_UNKNOWN")
-        assertThat(RendererActions(source).handle("terminal.open", payload(params = mapOf("conversationId" to "c1.7.6b696d69.73657373696f6e2d7a"))).status).isEqualTo(404)
+        assertThat(RendererActions(source, terminal = FakeTerminal()).handle("terminal.open", payload(params = mapOf("conversationId" to "c1.7.6b696d69.73657373696f6e2d7a"))).status).isEqualTo(404)
+    }
+
+    /**
+     * A hand-over that did not open a terminal is never answered as opened: a build without any terminal surface
+     * names that, and a start the system refused reports its own code with the reason the system gave.
+     */
+    @Test
+    fun aTerminalThatDidNotStartIsNeverReportedAsOpened() = runTest {
+        val source = FakeSource().apply {
+            hosts = listOf(savedHost)
+            sessions = listOf(this@RendererActionsTest.session)
+            session = this@RendererActionsTest.session
+            active = true
+        }
+        for (action in listOf("terminal.open", "terminal.command.start")) {
+            // No terminal surface at all: the command is still answered with, but nothing claims a console opened.
+            val withoutSurface = RendererActions(source).handle(action, payload(conversation = true))
+            assertThat(withoutSurface.status).describedAs(action).isEqualTo(501)
+            assertThat(codeOf(withoutSurface)).describedAs(action).isEqualTo("TERMINAL_UNSUPPORTED")
+            assertThat((withoutSurface.body as JSONObject).getBoolean("success")).describedAs(action).isFalse()
+
+            val failed = FakeTerminal().apply { result = RendererTerminal.Result.Failed("android.content.ActivityNotFoundException: no console") }
+            val refused = RendererActions(source, terminal = failed).handle(action, payload(conversation = true))
+            assertThat(refused.status).describedAs(action).isEqualTo(500)
+            assertThat(codeOf(refused)).describedAs(action).isEqualTo("TERMINAL_START_FAILED")
+            assertThat((refused.body as JSONObject).getString("error")).describedAs(action).contains("ActivityNotFoundException")
+            // The surface was asked exactly once, with this conversation's own host and command.
+            assertThat(failed.starts).describedAs(action).containsExactly(7L to "cd -- '/workspace/app' && exec kimi --session 'session-a'")
+        }
     }
 
     @Test
@@ -1625,8 +2100,9 @@ class RendererActionsTest {
             // Kimi is the Agent this host's probe found; the second row was ruled out and must not be chosen.
             availability = listOf(availableRow(7, AgentKind.KIMI), missingRow(7, AgentKind.OPENCODE))
         }
+        val surface = FakeTerminal()
         for (action in listOf("terminal.open", "terminal.command.start")) {
-            val result = RendererActions(installed).handle(action, payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to "/srv/app")))
+            val result = RendererActions(installed, terminal = surface).handle(action, payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to "/srv/app")))
             assertThat(result.status).describedAs(action).isEqualTo(200)
             val data = dataOf(result)
             assertThat(data.getString("host_id")).describedAs(action).isEqualTo("host-7")
@@ -1636,10 +2112,12 @@ class RendererActionsTest {
             assertThat(data.getString("target")).describedAs(action).isEqualTo("posix")
             // A saved host has no session of its own, so the command starts the Agent and resumes nothing.
             assertThat(data.getString("command")).describedAs(action).isEqualTo("cd -- '/srv/app' && exec kimi")
+            assertThat(data.getBoolean("opened")).describedAs(action).isTrue()
             assertThat(data.keys().asSequence().toList())
                 .describedAs(action)
                 .doesNotContain("session_id", "conversation_id", "password", "key", "secret", "token")
         }
+        assertThat(surface.starts).containsExactly(7L to "cd -- '/srv/app' && exec kimi", 7L to "cd -- '/srv/app' && exec kimi")
 
         // The conversation this product holds for that host is the Agent it already uses there, ahead of the order
         // the probe rows would pick.
@@ -1651,25 +2129,30 @@ class RendererActionsTest {
             active = true
             availability = listOf(availableRow(7, AgentKind.KIMI), availableRow(7, AgentKind.OPENCODE))
         }
-        val opened = dataOf(RendererActions(withConversation).handle("terminal.open", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to "/srv/app"))))
+        val chosenSurface = FakeTerminal()
+        val opened = dataOf(RendererActions(withConversation, terminal = chosenSurface).handle("terminal.open", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to "/srv/app"))))
         assertThat(opened.getString("agent")).isEqualTo("opencode")
         assertThat(opened.getString("command")).isEqualTo("cd -- '/srv/app' && exec opencode")
+        assertThat(chosenSurface.starts).containsExactly(7L to "cd -- '/srv/app' && exec opencode")
 
         // A WSL host wraps the same command once for its own target.
         val wsl = FakeSource().apply {
             hosts = listOf(savedHost.copy(id = 8, nickname = "windows-box", osType = "windows", agentTarget = "wsl:Ubuntu-24.04"))
             availability = listOf(availableRow(8))
         }
-        val wrapped = dataOf(RendererActions(wsl).handle("terminal.command.start", payload(params = mapOf("hostId" to "host-8"), body = mapOf("cwd" to "/srv/app"))))
+        val wslSurface = FakeTerminal()
+        val wrapped = dataOf(RendererActions(wsl, terminal = wslSurface).handle("terminal.command.start", payload(params = mapOf("hostId" to "host-8"), body = mapOf("cwd" to "/srv/app"))))
         assertThat(wrapped.getString("target")).isEqualTo("wsl:Ubuntu-24.04")
         assertThat(wrapped.getString("command")).startsWith("wsl.exe --distribution \"Ubuntu-24.04\"")
+        assertThat(wslSurface.starts.single().first).isEqualTo(8L)
     }
 
     @Test
     fun aHostWithoutAnAgentOrADirectoryRefusesToInventATerminalCommand() = runTest {
         // Nothing was ever probed here, so no Agent on this host is known to be installed.
+        val surface = FakeTerminal()
         val unprobed = FakeSource().apply { hosts = listOf(savedHost) }
-        val noAgent = RendererActions(unprobed).handle("terminal.open", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to "/srv/app")))
+        val noAgent = RendererActions(unprobed, terminal = surface).handle("terminal.open", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to "/srv/app")))
         assertThat(noAgent.status).isEqualTo(409)
         assertThat(codeOf(noAgent)).isEqualTo("AGENT_UNAVAILABLE")
 
@@ -1679,7 +2162,7 @@ class RendererActionsTest {
             hosts = listOf(savedHost)
             availability = listOf(missingRow(7, AgentKind.KIMI), targetUnsupportedRow(7, AgentKind.OPENCODE))
         }
-        val none = RendererActions(ruledOut).handle("terminal.command.start", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to "/srv/app")))
+        val none = RendererActions(ruledOut, terminal = surface).handle("terminal.command.start", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to "/srv/app")))
         assertThat(none.status).isEqualTo(409)
         assertThat(codeOf(none)).isEqualTo("AGENT_UNAVAILABLE")
 
@@ -1689,21 +2172,24 @@ class RendererActionsTest {
             availability = listOf(availableRow(7))
         }
         for (cwd in listOf(null, "", "srv/app", "/srv\napp")) {
-            val result = RendererActions(noDirectory).handle("terminal.open", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to cwd)))
+            val result = RendererActions(noDirectory, terminal = surface).handle("terminal.open", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to cwd)))
             assertThat(result.status).describedAs("$cwd").isEqualTo(422)
             assertThat(codeOf(result)).describedAs("$cwd").isEqualTo("INVALID_CWD")
         }
-        val notText = RendererActions(noDirectory).handle("terminal.open", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to 42)))
+        val notText = RendererActions(noDirectory, terminal = surface).handle("terminal.open", payload(params = mapOf("hostId" to "host-7"), body = mapOf("cwd" to 42)))
         assertThat(notText.status).isEqualTo(422)
         assertThat(codeOf(notText)).isEqualTo("INVALID_CWD")
 
         // An unnamed target and a host nobody saved are each refused as themselves.
-        val noTarget = RendererActions(noDirectory).handle("terminal.open", payload(body = mapOf("cwd" to "/srv/app")))
+        val noTarget = RendererActions(noDirectory, terminal = surface).handle("terminal.open", payload(body = mapOf("cwd" to "/srv/app")))
         assertThat(noTarget.status).isEqualTo(422)
         assertThat(codeOf(noTarget)).isEqualTo("TERMINAL_TARGET_UNKNOWN")
-        val unknownHost = RendererActions(noDirectory).handle("terminal.open", payload(params = mapOf("hostId" to "host-9"), body = mapOf("cwd" to "/srv/app")))
+        val unknownHost = RendererActions(noDirectory, terminal = surface).handle("terminal.open", payload(params = mapOf("hostId" to "host-9"), body = mapOf("cwd" to "/srv/app")))
         assertThat(unknownHost.status).isEqualTo(404)
         assertThat(codeOf(unknownHost)).isEqualTo("HOST_NOT_FOUND")
+
+        // A command this host refused to build never reaches the terminal surface at all.
+        assertThat(surface.starts).isEmpty()
     }
 
     @Test
@@ -2255,10 +2741,14 @@ class RendererActionsTest {
         assertThat(long.status).isEqualTo(413)
         assertThat((long.body as JSONObject).getString("code")).isEqualTo("DRAFT_TOO_LARGE")
 
-        val reference = jsonOf("kind" to "upload", "path" to "probe-upload:7f00c1c2-1111-2222-3333-444455556666")
-        val files = actions.handle("draft.save", payload(conversation = true, body = mapOf("text" to "草稿", "files" to JSONArray().put(reference))))
-        assertThat(files.status).isEqualTo(422)
-        assertThat((files.body as JSONObject).getString("code")).isEqualTo("ATTACHMENT_UNSUPPORTED")
+        // A draft is text alone, so a file reference is still refused — and its reason says where an attachment
+        // does travel, because a message now carries exactly this reference's path.
+        for (entry in listOf(jsonOf("kind" to "upload", "path" to "/workspace/app/shot.png"), "/workspace/app/shot.png")) {
+            val files = actions.handle("draft.save", payload(conversation = true, body = mapOf("text" to "草稿", "files" to JSONArray().put(entry))))
+            assertThat(files.status).describedAs(entry.toString()).isEqualTo(422)
+            assertThat((files.body as JSONObject).getString("code")).isEqualTo("ATTACHMENT_UNSUPPORTED")
+            assertThat((files.body as JSONObject).getString("error")).contains("消息").contains("草稿")
+        }
 
         val invalid = actions.handle("draft.save", payload(conversation = true, body = mapOf("text" to 42)))
         assertThat(invalid.status).isEqualTo(422)

@@ -42,6 +42,7 @@ import org.connectbot.data.entity.Host
 import org.connectbot.service.TerminalManager
 import org.connectbot.ui.navigation.ConnectBotNavHost
 import org.connectbot.ui.navigation.NavDestinations
+import org.connectbot.ui.navigation.TerminalRequest
 import org.connectbot.ui.theme.ConnectBotTheme
 import org.connectbot.util.IconStyle
 import org.connectbot.util.ThemeMode
@@ -66,6 +67,7 @@ fun ConnectBotApp(
     onHandOverToRenderer: () -> Unit = {},
     rendererFailureCode: String? = null,
     onRetryRenderer: () -> Unit = {},
+    terminalRequest: TerminalRequest? = null,
 ) {
     ConnectBotTheme(themeMode = themeMode) {
         when (appUiState) {
@@ -95,8 +97,9 @@ fun ConnectBotApp(
             is AppUiState.Ready -> {
                 // Migration, key protection and the authentication gate have all passed before this point.
                 // The renderer is then the product's main surface; a failure code keeps the Compose shell
-                // instead, so a failed handover can never loop straight back into the renderer.
-                val rendererActive = BuildConfig.RENDERER_ASSETS && !makingShortcut && rendererFailureCode == null
+                // instead, so a failed handover can never loop straight back into the renderer. A terminal
+                // hand-over also keeps the shell, because the console it asks for is an auxiliary route.
+                val rendererActive = BuildConfig.RENDERER_ASSETS && !makingShortcut && rendererFailureCode == null && terminalRequest == null
                 if (authRequired && !isAuthenticated && !makingShortcut) {
                     AuthenticationScreen(
                         onAuthenticationSuccess = onAuthenticationSuccess,
@@ -115,10 +118,13 @@ fun ConnectBotApp(
                                 navController = navController,
                                 // The shell is only the fallback: host management and the SSH terminal are its
                                 // entry, never the chat, which now belongs to the renderer.
-                                startDestination = NavDestinations.HOST_LIST,
+                                startDestination = terminalRequest
+                                    ?.let { "${NavDestinations.CONSOLE}/${it.hostId}" }
+                                    ?: NavDestinations.HOST_LIST,
                                 makingShortcut = makingShortcut,
                                 onSelectShortcut = onSelectShortcut,
                                 onNavigateToConsole = onNavigateToConsole,
+                                terminalRequest = terminalRequest,
                                 modifier = Modifier.weight(1f),
                             )
                         }

@@ -118,6 +118,54 @@ class RemoteWorkingDirectoryTest {
             assertFalse(failure is WorkingDirectoryUnreachableException)
         }
     }
+
+    /** A Windows target is checked with the Windows text, and its own answers mean the same three states. */
+    @Test
+    fun aWindowsTargetIsCheckedWithTheWindowsText() = runBlocking {
+        withTimeout(10000) {
+            val cwd = "C:\\work dir\\项目"
+            val host = CheckHost(answer = "cwd_ok")
+            RemoteWorkingDirectoryCheck(Dispatchers.IO).verify(host, cwd, RemoteTarget.WindowsNative)
+            val command = host.commands.single()
+            assertTrue(command, command.contains("Test-Path -LiteralPath 'C:\\work dir\\项目'"))
+            assertTrue(command, command.contains("-PathType Container"))
+            for (write in listOf("New-Item", "Set-Content", "Remove-Item", "mv ", "rm ")) {
+                assertFalse(command, command.contains(write))
+            }
+
+            // A directory that is gone, a file on that path and an answer nobody can read stay distinct.
+            val missing = CheckHost(answer = "cwd_missing")
+            val gone = runCatching {
+                RemoteWorkingDirectoryCheck(Dispatchers.IO).verify(missing, "C:\\gone", RemoteTarget.WindowsNative)
+            }.exceptionOrNull()
+            assertEquals(WorkingDirectoryProblem.MISSING, (gone as WorkingDirectoryUnreachableException).problem)
+            val file = CheckHost(answer = "cwd_not_directory")
+            val notDirectory = runCatching {
+                RemoteWorkingDirectoryCheck(Dispatchers.IO).verify(file, "C:\\work\\file.txt", RemoteTarget.WindowsNative)
+            }.exceptionOrNull()
+            assertEquals(WorkingDirectoryProblem.NOT_A_DIRECTORY, (notDirectory as WorkingDirectoryUnreachableException).problem)
+            val nonsense = CheckHost(answer = "")
+            val failed = runCatching {
+                RemoteWorkingDirectoryCheck(Dispatchers.IO).verify(nonsense, "C:\\work", RemoteTarget.WindowsNative)
+            }.exceptionOrNull()
+            assertEquals(WorkingDirectoryProblem.CHECK_FAILED, (failed as WorkingDirectoryUnreachableException).problem)
+        }
+    }
+
+    /** A path a Windows target cannot address fails as itself, without asking the host anything. */
+    @Test
+    fun aPosixPathIsNotAWindowsWorkingDirectory() = runBlocking {
+        withTimeout(10000) {
+            for (cwd in listOf("/work", "work", "", "C:work", "\\\\server")) {
+                val host = CheckHost(answer = "cwd_ok")
+                val failure = runCatching {
+                    RemoteWorkingDirectoryCheck(Dispatchers.IO).verify(host, cwd, RemoteTarget.WindowsNative)
+                }.exceptionOrNull()
+                assertEquals(cwd, WorkingDirectoryProblem.NOT_ABSOLUTE, (failure as WorkingDirectoryUnreachableException).problem)
+                assertTrue(host.commands.isEmpty())
+            }
+        }
+    }
 }
 
 private class CheckHost(answer: String = "", blockAnswer: Boolean = false, private val execFailure: IOException? = null) : HostSession {

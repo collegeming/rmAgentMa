@@ -29,6 +29,8 @@ import org.connectbot.agent.AgentMessageState
 import org.connectbot.agent.AgentQueuedMessage
 import org.connectbot.agent.AgentTranscriptHit
 import org.connectbot.agent.AgentTranscriptSkipReason
+import org.connectbot.agent.agentAttentionSignals
+import org.connectbot.agent.newestAgentError
 import org.connectbot.data.entity.Host
 import org.junit.Test
 import org.rmagentma.core.AgentEvent

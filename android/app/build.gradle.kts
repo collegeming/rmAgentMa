@@ -29,14 +29,31 @@ val prepareOssMoshArtifacts = tasks.register<PrepareMoshArtifacts>("prepareOssMo
     assetsDirectory.set(generatedOssMosh.map { it.dir("assets") })
 }
 
-// The frozen AionUi renderer stays a debug-only build input: it is packaged only when the caller passes the
-// freshly verified directory, and any missing or changed asset fails the build instead of falling back.
+// The frozen AionUi renderer stays an opt-in build input: it is packaged only when the caller passes the freshly
+// verified directory, and any missing or changed asset fails the build instead of falling back. A release build
+// needs the second opt-in, and its renderer entry turns on only once that variant declares a host surface of its
+// own, so a release never advertises a surface the APK does not carry.
 val rendererAssetsDir = providers.gradleProperty("RendererAssetsDir")
+val rendererReleaseAssets = providers.gradleProperty("RendererAssetsRelease").orNull == "true"
 val generatedRendererAssets = layout.buildDirectory.dir("generated/rendererAssets")
+val rendererPolicy = rootProject.projectDir.parentFile.resolve("renderer/assets/policy.json")
+val rendererReleaseManifest = file("src/release/AndroidManifest.xml")
+val rendererReleaseEntry =
+    rendererAssetsDir.isPresent &&
+        rendererReleaseAssets &&
+        rendererReleaseManifest.isFile &&
+        rendererReleaseManifest.readText().contains("org.connectbot.renderer.RendererHostActivity")
+if (rendererReleaseAssets && !rendererAssetsDir.isPresent)
+    error("RendererAssetsRelease requires -PRendererAssetsDir=<freshly audited renderer directory>")
+if (rendererReleaseAssets && !rendererReleaseEntry)
+    logger.warn("Release packaging carries the audited renderer assets without a release host surface; the renderer entry stays off.")
 
 abstract class PrepareRendererAssets : DefaultTask() {
     @get:InputDirectory
     abstract val sourceDirectory: DirectoryProperty
+
+    @get:InputFile
+    abstract val policyFile: RegularFileProperty
 
     @get:OutputDirectory
     abstract val outputDirectory: DirectoryProperty
@@ -127,8 +144,13 @@ android {
 
     buildTypes {
         release {
-            // Release never packages renderer assets, so the renderer host entry point stays unreachable there.
-            buildConfigField("Boolean", "RENDERER_ASSETS", "false")
+            // Assets travel into a release only under the explicit opt-in, and this flag follows the release
+            // variant's own host surface, so a shrink-only release keeps the fallback shell instead of promising
+            // a renderer entry it cannot start.
+            buildConfigField("Boolean", "RENDERER_ASSETS", rendererReleaseEntry.toString())
+            // No renderer-specific R8 or resource rule is needed: assets are not R8 inputs, the renderer host
+            // library is debug-only, and -dontobfuscate with -keep class org.connectbot.** keeps the class-name
+            // lookup the shell uses for a future release host surface working. CI proves the packaged asset set.
             manifestPlaceholders["memtagMode"] = "async"
             isShrinkResources = true
             isMinifyEnabled = true
@@ -239,6 +261,7 @@ if (rendererAssetsDir.isPresent) {
     val rendererAssetsSource = file(rendererAssetsDir.get())
     val prepareRendererAssets = tasks.register<PrepareRendererAssets>("prepareRendererAssets") {
         sourceDirectory.set(rendererAssetsSource)
+        policyFile.set(rendererPolicy)
         outputDirectory.set(generatedRendererAssets)
         doLast {
             val source = sourceDirectory.get().asFile.canonicalFile
@@ -264,7 +287,17 @@ if (rendererAssetsDir.isPresent) {
                 item["path"] to item
             }
             require(metadata["files"] == records.size && files.size == records.size) { "Renderer file count mismatch" }
-            require(files.keys.containsAll(setOf("index.html", "licenses/index.html", "THIRD_PARTY_NOTICES.txt"))) { "Renderer entry or licenses are not inventoried" }
+            require(files.keys.containsAll(setOf("index.html", "licenses/index.html", "licenses/coverage.json", "NOTICE", "THIRD_PARTY_NOTICES.txt"))) { "Renderer entry or licenses are not inventoried" }
+            val policy = policyFile.get().asFile
+            require(policy.isFile) { "The renderer asset policy is missing; no asset can be admitted" }
+            require(metadata["assetPolicySha256"] == digest(policy)) { "Renderer assets were audited under another asset policy; rebuild them" }
+            val assetAudit = metadata["assetAudit"] as? Map<*, *> ?: error("Missing renderer asset audit record")
+            require(assetAudit["schemaVersion"] == 1 && assetAudit["ok"] == true) { "Renderer asset audit did not pass; the excluded assets are not provably absent" }
+            val auditRules = assetAudit["rules"] as? List<*> ?: error("Missing enforced renderer asset rules")
+            require(auditRules.isNotEmpty() && auditRules.all { (it as? Map<*, *>)?.get("ok") == true }) { "A required renderer asset rule is not enforced" }
+            val closure = metadata["licenseClosure"] as? Map<*, *> ?: error("Missing renderer license closure record")
+            require(closure["schemaVersion"] == 1 && closure["ok"] == true) { "Renderer license closure did not pass; every product file needs a license entry" }
+            require(closure["coverageSha256"] == (files["licenses/coverage.json"] as? Map<*, *>)?.get("sha256")) { "Renderer license mapping does not match its packaged file" }
             val root = source.toPath()
             for ((name, record) in files) {
                 val item = record as Map<*, *>
@@ -290,6 +323,12 @@ if (rendererAssetsDir.isPresent) {
     androidComponents {
         onVariants(selector().withBuildType("debug")) { variant ->
             variant.sources.assets?.addGeneratedSourceDirectory(prepareRendererAssets, PrepareRendererAssets::outputDirectory)
+        }
+        if (rendererReleaseAssets) {
+            // The same audited directory serves the release variants; the entry flag above stays independent of it.
+            onVariants(selector().withBuildType("release")) { variant ->
+                variant.sources.assets?.addGeneratedSourceDirectory(prepareRendererAssets, PrepareRendererAssets::outputDirectory)
+            }
         }
     }
 }

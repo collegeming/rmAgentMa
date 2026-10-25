@@ -27,6 +27,8 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.assertj.core.api.Assertions.assertThat
 import org.connectbot.agent.AgentConversationState
 import org.connectbot.agent.AgentDraftStore
@@ -46,6 +48,7 @@ import org.mockito.Mockito.mock
 import org.mockito.Mockito.`when`
 import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentKind
+import org.rmagentma.core.AgentOption
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.DIRECTORY_LISTING_MAX_ENTRIES
 import org.rmagentma.core.DirectoryListing
@@ -63,6 +66,7 @@ class AgentRendererSourceTest {
     private val active = MutableStateFlow<AgentSession?>(null)
     private val selected = MutableStateFlow<AgentSession?>(null)
     private val liveLinks = MutableStateFlow<Map<Long, AgentLinkState>>(emptyMap())
+    private val events = MutableStateFlow<List<AgentEvent>>(emptyList())
     private lateinit var repository: AgentRepository
     private lateinit var pool: AgentSshPool
     private lateinit var source: AgentRendererSource
@@ -73,7 +77,7 @@ class AgentRendererSourceTest {
         repository = mock(AgentRepository::class.java)
         `when`(repository.activeSession).thenReturn(active)
         `when`(repository.selectedSession).thenReturn(selected)
-        `when`(repository.events).thenReturn(MutableStateFlow<List<AgentEvent>>(emptyList()))
+        `when`(repository.events).thenReturn(events)
         `when`(repository.busy).thenReturn(MutableStateFlow(false))
         `when`(repository.errors).thenReturn(MutableStateFlow(emptyList()))
         `when`(repository.conversationState).thenReturn(MutableStateFlow(AgentConversationState.Closed))
@@ -196,6 +200,98 @@ class AgentRendererSourceTest {
         advanceUntilIdle()
         assertThat(frames.map { it.first }).containsExactly("realtime.reconnected")
         assertThat(frames.single().second.getBoolean("reconnected")).isTrue()
+    }
+
+    /**
+     * A live frame is the renderer's own stream message, whose payload it reads from `data`; the rows this host
+     * answers as history keep that payload under `content`, because the conversation list draws those rows as they
+     * are. One event of each kind therefore reaches the renderer in the shape its own reader expects — and never in
+     * the other one.
+     */
+    @Test
+    fun liveFramesCarryTheirPayloadUnderDataWhileHistoryRowsKeepContent() = runTest {
+        val session = AgentSession(hostId = 7, agent = AgentKind.KIMI, sessionId = "session-a", cwd = "/work/a")
+        active.value = session
+        val frames = mutableListOf<Pair<String, JSONObject>>()
+        source.open { name, data, _, _ -> frames += name to data }
+        advanceUntilIdle()
+
+        events.value = listOf(
+            AgentEvent(type = "user", text = "你好", historyKey = 1),
+            AgentEvent(type = "thinking", text = "先读代码", historyKey = 2),
+            AgentEvent(
+                type = "tool",
+                id = "call-1",
+                title = "读取文件",
+                raw = buildJsonObject {
+                    put("toolCallId", "call-1")
+                    put("title", "读取文件")
+                    put("status", "running")
+                },
+                historyKey = 3,
+            ),
+            AgentEvent(
+                type = "permission",
+                id = "req-1",
+                title = "写文件",
+                text = "请求写入",
+                options = listOf(AgentOption("allow_once", "允许一次")),
+                historyKey = 4,
+            ),
+            AgentEvent(
+                type = "usage",
+                raw = buildJsonObject {
+                    put("used", 12)
+                    put("size", 100)
+                },
+                historyKey = 5,
+            ),
+            AgentEvent(type = "complete", status = "end_turn", historyKey = 6),
+        )
+        advanceUntilIdle()
+
+        val stream = frames.filter { it.first == "message.stream" }.map { it.second }
+        // The open conversation's own catalogue is published on the same channel in the same frame shape; it is not
+        // an event row, so the event frames here are the ones carrying the history-key message id.
+        val catalog = stream.single { it.getString("type") == "acp_config_option" }
+        assertThat(catalog.has("data")).isTrue()
+        assertThat(catalog.has("content")).isFalse()
+        val eventFrames = stream.filter { it.optString("msg_id").isNotEmpty() }
+        assertThat(eventFrames).hasSize(6)
+        eventFrames.forEach { frame ->
+            assertThat(frame.has("data")).describedAs(frame.toString()).isTrue()
+            assertThat(frame.has("content")).describedAs(frame.toString()).isFalse()
+            assertThat(frame.getString("conversation_id")).isEqualTo(RendererConversationId.of(session))
+            assertThat(frame.getString("msg_id")).startsWith("m")
+            assertThat(frame.getString("type")).isNotBlank()
+        }
+        fun frameOf(key: Long): JSONObject = eventFrames.single { it.getString("msg_id") == "m$key" }
+        // A text row keeps the renderer's replace flag, which it reads from inside the frame's data.
+        assertThat(frameOf(1).getString("type")).isEqualTo("text")
+        assertThat(frameOf(1).getString("position")).isEqualTo("right")
+        assertThat(frameOf(1).getJSONObject("data").getString("content")).isEqualTo("你好")
+        assertThat(frameOf(1).getJSONObject("data").getBoolean("replace")).isTrue()
+        assertThat(frameOf(2).getString("type")).isEqualTo("thinking")
+        assertThat(frameOf(2).getJSONObject("data").getString("content")).isEqualTo("先读代码")
+        assertThat(frameOf(3).getString("type")).isEqualTo("acp_tool_call")
+        assertThat(frameOf(3).getJSONObject("data").getJSONObject("update").getString("tool_call_id")).isEqualTo("call-1")
+        assertThat(frameOf(4).getString("type")).isEqualTo("acp_permission")
+        assertThat(frameOf(4).getJSONObject("data").getString("request_id")).isEqualTo("req-1")
+        assertThat(frameOf(5).getString("type")).isEqualTo("acp_context_usage")
+        assertThat(frameOf(5).getJSONObject("data").getInt("used")).isEqualTo(12)
+        assertThat(frameOf(5).getJSONObject("data").getInt("size")).isEqualTo(100)
+        assertThat(frameOf(6).getString("type")).isEqualTo("finish")
+        assertThat(frameOf(6).getJSONObject("data").getString("outcome")).isEqualTo("completed")
+
+        // The same events as history rows are the shape messages.list answers: the payload under `content`.
+        val rows = RendererProjection.messages(events.value, RendererConversationId.of(session), "epoch-1", null)
+        assertThat(rows).hasSize(6)
+        rows.forEach { row ->
+            assertThat(row.has("content")).describedAs(row.toString()).isTrue()
+            assertThat(row.has("data")).describedAs(row.toString()).isFalse()
+        }
+        assertThat(rows[0].getJSONObject("content").getString("content")).isEqualTo("你好")
+        assertThat(rows[5].getString("type")).isEqualTo("finish")
     }
 }
 

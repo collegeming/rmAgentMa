@@ -11,12 +11,12 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import HostCard from './HostCard';
 import HostEditorDialog from './HostEditorDialog';
-import { deleteHost, hostFailureText, listHosts, refreshDetection } from './hostsApi';
+import { deleteHost, hostFailureText, listHosts, refreshHost } from './hostsApi';
 
 /**
  * The host page: the product's own saved SSH hosts, each with the Agent target it runs and the probe verdict
  * that host already holds. Every host request of this page is one the host itself answers — a refusal shows
- * the code and reason it returned, and a failed probe keeps the verdicts that were there before.
+ * the code and reason it returned, and a failed refresh keeps the verdicts that were there before.
  */
 const HostsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -53,21 +53,30 @@ const HostsPage: React.FC = () => {
       return next;
     });
 
-  const probe = async (host: SavedHost) => {
+  /**
+   * Refreshing a host is the host's own refresh entry: it probes the Agent target again *and* rescans that
+   * host's session index, which is what makes the history of a freshly selected host current. A refusal keeps
+   * the verdicts the row already showed — a failed refresh replaces nothing with an invented one.
+   */
+  const refresh = async (host: SavedHost) => {
     setRefreshing((current) => ({ ...current, [host.id]: true }));
     setFailure(host.id, null);
     try {
-      const answer = await refreshDetection(host.id);
-      if (!answer?.detection || !Array.isArray(answer.detection.agents)) throw new Error('HOST_DETECTION_INVALID');
+      const answer = await refreshHost(host.id);
+      if (!answer?.detection || !Array.isArray(answer.detection.agents)) throw new Error('HOST_REFRESH_INVALID');
       setHosts((current) =>
         current.map((row) =>
           row.id === host.id
-            ? { ...row, target: answer.target, target_supported: answer.target_supported, detection: answer.detection }
+            ? {
+                ...row,
+                detection: answer.detection,
+                session_count: Number.isFinite(answer.sessions) ? answer.sessions : row.session_count,
+              }
             : row
         )
       );
     } catch (error) {
-      // The row keeps what it showed before: a failed probe replaces no verdict with an invented one.
+      // The row keeps what it showed before: a failed refresh replaces no verdict with an invented one.
       setFailure(host.id, hostFailureText(error, t));
     } finally {
       setRefreshing((current) => ({ ...current, [host.id]: false }));
@@ -152,7 +161,7 @@ const HostsPage: React.FC = () => {
                 host={host}
                 refreshing={Boolean(refreshing[host.id])}
                 failure={failures[host.id] ?? null}
-                onRefresh={() => void probe(host)}
+                onRefresh={() => void refresh(host)}
                 onEdit={() => setEditor({ visible: true, host })}
                 onDelete={() => void remove(host)}
               />

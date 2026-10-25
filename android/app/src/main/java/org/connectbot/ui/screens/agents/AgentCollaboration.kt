@@ -19,13 +19,11 @@ package org.connectbot.ui.screens.agents
 
 import org.connectbot.R
 import org.connectbot.agent.AgentAttentionReason
-import org.connectbot.agent.AgentAttentionSignal
 import org.connectbot.agent.AgentContextPack
 import org.connectbot.agent.AgentContextPackStatus
 import org.connectbot.agent.AgentMessageKind
 import org.connectbot.agent.AgentQueuedMessage
 import org.connectbot.agent.AgentTranscriptSkipReason
-import org.rmagentma.core.AgentEvent
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.TranscriptSearchProblem
 
@@ -89,38 +87,6 @@ internal fun agentQuotePrefill(pack: AgentContextPack): String? =
 /** Whether the pack left messages or characters out, which the input box cannot show by itself. */
 internal fun agentQuoteTrimmed(pack: AgentContextPack): Boolean = pack.status == AgentContextPackStatus.TRIMMED
 
-/**
- * The attention signals the app can honestly report. Only the loaded conversation is live, so it is the only one
- * that gets a row: another conversation's approvals and questions are unknown here, and an unknown error stays null
- * instead of borrowing whatever failure was reported last.
- */
-internal fun agentAttentionSignals(
-    session: AgentSession?,
-    events: List<AgentEvent>,
-    busy: Boolean,
-    conversationActive: Boolean,
-    hasEarlier: Boolean,
-): List<AgentAttentionSignal> {
-    if (session == null) return emptyList()
-    val details = applyPendingApprovals(projectSessionDetails(events, hasEarlier), conversationActive)
-    return listOf(
-        AgentAttentionSignal(
-            session = session,
-            busy = busy,
-            pendingApprovals = details.approvals.count { it.type == PERMISSION_EVENT && it.pending },
-            pendingQuestions = details.approvals.count { it.type == QUESTION_EVENT && it.pending },
-            lastError = newestAgentError(events),
-        ),
-    )
-}
-
-/** The conversation's own newest recorded failure; a failure this window never saw is reported as null, not guessed. */
-internal fun newestAgentError(events: List<AgentEvent>): String? = events
-    .lastOrNull { it.type == ERROR_EVENT }
-    ?.text
-    ?.trim()
-    ?.takeIf { it.isNotEmpty() }
-
 /** How a queued message is named where the user chooses between the two hand-off semantics. */
 internal fun agentMessageKindText(kind: AgentMessageKind): Int = when (kind) {
     AgentMessageKind.REQUEST -> R.string.agent_message_kind_request
@@ -160,9 +126,3 @@ internal fun agentTranscriptProblemText(problem: TranscriptSearchProblem): Int =
     TranscriptSearchProblem.FAILED -> R.string.agent_transcript_problem_failed
     TranscriptSearchProblem.INCOMPLETE -> R.string.agent_transcript_problem_incomplete
 }
-
-private const val PERMISSION_EVENT = "permission"
-
-private const val QUESTION_EVENT = "question"
-
-private const val ERROR_EVENT = "error"

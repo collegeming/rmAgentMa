@@ -29,4 +29,5 @@ node "$work_dir/node_modules/vitest/vitest.mjs" run --config "$GITHUB_WORKSPACE/
   --reporter=default --reporter=json --outputFile="$reports/build-tools-tests.json" 2>&1 | tee "$reports/build-tools-tests.log"
 node renderer/scripts/build.mjs --workdir "$work_dir" --output "$output_dir" 2>&1 | tee "$reports/build.log"
 node renderer/scripts/check-assets.mjs --dir "$work_dir/out/renderer" --workdir "$work_dir" 2>&1 | tee "$reports/asset-audit.log"
+node renderer/scripts/check-licenses.mjs --dir "$output_dir" --report "$reports/license-closure.json" 2>&1 | tee "$reports/license-closure.log"
 node renderer/scripts/build.mjs --verify "$output_dir" 2>&1 | tee "$reports/manifest-verification.log"

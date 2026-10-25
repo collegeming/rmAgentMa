@@ -21,6 +21,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -49,8 +50,11 @@ class RemoteAgentProbe(private val ioDispatcher: CoroutineDispatcher = Dispatche
         zcodeExecutable: String? = null,
         target: RemoteTarget = RemoteTarget.Posix,
     ): List<AgentAvailability> {
-        // A target the app cannot enter has no installation to report, and its verdict is that fact rather than
-        // an unreachable host. The same target refuses the launch, so no session opens from this answer.
+        // A Windows target is entered with the Windows lookup instead of the POSIX probe script. Every target this
+        // app knows is supported, so the guard below is reached only by a target with no entry in the app at all —
+        // none exists today, and a test's own target is the only way to it: that target holds no installation to
+        // report, that fact is its verdict rather than a connection failure, and no session opens from this answer.
+        if (target is RemoteTarget.WindowsNative) return windowsProbe(host)
         if (!target.supported) {
             return AgentKind.entries.map { AgentAvailability(host.hostId, it, "", false, WINDOWS_NATIVE_UNSUPPORTED) }
         }
@@ -102,6 +106,85 @@ class RemoteAgentProbe(private val ioDispatcher: CoroutineDispatcher = Dispatche
         }
         return AgentKind.entries.map { kind ->
             rows[kind] ?: AgentAvailability(host.hostId, kind, "", false, failure)
+        }
+    }
+
+    /**
+     * The installations a Windows target holds, read with the Windows lookup itself (`where`, printed for one
+     * Agent per line). Only a path Windows really resolved is reported, and it is reported as the whole detection:
+     * nothing here claims a version or a protocol capability, because nothing on this path ran the Agent.
+     *
+     * An answer that could not be read at all — no PowerShell on the host, or a line this app cannot parse — is
+     * the lookup's own verdict, reported as `windows_native_unsupported` rather than as a missing installation; an
+     * Agent the lookup really did not find is reported as exactly that, and a lookup that never reached the host
+     * keeps the probe's own transport code instead of claiming either.
+     */
+    private suspend fun windowsProbe(host: HostSession): List<AgentAvailability> = withContext(ioDispatcher) {
+        val answers = try {
+            withTimeout(WINDOWS_PROBE_TIMEOUT_MILLIS) { readWindowsLookup(host) }
+        } catch (_: TimeoutCancellationException) {
+            // Nothing answered in time, so no installation is claimed and the host keeps what it detected before.
+            return@withContext transportFailure(host)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // The lookup never reached the host: that is a connection failure rather than a missing installation.
+            return@withContext transportFailure(host)
+        }
+        AgentKind.entries.map { kind ->
+            val executable = answers?.get(kind)
+            when {
+                answers == null -> AgentAvailability(host.hostId, kind, "", false, WINDOWS_NATIVE_UNSUPPORTED)
+                executable == null -> AgentAvailability(host.hostId, kind, "", false, "executable_missing")
+                else -> AgentAvailability(host.hostId, kind, executable, true)
+            }
+        }
+    }
+
+    /** Every Agent on a host this probe never reached, reported with the probe's own transport code. */
+    private fun transportFailure(host: HostSession): List<AgentAvailability> =
+        AgentKind.entries.map { AgentAvailability(host.hostId, it, "", false, "probe_transport_failed") }
+
+    /** One bounded Windows lookup run: every line is one answer, and null means no answer could be read at all. */
+    private suspend fun readWindowsLookup(host: HostSession): Map<AgentKind, String?>? {
+        val channel = host.exec(windowsLookupCommand(AgentKind.entries))
+        val answers = mutableMapOf<AgentKind, String?>()
+        var readable = true
+        try {
+            val reader = NdjsonReader(channel.stdout, WINDOWS_LOOKUP_MAX_BYTES)
+            while (true) {
+                val line = runInterruptible { reader.readLine() } ?: break
+                if (line.isBlank()) continue
+                if (!record(line, answers)) {
+                    readable = false
+                    break
+                }
+            }
+        } finally {
+            runCatching { channel.close() }
+        }
+        return answers.takeIf { readable && it.isNotEmpty() }
+    }
+
+    /** Reads one lookup answer into [answers], and answers false for a line this app cannot use. */
+    private fun record(line: String, answers: MutableMap<AgentKind, String?>): Boolean {
+        val parts = line.split(" ", limit = 3)
+        if (parts[0] == WINDOWS_LOOKUP_UNAVAILABLE) return false
+        val kind = parts.getOrNull(1)?.let { name -> AgentKind.entries.firstOrNull { it.command == name } } ?: return false
+        return when (parts[0]) {
+            WINDOWS_LOOKUP_MISSING -> {
+                answers[kind] = null
+                true
+            }
+
+            // A path the app cannot address as a Windows path is not a path it may launch.
+            WINDOWS_LOOKUP_FOUND -> {
+                val path = parts.getOrNull(2).orEmpty().trim().takeIf(::isWindowsAbsolutePath) ?: return false
+                answers[kind] = path
+                true
+            }
+
+            else -> false
         }
     }
 }
@@ -167,3 +250,9 @@ internal suspend fun readRemoteJson(
         }
     }
 }
+
+/** One Windows lookup answers within this bound, so a host that never replies cannot hold a probe open. */
+private const val WINDOWS_PROBE_TIMEOUT_MILLIS: Long = 30_000
+
+/** One lookup prints one short line per Agent; anything past this is not the answer this app asked for. */
+private const val WINDOWS_LOOKUP_MAX_BYTES = 16 * 1024

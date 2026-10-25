@@ -52,6 +52,14 @@ import org.connectbot.ui.screens.settings.SettingsScreen
 import org.connectbot.util.IconStyle
 import timber.log.Timber
 
+/**
+ * One terminal hand-over the shell has to serve: the saved host whose console is to be opened and the command its
+ * own terminal route runs there, which the console offers for confirmation before anything is typed into the
+ * session. It is how a request that arrives outside the Compose navigation — the renderer host starting this
+ * activity — enters the same route the Compose TUI pane uses.
+ */
+data class TerminalRequest(val hostId: Long, val command: String)
+
 @Composable
 fun ConnectBotNavHost(
     navController: NavHostController,
@@ -60,9 +68,18 @@ fun ConnectBotNavHost(
     startDestination: String = NavDestinations.HOST_LIST,
     makingShortcut: Boolean = false,
     onSelectShortcut: (Host, String?, IconStyle) -> Unit = { _, _, _ -> },
+    terminalRequest: TerminalRequest? = null,
 ) {
-    var terminalLaunch by androidx.compose.runtime.remember {
-        androidx.compose.runtime.mutableStateOf<Pair<Long, String>?>(null)
+    // The terminal hand-over the shell still has to serve — the host whose console is to be opened and the command
+    // that console offers for confirmation — is kept as its own two primitives rather than as a pair, because both
+    // have to survive a configuration change: a command the console already handled must not be offered a second
+    // time, while a hand-over that was never handled is still offered after one. A request that arrives from
+    // outside the navigation (the renderer host) seeds both.
+    var launchHostId by androidx.compose.runtime.saveable.rememberSaveable {
+        androidx.compose.runtime.mutableStateOf(terminalRequest?.hostId ?: 0L)
+    }
+    var launchCommand by androidx.compose.runtime.saveable.rememberSaveable {
+        androidx.compose.runtime.mutableStateOf(terminalRequest?.command.orEmpty())
     }
     NavHost(
         navController = navController,
@@ -117,7 +134,8 @@ fun ConnectBotNavHost(
                 onKeys = { navController.navigateSafely(NavDestinations.PUBKEY_LIST) },
                 onHosts = { navController.navigateSafely(NavDestinations.HOST_LIST) },
                 onOpenTerminal = { host, command ->
-                    terminalLaunch = command?.let { host.id to it }
+                    launchHostId = host.id
+                    launchCommand = command.orEmpty()
                     onNavigateToConsole(host)
                 },
             )
@@ -131,7 +149,7 @@ fun ConnectBotNavHost(
         ) { entry ->
             ConsoleScreen(
                 onNavigateBack = {
-                    terminalLaunch = null
+                    launchCommand = ""
                     navController.safePopBackStack()
                 },
                 onNavigateToPortForwards = { hostIdForPortForwards ->
@@ -140,11 +158,13 @@ fun ConnectBotNavHost(
                 onNavigateToSettings = {
                     navController.navigateSafely(NavDestinations.SETTINGS_HIGHLIGHT_CONN_PERSIST)
                 },
-                pendingAgentCommand = terminalLaunch?.takeIf {
-                    it.first == entry.arguments?.getLong(NavArgs.HOST_ID)
-                }?.second,
-                agentCommandHostId = terminalLaunch?.first,
-                onHandleAgentCommand = { terminalLaunch = null },
+                pendingAgentCommand = launchCommand.takeIf {
+                    it.isNotBlank() && launchHostId == entry.arguments?.getLong(NavArgs.HOST_ID)
+                },
+                agentCommandHostId = launchHostId.takeIf { it > 0L },
+                // The command was offered and answered, so it is dropped; the host id stays, because it is the
+                // identity this hand-over was addressed to and carries no command of its own.
+                onHandleAgentCommand = { launchCommand = "" },
             )
         }
 

@@ -45,8 +45,17 @@ apks = {
     "rmAgentMa-app-renderer-debug.apk": product_apk,
 }
 expected = {"asset-manifest.json", "renderer-build.json"} | {record["path"] for record in manifest["files"]}
+audited_licenses = {"index.html", "NOTICE", "THIRD_PARTY_NOTICES.txt", "licenses/index.html", "licenses/coverage.json"}
+assert audited_licenses <= expected, f"verified renderer lacks license evidence: {sorted(audited_licenses - expected)}"
 verify_renderer_assets(apks["rmAgentMa-host-probe-debug.apk"], expected)
 verify_renderer_assets(product_apk, expected)
+
+# The release variant carries the same audited assets; shrinkResources and R8 must not drop any of them. The APK
+# stays unsigned here because CI holds no release key, and the release renderer entry stays off until the release
+# variant declares a host surface of its own.
+release_apk = root / "android/app/build/outputs/apk/oss/release/app-oss-release-unsigned.apk"
+assert release_apk.is_file(), "The release build must package the same audited renderer assets"
+verify_renderer_assets(release_apk, expected)
 
 sdk = Path(os.environ["ANDROID_HOME"])
 signers = sorted(sdk.glob("build-tools/*/apksigner"), key=lambda path: tuple(int(part) for part in path.parent.name.split(".")) if all(part.isdigit() for part in path.parent.name.split(".")) else (0,))
@@ -58,6 +67,9 @@ for name, source in apks.items():
     assert "certificate SHA-256 digest:" in certificate, "Missing signing certificate fingerprint"
     (output / (name + ".certificate.txt")).write_text(certificate + "\n", encoding="utf-8")
     apk_records.append({"path": name, "sha256": digest(output / name), "certificate": name + ".certificate.txt"})
+
+release_name = "rmAgentMa-app-renderer-release-unsigned.apk"
+shutil.copy2(release_apk, output / release_name)
 
 shutil.copytree(renderer, output / "renderer")
 shutil.copy2(temporary / "renderer-tools/tools.json", output / "tools.json")
@@ -96,6 +108,13 @@ provenance = {
         "path": product_apk.relative_to(root).as_posix(),
         "sha256": digest(product_apk),
         "rendererAssets": "assets/renderer/** verified byte-identical to renderer/",
+    },
+    "rendererReleaseApk": {
+        "path": release_name,
+        "sha256": digest(output / release_name),
+        "signed": False,
+        "rendererAssets": "assets/renderer/** verified byte-identical to renderer/, NOTICE and licenses/coverage.json included",
+        "rendererEntry": "off: -PRendererAssetsRelease=true packages the audited assets, but the release variant declares no renderer host surface yet",
     },
     "signing": "runner-generated debug key; fingerprints archived, private key excluded",
     "deviceTests": "compiled and packaged only; not executed on a device",

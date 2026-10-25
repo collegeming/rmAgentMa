@@ -42,6 +42,7 @@ import org.connectbot.agent.AgentRepository
 import org.connectbot.agent.AgentSessionReference
 import org.connectbot.agent.AgentTranscriptOutcome
 import org.connectbot.agent.HostAddressChange
+import org.connectbot.agent.agentAttentionSignals
 import org.connectbot.agent.agentSessionContextPack
 import org.connectbot.agent.projectAgentAttentionInbox
 import org.connectbot.di.CoroutineDispatchers

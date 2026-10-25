@@ -27,30 +27,53 @@ const val HOST_OS_WINDOWS = "windows"
 const val AGENT_TARGET_NATIVE = "native"
 const val AGENT_TARGET_WSL_PREFIX = "wsl:"
 
-/** Probe error code of a Windows host whose Agent target has no implemented entry yet. */
+/**
+ * Agent target of a Windows host that holds the Agent on Windows itself — the literal the renderer sends.
+ * [AGENT_TARGET_NATIVE] keeps meaning the same thing on a Windows row, because rows written before this value
+ * existed hold it and must keep addressing the shell context they were detected in.
+ */
+const val AGENT_TARGET_WINDOWS = "windows"
+
+/** Probe error code of an Agent whose verdict this app could not read: a Windows target whose own lookup answered nothing it can read, or a target with no entry in the app at all. Either way no installation is claimed and no session opens from that answer. */
 const val WINDOWS_NATIVE_UNSUPPORTED = "windows_native_unsupported"
 
 /**
- * Where on a host an Agent runs, and how one POSIX command line reaches that place.
+ * Where on a host an Agent runs, and how one command line the app built reaches that place.
  *
- * The app builds every remote command as a POSIX command line (probe, scanner, working-directory check, ACP and
- * ZCode launch). A target only wraps that line, so a command probed here is the command launched later: the probe
- * and the session prepare the same text for the same target.
+ * The app builds its command lines as POSIX shell text (probe, scanner, working-directory check, ACP and ZCode
+ * launch). A target only wraps that line, so a command probed here is the command launched later: the probe and
+ * the session prepare the same text for the same target.
  */
 sealed interface RemoteTarget {
     /** Stable identity of the shell context; a detected installation is only valid for the target it was found on. */
     val id: String
 
-    /** False when this target has no entry in the app, so nothing can be probed or launched on it. */
+    /**
+     * True for every target this app can probe and launch, which is every target it knows today — a Windows host's
+     * own target included, because that one is entered with the Windows `where` and PowerShell. False is reserved
+     * for a target with no entry in the app at all, which nothing can probe or launch; no known target answers it.
+     */
     val supported: Boolean
 
-    /** The command line for the host's SSH exec channel, or null when [supported] is false. */
+    /**
+     * True when this target runs the app's POSIX command lines as they are written. A target entered through a
+     * Windows shell carries [posixCommands] false until a Windows text exists for each of them, so such a line is
+     * refused as itself instead of being handed to a shell that cannot read it.
+     */
+    val posixCommands: Boolean
+
+    /**
+     * The command line for the host's SSH exec channel. Every target this app knows answers one; null is reserved
+     * for a target with no entry in the app at all, and a caller that gets it refuses that target instead of
+     * handing a line to a shell it cannot enter.
+     */
     fun shellCommand(command: String): String?
 
     /** A Linux or otherwise POSIX host: the command runs in the host's own shell, unchanged. */
     data object Posix : RemoteTarget {
         override val id: String get() = "posix"
         override val supported: Boolean get() = true
+        override val posixCommands: Boolean get() = true
         override fun shellCommand(command: String): String = command
     }
 
@@ -69,6 +92,7 @@ sealed interface RemoteTarget {
 
         override val id: String get() = AGENT_TARGET_WSL_PREFIX + distribution
         override val supported: Boolean get() = true
+        override val posixCommands: Boolean get() = true
 
         override fun shellCommand(command: String): String {
             val encoded = Base64.getEncoder().encodeToString(command.toByteArray(Charsets.UTF_8))
@@ -76,17 +100,78 @@ sealed interface RemoteTarget {
         }
     }
 
-    /** An Agent installed on Windows itself. Reading its paths needs a Windows entry this app does not have yet. */
+    /**
+     * An Agent installed on Windows itself. This target is entered — its installations are looked up with the
+     * Windows `where` command and its directories are tested with PowerShell — but it is not a POSIX shell, so
+     * the app's POSIX command lines are not handed to it: [posixCommands] is false and its callers refuse them.
+     */
     data object WindowsNative : RemoteTarget {
-        override val id: String get() = "windows-native"
-        override val supported: Boolean get() = false
-        override fun shellCommand(command: String): String? = null
+        override val id: String get() = WINDOWS_NATIVE_ID
+        override val supported: Boolean get() = true
+        override val posixCommands: Boolean get() = false
+
+        override fun shellCommand(command: String): String = windowsShellCommand(command)
     }
 }
 
+/** Identity of the shell context a Windows host's own Agent runs in, as a host row reports it. */
+const val WINDOWS_NATIVE_ID = "windows-native"
+
 /**
- * The target a host row describes. Only a Windows host departs from the POSIX default, and only for a
- * distribution name that can be quoted into the Windows shell without changing the command.
+ * One command line for a Windows host's SSH exec channel.
+ *
+ * Windows OpenSSH runs the line in cmd.exe first, and cmd.exe cannot run the app's command lines itself, so the
+ * text travels base64-encoded — base64 holds no character cmd interprets — into the Windows side's own decoder:
+ * `powershell.exe -EncodedCommand` takes base64 of the command text as UTF-16LE and runs the exact text back.
+ * PowerShell ships with every Windows that can hold OpenSSH, and the encoded text is the same text in both places
+ * it is used, so a command a probe replicated is the command a session runs.
+ */
+fun windowsShellCommand(command: String): String {
+    val encoded = Base64.getEncoder().encodeToString(command.toByteArray(Charsets.UTF_16LE))
+    return "powershell.exe -NoProfile -NonInteractive -EncodedCommand $encoded"
+}
+
+/**
+ * A Windows target's own lookup for one executable: `where` (spelled `where.exe`, because PowerShell resolves the
+ * bare word to its own `Where-Object` alias) prints the absolute paths Windows itself would start. One line per
+ * Agent is printed, so the answer stays parseable without trusting the order the remote happened to answer in.
+ */
+fun windowsLookupCommand(agents: List<AgentKind>): String {
+    val names = agents.joinToString(",") { "'${it.command}'" }
+    return "if (-not (Get-Command where.exe -ErrorAction SilentlyContinue)) { 'probe_unavailable'; exit 0 }; " +
+        "foreach (\$name in @($names)) { \$found = @(where.exe \$name 2>\$null)[0]; " +
+        "if (\$found) { \"found \$name \$found\" } else { \"missing \$name\" } }"
+}
+
+/** The answers one [windowsLookupCommand] run prints; anything else is an answer this app cannot read. */
+const val WINDOWS_LOOKUP_FOUND = "found"
+const val WINDOWS_LOOKUP_MISSING = "missing"
+const val WINDOWS_LOOKUP_UNAVAILABLE = "probe_unavailable"
+
+/**
+ * True when [value] is an absolute path Windows can address: a drive-absolute path (`C:\work`) or a UNC path
+ * (`\\server\share`). A path with no drive or share is relative, and a value carrying a control character is
+ * refused because no such path can be typed or launched.
+ */
+fun isWindowsAbsolutePath(value: String): Boolean {
+    if (value.isEmpty() || value.length > MAX_PATH_LENGTH || value.any { it.code < 32 || it.code == 127 }) return false
+    if (value.startsWith("\\\\")) return value.drop(2).substringBefore('\\').isNotEmpty() && value.drop(2).contains('\\')
+    return value.length >= 3 && value[0].isLetter() && value[0].code < 128 && value[1] == ':' && (value[2] == '\\' || value[2] == '/')
+}
+
+/** An absolute executable path on either kind of target: POSIX (`/usr/bin/kimi`) or Windows (`C:\...\kimi.exe`). */
+fun isAbsoluteAgentPath(value: String): Boolean = value.startsWith('/') || isWindowsAbsolutePath(value)
+
+/**
+ * [value] as a PowerShell text: a single-quoted string holds everything literally — no expansion, no escape
+ * sequence — and the only character it cannot carry as itself is the single quote, which is written twice.
+ */
+fun powershellLiteral(value: String): String = "'" + value.replace("'", "''") + "'"
+
+/**
+ * The target a host row describes. Only a Windows host departs from the POSIX default: one distribution it names
+ * runs the Agent in that distribution's POSIX shell, and every other value — including [AGENT_TARGET_WINDOWS],
+ * the legacy [AGENT_TARGET_NATIVE] and a value that names no usable distribution — addresses Windows itself.
  */
 fun remoteTargetOf(osType: String?, agentTarget: String?): RemoteTarget {
     if (osType != HOST_OS_WINDOWS) return RemoteTarget.Posix
@@ -109,3 +194,4 @@ fun validWslDistribution(distribution: String): Boolean = distribution.isNotEmpt
 private fun isAsciiAlphanumeric(value: Char): Boolean = value.isLetterOrDigit() && value.code < 128
 
 private const val MAX_WSL_DISTRIBUTION_LENGTH = 64
+private const val MAX_PATH_LENGTH = 4096
