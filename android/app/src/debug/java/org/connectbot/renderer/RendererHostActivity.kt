@@ -51,6 +51,7 @@ import org.connectbot.ui.MainActivity
 import org.json.JSONObject
 import org.rmagentma.rendererhost.ProbeAssets
 import org.rmagentma.rendererhost.ProbeBridge
+import org.rmagentma.rendererhost.ProbeLimits
 import org.rmagentma.rendererhost.ProbeResult
 import org.rmagentma.rendererhost.json
 import timber.log.Timber
@@ -87,7 +88,14 @@ class RendererHostActivity : ComponentActivity() {
     }
 
     private val main = Handler(Looper.getMainLooper())
+
+    // Three channels' worth of threads, and why: the ordered worker runs every action that writes product state or
+    // answers the live ACP session, the read pool answers the routes that used to queue behind a probe, and the
+    // deadline thread only arms the bound of one read's answer.
     private val worker = Executors.newSingleThreadExecutor()
+    private val reads = Executors.newFixedThreadPool(RendererActionChannels.READ_PARALLELISM)
+    private val deadlines = Executors.newSingleThreadScheduledExecutor()
+    private val channels = RendererActionChannels(reads, deadlines)
     private lateinit var container: LinearLayout
 
     /** The local-network grants this system may require; the shared rule keeps them identical to what tests check. */
@@ -212,15 +220,28 @@ class RendererHostActivity : ComponentActivity() {
                 val expected = current.documentId
                 worker.execute {
                     if (current !== bridge || closed) return@execute
-                    // One worker thread per document serializes every action, so a send, a cancel and an approval
-                    // can never race each other or the Compose path into the same ACP session.
-                    val response = current.receive(origin.toString(), mainFrame, raw) { action, payload -> handle(action, payload) }
-                    val document = response?.optString("documentId")
-                    main.post {
-                        if (closed || current !== bridge || sender !== web || response == null || document != bridge.documentId || (expected.isNotEmpty() && expected != bridge.documentId)) return@post
-                        reply = proxy
-                        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) proxy.postMessage(response.toString())
-                    }
+                    // A read that leaves this channel is answered later, and its answer is built for the request
+                    // the bridge books, so the id is read from the message here — on this thread, never the UI
+                    // thread the message arrived on. The bridge stays the authority on that id, and a message it
+                    // refuses never reaches the action layer at all.
+                    val requestId = requestIdOf(raw)
+                    // This worker stays the ordered channel: a send, a cancel and an approval keep their arrival
+                    // order and can never race each other or the Compose path into the same ACP session, while the
+                    // read-only routes of the table leave for the read pool instead of queueing behind a probe.
+                    var deferred = false
+                    val response = current.receive(origin.toString(), mainFrame, raw) { action, payload ->
+                        channels.dispatch(
+                            action = action,
+                            payload = payload,
+                            run = { handle(action, payload) },
+                            answer = { result -> respond(current, sender, expected, proxy, current.response(requestId, result)) },
+                        ).also { deferred = it.status == RendererActionChannels.DEFERRED }
+                    } ?: return@execute
+                    // The placeholder a deferred read answers with is not an answer: that read's own response is
+                    // posted when it finishes. The bridge hands the same placeholder back only for a request it has
+                    // already booked under that requestId, and that caller is answered with it rather than nothing.
+                    if (deferred && response.optInt("status") == RendererActionChannels.DEFERRED) return@execute
+                    respond(current, sender, expected, proxy, response)
                 }
             }
         }
@@ -257,6 +278,35 @@ class RendererHostActivity : ComponentActivity() {
             }
 
             else -> actions.handle(action, payload)
+        }
+    }
+
+    /**
+     * The requestId of one bridge message, or "" when the message carries none. The bridge itself decides whether
+     * an id is usable, and a message it refuses never reaches the action layer, so this is read for the one case
+     * that needs it: the answer of a read that left the ordered channel.
+     */
+    private fun requestIdOf(raw: String): String {
+        // The bridge owns the real limit; this only keeps a message it will reject from being parsed here first.
+        if (raw.length > ProbeLimits.MESSAGE_BYTES) return ""
+        return try {
+            JSONObject(raw).optString("requestId")
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    /**
+     * Posts one bridge response to the document it belongs to. A response that arrived for a document the renderer
+     * has already replaced is dropped rather than answered into the live one, exactly as the probe host drops it,
+     * so a read still running for a dead document can never answer the new one.
+     */
+    private fun respond(current: ProbeBridge, sender: WebView, expected: String, proxy: JavaScriptReplyProxy, response: JSONObject) {
+        val document = response.optString("documentId")
+        main.post {
+            if (closed || current !== bridge || sender !== web || document != bridge.documentId || (expected.isNotEmpty() && expected != bridge.documentId)) return@post
+            reply = proxy
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) proxy.postMessage(response.toString())
         }
     }
 
@@ -380,6 +430,10 @@ class RendererHostActivity : ComponentActivity() {
         web?.let(::dispose)
         source.close()
         worker.shutdown()
+        // A read that is still running is left to finish — a probe writes what it verified — but its answer is
+        // dropped with this document like every other response of a closed host.
+        reads.shutdown()
+        deadlines.shutdown()
         main.removeCallbacksAndMessages(null)
         super.onDestroy()
     }

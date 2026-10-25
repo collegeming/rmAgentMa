@@ -10168,3 +10168,139 @@ diff --git a/tests/unit/renderer/conversation/ConversationRowCronMenu.dom.test.t
    });
  
    it('keeps row actions hidden while batch selection is active', () => {
+
+diff --git a/packages/desktop/src/renderer/components/layout/Titlebar/index.tsx b/packages/desktop/src/renderer/components/layout/Titlebar/index.tsx
+--- a/packages/desktop/src/renderer/components/layout/Titlebar/index.tsx
++++ b/packages/desktop/src/renderer/components/layout/Titlebar/index.tsx
+@@ -52,7 +52,7 @@ const SidebarIcon: React.FC<{ size?: number; strokeWidth?: number }> = ({ size =
+ 
+ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
+   const { t } = useTranslation();
+-  const appTitle = useMemo(() => 'AionUi', []);
++  const appTitle = useMemo(() => 'RmAgentMa', []);
+   const [workspaceCollapsed, setWorkspaceCollapsed] = useState(true);
+   const [mobileCenterTitle, setMobileCenterTitle] = useState(appTitle);
+   const [mobileCenterOffset, setMobileCenterOffset] = useState(0);
+
+diff --git a/packages/desktop/src/renderer/components/layout/DocumentTitle.tsx b/packages/desktop/src/renderer/components/layout/DocumentTitle.tsx
+--- a/packages/desktop/src/renderer/components/layout/DocumentTitle.tsx
++++ b/packages/desktop/src/renderer/components/layout/DocumentTitle.tsx
+@@ -2,23 +2,24 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import React, { useEffect } from 'react';
+ import { useLocation } from 'react-router-dom';
+ import { useTranslation } from 'react-i18next';
+ 
++/** The name this product's window answers to, spelled as its sidebar's own wordmark spells it. */
++const PRODUCT_NAME = 'RmAgentMa';
++
+ /**
+- * Single owner of `document.title`.
+- *
+- * The title used to be set once by the login page and never again, so after
+- * logging in the window/tab kept saying "AionUi - Login" — in whatever language
+- * the login page happened to render in — for the rest of the session. Deriving
+- * it here from the route and the app language keeps it correct across both
+- * navigation and language switches.
++ * Single owner of `document.title`. It is this product's own name — not the name of the project the code is
++ * built on, which every route used to say, nor a title derived from the route, which is a desktop habit the
++ * phone has no window chrome for. One place writes it, so it stays right across navigation and language
++ * switches.
+  */
+-export function titleForPath(pathname: string, t: (key: string) => string): string {
+-  return pathname.startsWith('/login') ? t('login.pageTitle') : 'AionUi';
++export function titleForPath(_pathname: string, _t: (key: string) => string): string {
++  return PRODUCT_NAME;
+ }
+ 
+ const DocumentTitle: React.FC = () => {
+
+diff --git a/tests/unit/renderer/documentTitle.dom.test.tsx b/tests/unit/renderer/documentTitle.dom.test.tsx
+--- a/tests/unit/renderer/documentTitle.dom.test.tsx
++++ b/tests/unit/renderer/documentTitle.dom.test.tsx
+@@ -2,6 +2,7 @@
+  * @license
+  * Copyright 2025 AionUi (aionui.com)
+  * SPDX-License-Identifier: Apache-2.0
++ * Modified by rmAgentMa contributors for the renderer probe.
+  */
+ 
+ import { render } from '@testing-library/react';
+@@ -23,16 +24,16 @@ import DocumentTitle, { titleForPath } from '@/renderer/components/layout/Docume
+ describe('titleForPath', () => {
+   const t = (key: string) => `t(${key})`;
+ 
+-  it('uses the login title on the login route only', () => {
+-    expect(titleForPath('/login', t)).toBe('t(login.pageTitle)');
+-    expect(titleForPath('/guid', t)).toBe('AionUi');
+-    expect(titleForPath('/conversation/abc', t)).toBe('AionUi');
+-    expect(titleForPath('/settings/agent', t)).toBe('AionUi');
++  it('is this product’s own name on every route', () => {
++    expect(titleForPath('/login', t)).toBe('RmAgentMa');
++    expect(titleForPath('/guid', t)).toBe('RmAgentMa');
++    expect(titleForPath('/conversation/abc', t)).toBe('RmAgentMa');
++    expect(titleForPath('/settings/agent', t)).toBe('RmAgentMa');
+   });
+ });
+ 
+ describe('DocumentTitle', () => {
+-  it('resets the title to AionUi after leaving the login page', () => {
++  it('resets the window title to this product’s name after leaving the login page', () => {
+     // The old behaviour set document.title once on the login page and never
+     // updated it again, so post-login pages kept the login title.
+     document.title = 'AionUi - stale login title';
+@@ -41,17 +42,17 @@ describe('DocumentTitle', () => {
+         <DocumentTitle />
+       </MemoryRouter>
+     );
+-    expect(document.title).toBe('AionUi');
++    expect(document.title).toBe('RmAgentMa');
+   });
+ 
+-  it('sets the localised login title on the login route', () => {
++  it('keeps this product’s name on the login route too, in whichever language', () => {
+     mockLanguage = 'zh-CN';
+     render(
+       <MemoryRouter initialEntries={['/login']}>
+         <DocumentTitle />
+       </MemoryRouter>
+     );
+-    expect(document.title).toBe('zh:login.pageTitle');
++    expect(document.title).toBe('RmAgentMa');
+     mockLanguage = 'en-US';
+   });
+ });
+
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/settings.json
+@@ -888,7 +888,8 @@
+     "passwordHint": "只提交一次，本页面不会保存。",
+     "passwordKeep": "留空则保留已保存的密码",
+     "passwordStored": "该主机已保存密码；留空表示保留。",
+-    "passwordRequired": "请为该认证方式输入密码。"
++    "passwordRequired": "请为该认证方式输入密码。",
++    "refreshUnknown": "探测超时（HOST_TIMEOUT），结果未知；宿主可能仍在进行，可以直接重试。"
+   },
+   "hostMaintenance": {
+     "title": "宿主维护",
+
+diff --git a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json
+--- a/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json
++++ b/packages/desktop/src/renderer/services/i18n/locales/zh-CN/conversation.json
+@@ -190,7 +190,9 @@
+     "switchBusyHint": "切换会关闭宿主上的当前会话并停止它；在你确认之前不会执行任何取消操作。",
+     "switchBusyConfirm": "停止并切换",
+     "switchBusyNewSessionConfirm": "停止并新建",
+-    "switchBusyStay": "留在这里"
++    "switchBusyStay": "留在这里",
++    "emptyTitle": "还没有可打开的会话",
++    "emptyHint": "宿主的会话索引里没有这个会话。新建一个会话即可开始使用。"
+   },
+   "dropdown": {
+     "cliAgents": "CLI Agents",

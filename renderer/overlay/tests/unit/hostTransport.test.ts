@@ -14,7 +14,8 @@ function harness(timeout = 1000) {
     },
     onmessage: undefined as ((event: MessageEvent<string>) => void) | undefined,
   };
-  const transport = new NativeTransport(bridge, timeout);
+  // A short window for every action, so a case never waits on the real budget table.
+  const transport = new NativeTransport(bridge, () => timeout);
   const reply = (body: unknown, documentId = 'document-1') => {
     bridge.onmessage?.({
       data: JSON.stringify({ ...sent.at(-1), documentId, ok: true, status: 200, body }),

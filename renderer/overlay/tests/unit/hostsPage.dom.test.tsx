@@ -136,6 +136,33 @@ describe('hosts page', () => {
     expect(screen.getByText('settings.hosts.executable(/home/ci/.local/bin/kimi)')).toBeInTheDocument();
   });
 
+  it('says an unanswered probe is an unknown result with the verdicts still there, and takes the retry', async () => {
+    request.mockResolvedValueOnce({ items: [host({ session_count: 2 })] });
+    renderPage();
+    await screen.findByText('build-box');
+
+    // The host is still probing when the renderer stops waiting: it is not a refusal, and the row keeps the
+    // verdicts and the executable it already showed.
+    request.mockRejectedValueOnce(new Error('HOST_TIMEOUT: hosts.refresh; result unknown'));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'settings.hosts.refresh' }));
+
+    expect(await screen.findByText('settings.hosts.refreshUnknown')).toBeInTheDocument();
+    expect(screen.getByText('settings.hosts.probeAvailable')).toBeInTheDocument();
+    expect(screen.getByText('settings.hosts.executable(/home/ci/.local/bin/kimi)')).toBeInTheDocument();
+    expect(screen.getByText('settings.hosts.sessionCount(2)')).toBeInTheDocument();
+
+    // The button is offered again — that is the retry — and the answer it gives is what the row then shows.
+    request.mockResolvedValueOnce({
+      host_id: 'host-3',
+      refreshed: true,
+      sessions: 7,
+      detection: { checked: true, agents: [kimi('available')] },
+    });
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'settings.hosts.refresh' }));
+    expect(await screen.findByText('settings.hosts.sessionCount(7)')).toBeInTheDocument();
+    expect(screen.queryByText('settings.hosts.refreshUnknown')).toBeNull();
+  });
+
   it('refuses a refresh answer that carries no readable verdicts instead of showing an empty probe', async () => {
     request.mockResolvedValueOnce({ items: [host()] });
     renderPage();

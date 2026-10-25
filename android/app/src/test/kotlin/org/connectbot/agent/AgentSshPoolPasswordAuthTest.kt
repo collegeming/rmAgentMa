@@ -64,7 +64,7 @@ class AgentSshPoolPasswordAuthTest {
                 // before the saved password is used, which the verification below would catch.
                 runCatching { pool.hostSession(1L).exec("true") }
                 val client = clients.constructed().single()
-                verify(client).authPassword(eq("colle"), any())
+                verify(client).authPassword(eq("colle"), any(CharArray::class.java))
                 verify(passwords).getPassword(1L)
                 // No prompt is waiting for the user either: the saved password is everything this host needs.
                 assertThat(challenges.challenge.value).isNull()
@@ -90,7 +90,7 @@ class AgentSshPoolPasswordAuthTest {
                 runCatching { pool.hostSession(1L).exec("true") }
                 val client = clients.constructed().single()
                 // The key path ran first and found no key, so the saved password is what authenticated.
-                verify(client).authPassword(eq("colle"), any())
+                verify(client).authPassword(eq("colle"), any(CharArray::class.java))
                 assertThat(challenges.challenge.value).isNull()
             }
         }
@@ -103,8 +103,11 @@ class AgentSshPoolPasswordAuthTest {
         challenges: AgentChallenges,
     ): AgentSshPool {
         val hosts = mock(HostRepository::class.java)
-        `when`(hosts.findHostById(host.id)).thenReturn(host)
-        `when`(hosts.getKnownHostsForHost(host.id)).thenReturn(emptyList())
+        // Both reads are suspend; Mockito stubs them where a coroutine can run them.
+        runBlocking {
+            `when`(hosts.findHostById(host.id)).thenReturn(host)
+            `when`(hosts.getKnownHostsForHost(host.id)).thenReturn(emptyList())
+        }
         return AgentSshPool(
             hosts,
             keys,

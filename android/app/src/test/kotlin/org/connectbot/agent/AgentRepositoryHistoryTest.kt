@@ -161,12 +161,6 @@ class AgentRepositoryHistoryTest {
         method.invoke(repository, 0L, error)
     }
 
-    private companion object {
-        /** The source of a stored page the repository itself writes, so it is read back as its own. */
-        const val HISTORY_SOURCE = "agent-history:kimi"
-    }
-}
-
     @Test
     fun aConversationWithoutAKnownDirectoryIsRefusedWithoutReachingTheHost() = runTest {
         val pool = mock(AgentSshPool::class.java)
@@ -184,5 +178,10 @@ class AgentRepositoryHistoryTest {
         assertThat(refusedNew).isInstanceOf(AgentDirectoryUnknownException::class.java)
         assertThat((refusedNew as AgentDirectoryUnknownException).reason).contains("no working directory")
         verify(pool, never()).hostSession(anyLong(), anyBoolean())
+    }
+
+    private companion object {
+        /** The source of a stored page the repository itself writes, so it is read back as its own. */
+        const val HISTORY_SOURCE = "agent-history:kimi"
     }
 }

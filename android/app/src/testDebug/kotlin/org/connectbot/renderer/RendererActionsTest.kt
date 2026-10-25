@@ -2342,7 +2342,8 @@ class RendererActionsTest {
             events = rows
             hasEarlier = true
             earlierEvents = listOf(AgentEvent(type = "user", text = "更早", historyKey = 0))
-            history = AgentHistoryStatus(state = "partial", note = "索引只覆盖了一部分。")
+            // Qualified: the test function already holds a local value named `history` for a parsed page.
+            this.history = AgentHistoryStatus(state = "partial", note = "索引只覆盖了一部分。")
         }
         val olderPage = dataOf(RendererActions(older).handle("messages.before", payload(conversation = true, query = mapOf("before" to "m1"))))
         assertThat(olderPage.getJSONObject("history").getString("state")).isEqualTo("partial")

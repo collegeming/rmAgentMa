@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { httpRequest, isBackendHttpError } from '@/common/adapter/httpBridge';
+import { isHostTimeout } from '@/common/host/hostTransport';
 import type { HostDeletion, HostFields, HostRefresh, SavedHost } from '@/common/host/hostTransport';
 import type { TFunction } from 'i18next';
 
@@ -68,4 +69,13 @@ export function hostFailureText(error: unknown, t: TFunction): string {
     });
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The visible text of a failed refresh or probe. A refusal is the host's own answer and is said as that; a
+ * request that ran past its window is not a refusal at all — the host may still be probing — so it is stated
+ * as a result nobody has yet, with the retry it can be asked again with.
+ */
+export function hostRefreshFailureText(error: unknown, t: TFunction): string {
+  return isHostTimeout(error) ? t('settings.hosts.refreshUnknown') : hostFailureText(error, t);
 }

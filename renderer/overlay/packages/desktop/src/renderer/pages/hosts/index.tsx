@@ -11,7 +11,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import HostCard from './HostCard';
 import HostEditorDialog from './HostEditorDialog';
-import { deleteHost, hostFailureText, listHosts, refreshHost } from './hostsApi';
+import { deleteHost, hostFailureText, hostRefreshFailureText, listHosts, refreshHost } from './hostsApi';
 
 /**
  * The host page: the product's own saved SSH hosts, each with the Agent target it runs and the probe verdict
@@ -76,8 +76,9 @@ const HostsPage: React.FC = () => {
         )
       );
     } catch (error) {
-      // The row keeps what it showed before: a failed refresh replaces no verdict with an invented one.
-      setFailure(host.id, hostFailureText(error, t));
+      // The row keeps what it showed before: a failed refresh replaces no verdict with an invented one, and a
+      // probe that ran past its window is said as an unknown result rather than as the host refusing it.
+      setFailure(host.id, hostRefreshFailureText(error, t));
     } finally {
       setRefreshing((current) => ({ ...current, [host.id]: false }));
     }

@@ -5,10 +5,12 @@
  */
 
 /**
- * What the renderer knows about the native host's connection, written only by the transport itself: a host
- * request that fails without an answer (a timeout, or a bridge that is not there) marks the connection
- * interrupted, and any answer or event that follows marks it live again. The host's own event stream is the
- * recovery channel — nothing here polls, and no timer invents a status.
+ * What the renderer knows about the native host's connection, written only by the transport itself: a request
+ * that could not even be handed to the host — no bridge, a document the host refuses, a post the bridge threw
+ * on — marks the connection interrupted, and any answer or event that follows marks it live again. A request
+ * that merely ran past its own window does not: the host may still be working on it, so that is reported as
+ * that action's own failure and the next request is sent as usual. The host's own event stream is the recovery
+ * channel — nothing here polls, and no timer invents a status.
  */
 export type HostConnectionSnapshot = {
   state: 'live' | 'interrupted';
@@ -47,7 +49,11 @@ export function markHostLive(): void {
   publish({ state: 'live', reason: '', at: 0 });
 }
 
-/** A host request failed with no answer: the connection is interrupted, and the code says why. */
+/**
+ * The transport itself is broken: no bridge, a document the host refused, a post the bridge could not take, or
+ * the host's own event stream declaring the link down. A request that only ran past its window is not this —
+ * it fails as the action it was, and the next request goes out as usual.
+ */
 export function markHostInterrupted(error: unknown): void {
   publish({
     state: 'interrupted',

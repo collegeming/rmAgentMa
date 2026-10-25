@@ -3,11 +3,11 @@
  * Copyright 2026 rmAgentMa contributors
  * SPDX-License-Identifier: Apache-2.0
  */
-import type { HostDetection } from '@/common/host/hostTransport';
+import { isHostTimeout, type HostDetection } from '@/common/host/hostTransport';
 import type { TFunction } from 'i18next';
 import { useSyncExternalStore } from 'react';
 import { applyHostRefresh } from './hostDirectory';
-import { hostFailureText, refreshHost } from '@renderer/pages/hosts/hostsApi';
+import { hostRefreshFailureText, refreshHost } from '@renderer/pages/hosts/hostsApi';
 
 /**
  * Refreshing one saved host when it is selected: `hosts.refresh` probes that host again and rescans the
@@ -15,14 +15,19 @@ import { hostFailureText, refreshHost } from '@renderer/pages/hosts/hostsApi';
  *
  * Every answer is kept per host. A refresh that fails leaves the verdicts the row already showed in place and
  * states the code the host returned; a refresh that lands late updates its own host alone, because the row it
- * writes to is the one named by the request that answered.
+ * writes to is the one named by the request that answered. A refresh that ran past its window is not a
+ * failure of the host — the probe is likely still running — so that host stays in its refreshing state and
+ * the row says the result is unknown, with the retry right there.
  */
 export type HostRefreshReading = {
-  /** `idle` before anything was asked, `refreshing` while the request is out, `failed` after a refusal. */
+  /**
+   * `idle` before anything was asked, `refreshing` while the request is out or while its result is unknown,
+   * `failed` after the host itself refused it.
+   */
   state: 'idle' | 'refreshing' | 'failed';
   /** How many sessions the rescan left behind, once one answered. */
   sessions: number | null;
-  /** The code and reason the host refused with, while it did. */
+  /** The refusal the host gave, or the unknown result of a request that ran past its window. */
   failure: string | null;
 };
 
@@ -59,11 +64,13 @@ export function refreshHostRow(hostId: string, t: TFunction): Promise<void> {
       });
     })
     .catch((error: unknown) => {
-      // The verdicts the row already showed stay where they are; only the reason is added.
+      // The verdicts the row already showed stay where they are; only the reason is added. A refusal ends the
+      // refresh, while a request that ran past its window leaves the host in its refreshing state: the probe
+      // is most likely still running there, and the retry beside that note is how it is asked again.
       publish(hostId, {
-        state: 'failed',
+        state: isHostTimeout(error) ? 'refreshing' : 'failed',
         sessions: readings.get(hostId)?.sessions ?? null,
-        failure: hostFailureText(error, t),
+        failure: hostRefreshFailureText(error, t),
       });
     })
     .finally(() => {

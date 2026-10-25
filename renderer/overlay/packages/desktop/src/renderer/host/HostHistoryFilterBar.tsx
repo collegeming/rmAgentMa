@@ -117,7 +117,9 @@ const HostHistoryFilterBar: React.FC<Props> = ({ conversations, hostId, agentId,
           ))}
         </div>
       )}
-      {hostId && reading.state === 'failed' && (
+      {/* The refusal the host gave, or the unknown result of a probe that ran past its window: either way the
+          verdicts above stay as they were, and this is where it is asked again. */}
+      {hostId && reading.failure && (
         <div role='alert' data-testid='host-refresh-failure' className='flex min-w-0 items-center gap-6px'>
           <span className='min-w-0 break-all text-11px leading-16px text-danger-6'>{reading.failure}</span>
           <Button

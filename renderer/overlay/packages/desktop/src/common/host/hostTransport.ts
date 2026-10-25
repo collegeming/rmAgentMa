@@ -151,7 +151,7 @@ export class NativeTransport {
 
   constructor(
     private readonly bridge: HostBridge,
-    private readonly timeoutMs = 15000
+    private readonly timeoutFor: (action: string) => number = hostActionTimeoutMs
   ) {
     bridge.onmessage = (event) => this.receive(event.data);
   }
@@ -173,17 +173,17 @@ export class NativeTransport {
 
   call(action: string, payload: HostPayload = { params: {}, query: {}, body: null }): Promise<HostReply> {
     if (!this.documentId && action !== 'host.handshake') return Promise.reject(new Error('HOST_NOT_READY'));
-    if (action !== 'host.handshake' && !ROUTES.some((route) => route[2] === action) && !EXTRA_ACTIONS.has(action))
+    if (action !== 'host.handshake' && !HOST_ACTIONS.includes(action))
       return Promise.reject(new Error('HOST_ACTION_UNSUPPORTED'));
     const requestId = `renderer-${++this.serial}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
+        // One action ran past its own window. That action failed, and its result is unknown — the host may
+        // still be working on it — but the connection did not break: the host answers its own state to the
+        // next request, and a host frame ends an interrupted connection, not a late answer to this one.
         this.pending.delete(requestId);
-        const failure = new Error(`HOST_TIMEOUT: ${action}; result unknown`);
-        // No answer inside the host's own window: the connection is what failed, not the request.
-        markHostInterrupted(failure);
-        reject(failure);
-      }, this.timeoutMs);
+        reject(new Error(`HOST_TIMEOUT: ${action}; result unknown`));
+      }, this.timeoutFor(action));
       this.pending.set(requestId, { resolve, reject, timer });
       try {
         const message = JSON.stringify({ requestId, documentId: this.documentId, action, payload });
@@ -273,9 +273,20 @@ export function captureHostDocument(): () => void {
 
 export async function initializeHost(): Promise<void> {
   if (!isNativeHost()) return;
-  if (!window.RmAgentHost) throw new Error('HOST_BRIDGE_UNAVAILABLE');
+  if (!window.RmAgentHost) {
+    // No bridge at all: there is nothing to send a request to, which is the connection itself being gone.
+    markHostInterrupted(new Error('HOST_BRIDGE_UNAVAILABLE'));
+    throw new Error('HOST_BRIDGE_UNAVAILABLE');
+  }
   const transport = new NativeTransport(window.RmAgentHost);
-  await transport.initialize();
+  try {
+    await transport.initialize();
+  } catch (error) {
+    // A document the host does not accept — an unreadable generation, a protocol this build cannot speak,
+    // an identity the host itself did not name — is a broken transport, not one failed action.
+    markHostInterrupted(error);
+    throw error;
+  }
   nativeTransport = transport;
   hostGeneration++;
   window.addEventListener(
@@ -417,6 +428,57 @@ const EXTRA_ACTIONS = new Set([
   'attachment.finish',
   'attachment.abort',
 ]);
+
+/** Every action this transport declares: the contract's own routes, plus the extras the host answers outside them. */
+export const HOST_ACTIONS: readonly string[] = Object.freeze([
+  ...new Set([...ROUTES.map((route) => route[2]), ...EXTRA_ACTIONS]),
+]);
+
+/**
+ * The actions that really wait on the far end: a probe run over every Agent a host has with the session index
+ * rescanned beside it, a conversation being created (whose directory is checked on the host first), a
+ * conversation that is not open yet being opened by the read that asks for it, a turn, one older page of the
+ * agent's own history, a file written into the conversation's directory, a transcript searched over the link,
+ * an answer handed to the connection that is asking for it, and the two ways into the terminal. Every other
+ * action is answered from what the host already holds, so it keeps the short window.
+ */
+const HOST_WAITING_ACTIONS: readonly string[] = Object.freeze([
+  'attachment.finish',
+  'challenges.answer',
+  'conversation.read',
+  'conversations.create',
+  'detection.refresh',
+  'hosts.refresh',
+  'messages.before',
+  'messages.send',
+  'runtime.ensure',
+  'search.sessions',
+  'terminal.command.start',
+  'terminal.open',
+]);
+
+/**
+ * How long one action may wait for its answer before it is reported as unanswered. A read the host serves
+ * from its own state is quick; an action that waits on the far end is not, and the host runs its actions one
+ * after another on a single worker, so the next request also waits behind the slow one. 120s is measured
+ * against a real phone: one host's refresh — five Agents probed and its session index rescanned — took over
+ * 25 seconds there. Past the budget the honest answer is "result unknown, ask again", never "the host is gone".
+ */
+export const HOST_READ_TIMEOUT_MS = 15000;
+export const HOST_WAIT_TIMEOUT_MS = 120000;
+
+/** The window one action gets; an action this table does not name is a read and keeps the short one. */
+export function hostActionTimeoutMs(action: string): number {
+  return HOST_WAITING_ACTIONS.includes(action) ? HOST_WAIT_TIMEOUT_MS : HOST_READ_TIMEOUT_MS;
+}
+
+/**
+ * True when a request ran past its own window without an answer. The action failed; the host connection did
+ * not, and what the host is doing is unknown — a caller says exactly that and offers the retry.
+ */
+export function isHostTimeout(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith('HOST_TIMEOUT');
+}
 
 /**
  * A refusal of an action the host answers outside its routes. The host's own stable code and reason travel

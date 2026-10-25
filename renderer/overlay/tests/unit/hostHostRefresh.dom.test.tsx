@@ -138,6 +138,48 @@ describe('selecting one host in the sidebar', () => {
     expect(hostDirectorySnapshot().hosts.map((host) => host.session_count)).toEqual([7, 4]);
   });
 
+  it('keeps a host refreshing with the verdicts it had when its probe runs past the renderer’s window', async () => {
+    let timingOut = true;
+    request.mockImplementation((method: string, path: string) => {
+      if (method === 'GET' && path === '/api/hosts') {
+        return Promise.resolve({
+          items: [hostRow('host-1', 'first', 'available', 3), hostRow('host-2', 'second', 'available', 4)],
+        });
+      }
+      if (method === 'POST' && path === '/api/hosts/host-1/refresh') {
+        return timingOut
+          ? Promise.reject(new Error('HOST_TIMEOUT: hosts.refresh; result unknown'))
+          : Promise.resolve({
+              host_id: 'host-1',
+              refreshed: true,
+              sessions: 6,
+              detection: { checked: true, agents: [agent('available')] },
+            });
+      }
+      return Promise.reject(new Error(`unexpected ${method} ${path}`));
+    });
+    renderBar();
+    await waitFor(() => expect(request).toHaveBeenCalledWith('GET', '/api/hosts'));
+
+    await chooseHost('first');
+    const notice = await screen.findByTestId('host-refresh-failure');
+    expect(notice).toHaveTextContent('settings.hosts.refreshUnknown');
+    // The rendering state is reused: the probe may still be running on the host, so the row says so and the
+    // verdict it already held is not drawn as unprobed.
+    expect(screen.getByTestId('host-refresh-state')).toHaveAttribute('data-refresh-state', 'refreshing');
+    expect(screen.getByTestId('host-refresh-probe-claude')).toHaveTextContent('settings.hosts.refreshing');
+    expect(screen.getByTestId('host-refresh-probe-claude')).toHaveAttribute('data-probe-state', 'available');
+    expect(hostDirectorySnapshot().hosts[0]?.detection?.agents?.[0]?.state).toBe('available');
+
+    // The retry beside that notice asks again, and the answer it gets is what the row takes.
+    timingOut = false;
+    await userEvent.setup({ pointerEventsCheck: 0 }).click(screen.getByTestId('host-refresh-retry'));
+    await waitFor(() =>
+      expect(screen.getByTestId('host-refresh-sessions')).toHaveTextContent('settings.hosts.sessionCount(6)')
+    );
+    expect(screen.queryByTestId('host-refresh-failure')).toBeNull();
+  });
+
   it('keeps the verdicts it already showed when the refresh fails, and offers the retry', async () => {
     let fail = true;
     request.mockImplementation((method: string, path: string) => {
