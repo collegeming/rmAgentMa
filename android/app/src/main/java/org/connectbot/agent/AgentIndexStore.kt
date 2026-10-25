@@ -149,11 +149,16 @@ class AgentIndexStore @Inject constructor(
         }
     }
 
+    /**
+     * A row is kept when its own identity is usable. A working directory the source did not name - or named as a
+     * relative path - is not a reason to drop a session that exists on the host: the row stays in the list, no
+     * directory is guessed for it, and [unknownDirectoryReason] reports why it cannot be used yet.
+     */
     private fun valid(session: AgentSession): Boolean {
         fun clean(value: String): Boolean = value.none { it.isISOControl() }
         fun readable(value: String): Boolean = value.none { it.isISOControl() && it != '\n' && it != '\r' && it != '\t' }
         return session.hostId > 0 && session.sessionId.isNotBlank() && clean(session.sessionId) &&
-            session.cwd.startsWith('/') && clean(session.cwd) && readable(session.title) && readable(session.preview)
+            clean(session.cwd) && readable(session.title) && readable(session.preview)
     }
 
     private companion object {

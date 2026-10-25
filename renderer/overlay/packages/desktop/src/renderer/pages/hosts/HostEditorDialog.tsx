@@ -3,7 +3,13 @@
  * Copyright 2026 rmAgentMa contributors
  * SPDX-License-Identifier: Apache-2.0
  */
-import { HOST_OS_LINUX, HOST_OS_WINDOWS, type SavedHost } from '@/common/host/hostTransport';
+import {
+  HOST_AUTH_KEY,
+  HOST_AUTH_PASSWORD,
+  HOST_OS_LINUX,
+  HOST_OS_WINDOWS,
+  type SavedHost,
+} from '@/common/host/hostTransport';
 import { AionModal } from '@renderer/components/base';
 import { Button, Input, Radio } from '@arco-design/web-react';
 import React, { useEffect, useState } from 'react';
@@ -52,7 +58,7 @@ const HostEditorDialog: React.FC<Props> = ({ visible, host, onClose, onSaved }) 
   const distributionValid = validWslDistribution(draft.distribution.trim());
 
   const save = async () => {
-    const blocked = draftProblem(draft);
+    const blocked = draftProblem(draft, Boolean(host));
     if (blocked) {
       setFailure(t(DRAFT_PROBLEM_KEYS[blocked.kind]));
       return;
@@ -179,6 +185,40 @@ const HostEditorDialog: React.FC<Props> = ({ visible, host, onClose, onSaved }) 
               <span className='text-12px leading-18px text-t-tertiary'>{t('settings.hosts.targetLinuxHint')}</span>
             </div>
           )
+        )}
+        {field(
+          t('settings.hosts.authMethod'),
+          <div className='flex flex-col gap-8px'>
+            <Radio.Group
+              aria-label={t('settings.hosts.authMethod')}
+              value={draft.authMethod}
+              onChange={(value: string) => patch({ authMethod: value })}
+            >
+              <Radio value={HOST_AUTH_KEY}>{t('settings.hosts.authKey')}</Radio>
+              <Radio value={HOST_AUTH_PASSWORD}>{t('settings.hosts.authPassword')}</Radio>
+            </Radio.Group>
+            {draft.authMethod === HOST_AUTH_PASSWORD ? (
+              <div className='flex flex-col gap-4px'>
+                {/* The field is write-only: the stored password is never sent back, so an empty box keeps it. */}
+                <Input.Password
+                  aria-label={t('settings.hosts.password')}
+                  autoComplete='new-password'
+                  value={draft.password}
+                  placeholder={host?.has_password ? t('settings.hosts.passwordKeep') : ''}
+                  onChange={(value) => patch({ password: value })}
+                />
+                <p className='m-0 text-12px leading-18px text-t-tertiary'>
+                  {host?.has_password ? t('settings.hosts.passwordStored') : t('settings.hosts.passwordHint')}
+                </p>
+              </div>
+            ) : (
+              <p className='m-0 text-12px leading-18px text-t-tertiary'>
+                {host?.key_name || host?.key_id
+                  ? t('settings.hosts.authKeyCurrent', { key: host.key_name || host.key_id })
+                  : t('settings.hosts.authKeyHint')}
+              </p>
+            )}
+          </div>
         )}
         {failure && (
           <p role='alert' className='m-0 break-words text-13px leading-18px text-danger-6'>

@@ -182,6 +182,22 @@ class HostRepository @Inject constructor(
     }
 
     /**
+     * Saves the password this host authenticates with, or removes it when [password] is null or empty. The
+     * password is wrapped by Android Keystore - the protection private keys already use, never a weaker one of
+     * this app's own - and stays out of the database, every export, every log line and every search: only the
+     * fact that one is saved is readable here, and a connection reads the password itself.
+     *
+     * A host that authenticates with a password is the caller's choice as well: save the password and keep
+     * [Host.authMethod] at [Host.AUTH_METHOD_PASSWORD] together, or the connection falls back to the key path.
+     */
+    suspend fun setHostPassword(hostId: Long, password: String?) {
+        securePasswordStorage.savePassword(hostId, password)
+    }
+
+    /** True when a password is saved for [hostId]. The password itself is never read back or returned here. */
+    suspend fun hasHostPassword(hostId: Long): Boolean = securePasswordStorage.hasPassword(hostId)
+
+    /**
      * Update the last connected time for a host.
      *
      * @param host The host to update

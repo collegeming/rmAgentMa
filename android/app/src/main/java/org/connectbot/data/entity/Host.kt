@@ -144,6 +144,14 @@ data class Host(
      */
     @ColumnInfo(name = "agent_target", defaultValue = "native")
     val agentTarget: String = "native",
+
+    /**
+     * How this host authenticates: "key" (a key association, an ssh-agent or an interactive prompt) or
+     * "password" (a password saved with Android Keystore protection, used directly on every connection).
+     * The password itself is never part of a host row, this database or any export.
+     */
+    @ColumnInfo(name = "auth_method", defaultValue = "key")
+    val authMethod: String = "key",
 ) {
     /**
      * Check if this host is temporary (not saved to database).
@@ -187,6 +195,12 @@ data class Host(
     }
 
     companion object {
+        /** Authentication with a key association, an ssh-agent or an interactive prompt. */
+        const val AUTH_METHOD_KEY = "key"
+
+        /** Authentication with the password saved for this host under Android Keystore protection. */
+        const val AUTH_METHOD_PASSWORD = "password"
+
         /**
          * Create a new SSH host with default values (Java interop helper).
          */

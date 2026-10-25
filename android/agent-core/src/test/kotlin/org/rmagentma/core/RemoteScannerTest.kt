@@ -55,9 +55,12 @@ class RemoteScannerTest {
         }
         val result = withTimeout(5000) { RemoteScanner().scan(host) }
         val command = lastCommand
-        assertEquals(1, result.sessions.size)
-        assertEquals(19L, result.sessions.single().hostId)
-        assertEquals(1234L, result.sessions.single().updatedAt)
+        // The session whose source named a relative directory is kept exactly as it was read: it exists on the
+        // host, and the app reports it as a directory-unknown record instead of dropping the session here.
+        assertEquals(2, result.sessions.size)
+        assertEquals(19L, result.sessions.first { it.sessionId == "one" }.hostId)
+        assertEquals(1234L, result.sessions.first { it.sessionId == "one" }.updatedAt)
+        assertEquals("relative", result.sessions.first { it.sessionId == "two" }.cwd)
         assertTrue(result.errors.size >= 3)
         assertFalse(result.errors.any { "private" in it })
         assertTrue(closed)

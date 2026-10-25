@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { randomUUID } from 'node:crypto';
 import { AttachmentStore } from './attachment-store.mjs';
-import { MessageQueue, SessionIndex, fixtureHosts } from './host-fixture.mjs';
+import { HistoryStore, HostStore, MessageQueue, SessionIndex, cwdFields, seededHistoryWindow, seededOlderHistory } from './host-fixture.mjs';
 
 const C = 'conv-probe-1';
 const P = 'project-probe-1';
@@ -10,9 +10,10 @@ const error = (status, code) => Object.assign(new Error(code), { status, code })
 
 /**
  * The native bridge's offline host: one conversation, one draft, one model, a real attachment upload store
- * (`attachment.begin/chunk/finish/abort`), the message queue, the index cache and the saved-host rows. It
- * answers the frozen renderer exactly where the Kotlin host would, so the packaged-asset probe covers the
- * same contract without a device.
+ * (`attachment.begin/chunk/finish/abort`), the message queue, the index cache, the history store, the saved-host
+ * rows with their credentials, and the two facts a session states about itself — whether its working directory is
+ * still there and whether the host still holds its runtime's session. It answers the frozen renderer exactly
+ * where the Kotlin host would, so the packaged-asset probe covers the same contract without a device.
  */
 export class NativeProbeDTO {
   constructor() {
@@ -23,7 +24,8 @@ export class NativeProbeDTO {
     this.draft = '';
     this.draftFiles = [];
     this.model = 'probe-model-a';
-    this.messages = [];
+    // The loaded window starts with one history row, so the older page below it has a cursor to page from.
+    this.messages = seededHistoryWindow(C);
     this.ledger = new Map();
     // The injected failures one check turns on: a refused send, and no open conversation to attach to.
     this.failNextSend = false;
@@ -32,19 +34,28 @@ export class NativeProbeDTO {
     this.uploads = new AttachmentStore();
     this.queue = new MessageQueue();
     this.index = new SessionIndex([{ session_id: C }]);
+    this.hosts = new HostStore();
+    this.history = new HistoryStore({ older: seededOlderHistory(C) });
+    this.recovery = { state: 'attached', note: null };
+    this.cwdMissing = false;
+    this.cwdNote = null;
   }
   /** The finished attachments, by reference — the map `messages.send` and the checks read. */
   get attachments() {
     return this.uploads.finished;
   }
   runtime() {
-    return { state: this.phase, can_send_message: this.phase === 'idle', has_task: this.phase === 'running', is_processing: this.phase === 'running', pending_confirmations: 0, turn_id: this.turn, epoch: this.epoch, seq: this.seq, supports_midturn_delivery: false };
+    return { state: this.phase, can_send_message: this.phase === 'idle' && !this.cwdMissing, has_task: this.phase === 'running', is_processing: this.phase === 'running', pending_confirmations: 0, turn_id: this.turn, epoch: this.epoch, seq: this.seq, supports_midturn_delivery: false };
   }
   config() { return [{ id: 'model', name: '探针模型', category: 'model', type: 'select', current_value: this.model, options: [{ value: 'probe-model-a', name: '本地合成模型甲' }, { value: 'probe-model-b', name: '本地合成模型乙' }] }]; }
   conversation() {
-    return { id: C, name: '中文宿主探针', type: 'acp', project_id: P, created_at: 1, modified_at: Date.now(), model: { provider_id: 'fake', use_model: this.model, model: this.model }, status: this.phase === 'running' ? 'running' : 'finished', fork_capability: { at_turn: false }, prompt_capability: { image: false, audio: false }, extra: { workspace: '/probe', backend: 'dsh', agent_name: 'dsh', custom_workspace: true, cached_config_options: this.config() }, runtime: this.runtime() };
+    return { id: C, name: '中文宿主探针', type: 'acp', project_id: P, created_at: 1, modified_at: Date.now(), model: { provider_id: 'fake', use_model: this.model, model: this.model }, status: this.phase === 'running' ? 'running' : 'finished', fork_capability: { at_turn: false }, prompt_capability: { image: false, audio: false }, extra: { workspace: '/probe', backend: 'dsh', agent_name: 'dsh', custom_workspace: true, cached_config_options: this.config() }, runtime: this.runtime(), ...cwdFields(this.cwdMissing, this.cwdNote) };
   }
-  snapshot() { return { conversation_id: C, epoch: this.epoch, seq: this.seq, runtime: this.runtime(), messages: this.messages, pending: [], draft: { text: this.draft, files: this.draftFiles }, config_options: this.config(), backgroundVerified: false }; }
+  /** The same row as `conversation.read` answers it, which also states whether the runtime is still attached. */
+  conversationRead() {
+    return { ...this.conversation(), recovery: { ...this.recovery } };
+  }
+  snapshot() { return { conversation_id: C, epoch: this.epoch, seq: this.seq, runtime: this.runtime(), messages: this.messages, pending: [], draft: { text: this.draft, files: this.draftFiles }, config_options: this.config(), backgroundVerified: false, recovery: { ...this.recovery } }; }
   publish(name, data) { this.seq++; this.deliver?.({ type: 'event', name, data, epoch: this.epoch, seq: this.seq }); }
   validateFiles(files) { this.uploads.validate(files); }
   async handle(action, payload, documentId) {
@@ -55,10 +66,16 @@ export class NativeProbeDTO {
     if (action === 'settings.client.read' || action === 'settings.read') return envelope({ language: 'zh-CN', theme: 'light', colorScheme: 'default', notificationEnabled: false, cronNotificationEnabled: false, keepAwake: false, saveUploadToWorkspace: false });
     if (action === 'settings.client.write') return envelope(body.settings ?? body);
     if (action === 'conversations.list') return envelope({ items: [this.conversation()], total: 1, has_more: false });
-    if (action === 'conversation.read') return envelope(this.conversation());
+    if (action === 'conversation.read') return envelope(this.conversationRead());
     if (action === 'projects.list') return envelope([{ project_id: P, name: '隔离探针项目' }]);
     if (action === 'project.read') return envelope({ project_id: P, name: '隔离探针项目', explorer: { workspace_pe_id: null, entries: [] } });
-    if (action === 'messages.list') return envelope({ items: structuredClone(this.messages), oldest_cursor: this.messages[0]?.id ?? null, newest_cursor: this.messages.at(-1)?.id ?? null, has_more_before: false, has_more_after: false });
+    if (action === 'messages.list') return envelope({ items: structuredClone(this.messages), oldest_cursor: this.messages[0]?.id ?? null, newest_cursor: this.messages.at(-1)?.id ?? null, has_more_before: this.history.hasOlder(), has_more_after: false, history: this.history.report() });
+    if (action === 'messages.before') {
+      const limit = Number(query.limit ?? 50);
+      if (!Number.isFinite(limit) || limit < 1 || limit > 200) throw error(422, 'INVALID_CURSOR');
+      const page = this.history.page(this.messages, query.before ?? '', Math.floor(limit));
+      return envelope({ items: page.items, oldest_cursor: page.items[0]?.id ?? null, newest_cursor: page.items.at(-1)?.id ?? null, has_more_before: page.has_more_before, has_more_after: page.has_more_after, history: this.history.report() });
+    }
     if (action === 'messages.latest') return envelope([...this.messages].reverse().find((message) => message.type === query.type) ?? null);
     if (action === 'runtime.ensure') return envelope({ recovered: false, config_options: this.config(), runtime: this.runtime() });
     if (action === 'config.read') return envelope({ config_options: this.config() });
@@ -99,13 +116,16 @@ export class NativeProbeDTO {
     }
     if (action === 'queue.cancel') return envelope(this.queue.cancel(params.queueId));
     if (action === 'index.clear') return envelope(this.index.clear());
-    if (action === 'hosts.list') {
-      const items = fixtureHosts();
-      return envelope({ items, total: items.length });
-    }
+    if (action === 'history.clear') return envelope(this.history.clear());
+    if (action === 'hosts.list') return envelope(this.hosts.list());
+    if (action === 'hosts.create') return envelope(this.hosts.create(body));
+    if (action === 'hosts.update') return envelope(this.hosts.update(params.hostId, body));
     if (action === 'messages.send') {
       if (typeof body.loading_id !== 'string' || !body.loading_id || body.loading_id.length > 128) throw error(400, 'INVALID_loading_id');
       if (typeof body.content !== 'string' || !body.content.trim() || body.content.length > 8192) throw error(422, 'INVALID_CONTENT');
+      // A session whose working directory is gone cannot take a prompt: the refusal names that fact, and no turn
+      // is started for it.
+      if (this.cwdMissing) throw error(409, 'CWD_MISSING');
       if (this.failNextSend) { this.failNextSend = false; throw error(503, 'TEST_SEND_FAILURE'); }
       this.validateFiles(body.files ?? []);
       if (body.sessions?.length || body.inject_skills?.length) throw error(422, 'UNSUPPORTED_REFERENCE');

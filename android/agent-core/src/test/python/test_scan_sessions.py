@@ -197,14 +197,15 @@ class ScannerTest(unittest.TestCase):
                          {"opencode", "dsh"})
         self.assertEqual({row["agent"] for row in rows if "sessionId" in row}, {"kimi", "dsh"})
 
-    def test_sqlite_bad_row_does_not_hide_other_sessions(self):
+    def test_sqlite_row_with_a_relative_directory_does_not_hide_other_sessions(self):
         db, _ = self.database("zcode")
         db.execute("INSERT INTO session VALUES ('bad','bad','relative',?,?)", (NOW, NOW + 1))
         db.commit()
         _, rows = self.scan("--agent", "zcode")
-        self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0]["level"], "error")
-        self.assertEqual(rows[1]["sessionId"], "same")
+        # The session with a relative directory is reported as it was read - the app keeps it as a
+        # directory-unknown row - and the other session is still listed beside it.
+        self.assertEqual({row["sessionId"]: row["cwd"] for row in rows},
+                         {"bad": "relative", "same": "/project"})
 
     def test_kimi_cli_contract_and_index_cwd(self):
         root = self.kimi()
@@ -329,14 +330,18 @@ class ScannerTest(unittest.TestCase):
         for value in ("1", "1000"):
             self.assertEqual(self.scan("--limit", value), (0, []))
 
-    def test_kimi_bad_index_entry_and_relative_cwd_are_isolated(self):
+    def test_kimi_bad_index_line_and_relative_cwd_stay_readable(self):
         root = self.kimi(cwd=None)
         self.kimi("bad", cwd="relative")
         (root / "session_index.jsonl").write_text(
             "broken\n" + json.dumps({"sessionId": "session_same", "workDir": "/indexed"}) + "\n")
         _, rows = self.scan("--agent", "kimi")
-        self.assertEqual(len([row for row in rows if row.get("level") == "error"]), 2)
-        self.assertEqual([row["cwd"] for row in rows if "sessionId" in row], ["/indexed"])
+        # The broken index line is its own error, while the session whose directory the source gave as a relative
+        # path is a record as it was read: the app keeps it as a directory-unknown row instead of losing it.
+        self.assertEqual(len([row for row in rows if row.get("level") == "error"]), 1)
+        # Rows are emitted newest first, and both sessions are here: the one the index names and the one whose
+        # own metadata carries a relative directory.
+        self.assertEqual([row["cwd"] for row in rows if "sessionId" in row], ["/indexed", "relative"])
 
     def test_sqlite_parameterized_session_id_and_large_complete_preview(self):
         db, _ = self.database("opencode")

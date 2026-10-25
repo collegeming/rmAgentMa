@@ -90,6 +90,24 @@ class AgentPresentationTest {
     }
 
     @Test
+    fun aWorkspaceWithoutAUsableDirectoryOffersNoNewSessionButKeepsItsConversations() {
+        // The drawer's own rule: the group's directory decides the entry, and the same rule refuses a relative path.
+        assertTrue(canCreateInWorkspace(AgentWorkspaceKey(1, "/work")))
+        assertFalse(canCreateInWorkspace(AgentWorkspaceKey(1, "")))
+        assertFalse(canCreateInWorkspace(AgentWorkspaceKey(1, "relative/work")))
+        assertFalse(canCreateInWorkspace(AgentWorkspaceKey(1, "/work\u0000")))
+
+        // Its conversations stay listed and openable, so the group's history is still reachable from the drawer.
+        val session = AgentSession(1, AgentKind.KIMI, "k", "/work", title = "旧对话", preview = "历史预览")
+        val availability = listOf(AgentAvailability(hostId = 1, kind = AgentKind.KIMI, executable = "/usr/bin/kimi", available = true))
+        val groups = agentWorkspaceTree(listOf(session), "")
+        assertEquals(listOf(session), groups.single().sessions)
+        assertTrue(canOpenConversation(availability, session))
+        assertFalse(canOpenConversation(availability, session.copy(cwd = "")))
+        assertFalse(canOpenConversation(availability, session.copy(cwd = "relative/work")))
+    }
+
+    @Test
     fun drawerCurrentScopeFiltersImmediatelyWhileAllScopeRetainsEveryAgent() {
         val kimi = AgentSession(1, AgentKind.KIMI, "kimi", "/work")
         val dsh = kimi.copy(agent = AgentKind.DSH, sessionId = "dsh")

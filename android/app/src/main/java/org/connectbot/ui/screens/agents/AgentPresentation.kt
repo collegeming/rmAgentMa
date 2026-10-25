@@ -120,6 +120,29 @@ internal fun agentLinkPresentation(
 
 fun validAgentCwd(cwd: String): Boolean = cwd.startsWith('/') && cwd.none { it.code < 32 || it.code == 127 }
 
+/**
+ * What one connection challenge asks the user for. A host key is confirmed, a password or an encrypted key's
+ * passphrase is typed, and a challenge that is neither asks for a plain confirmation: the key-use confirmation
+ * arrives as `key_passphrase` with its secret flag unset and is checked against the literal `accept`, so a surface
+ * that drew it as a passphrase field would answer text that check never compares and would cancel the connection on
+ * every attempt. A kind this build does not know is refused instead of being guessed at.
+ */
+internal enum class AgentChallengeInput { HOST_KEY, SECRET, CONFIRMATION, UNSUPPORTED }
+
+/** The answer a host-key or confirmation challenge is accepted with, as the connection's own check expects it. */
+internal const val AGENT_CHALLENGE_ACCEPT = "accept"
+
+/**
+ * The input one challenge needs, from its kind and its own secret flag. A connection answers only these three kinds,
+ * so an unknown one is `UNSUPPORTED` — never an accept the user did not give.
+ */
+internal fun agentChallengeInput(kind: String, secret: Boolean): AgentChallengeInput = when (kind) {
+    "host_key" -> AgentChallengeInput.HOST_KEY
+    "password" -> AgentChallengeInput.SECRET
+    "key_passphrase" -> if (secret) AgentChallengeInput.SECRET else AgentChallengeInput.CONFIRMATION
+    else -> AgentChallengeInput.UNSUPPORTED
+}
+
 fun filterAgentSessions(
     sessions: List<AgentSession>,
     hostId: Long?,
@@ -147,6 +170,22 @@ internal data class AgentWorkspace(val key: AgentWorkspaceKey, val sessions: Lis
 internal data class AgentGroup(val agent: AgentKind, val sessions: List<AgentSession>)
 
 internal data class AgentWorkspaceTree(val key: AgentWorkspaceKey, val sessions: List<AgentSession>, val groups: List<AgentGroup>)
+
+/**
+ * Whether the drawer may offer to create a session inside one workspace group. A group whose recorded directory was
+ * never written down, or is not an absolute path, cannot host a new session at all, so the entry is disabled and the
+ * reason is shown beside it rather than a button that silently does nothing; the group's own conversations stay
+ * listed, because they are still what that workspace's history is.
+ */
+internal fun canCreateInWorkspace(key: AgentWorkspaceKey): Boolean = validAgentCwd(key.cwd)
+
+/**
+ * Whether one conversation row may be opened from the drawer. The directory is checked with the same rule the
+ * repository applies before it launches anything, so a row that cannot be opened says why instead of looking like a
+ * tap that did nothing.
+ */
+internal fun canOpenConversation(availability: List<AgentAvailability>, session: AgentSession): Boolean =
+    validAgentCwd(session.cwd) && canOpenAgent(availability, session.hostId, session.agent)
 
 internal fun groupAgentWorkspaces(
     sessions: List<AgentSession>,

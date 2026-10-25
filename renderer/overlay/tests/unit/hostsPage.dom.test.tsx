@@ -171,6 +171,7 @@ describe('hosts page', () => {
         username: '',
         os_type: 'windows',
         agent_target: 'windows',
+        auth_method: 'key',
       })
     );
   });
@@ -230,6 +231,7 @@ describe('hosts page', () => {
       username: '',
       os_type: 'linux',
       agent_target: 'native',
+      auth_method: 'key',
     });
   });
 });

@@ -32,13 +32,17 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.connectbot.data.HostRepository
 import org.connectbot.data.entity.Host
 import org.connectbot.di.CoroutineDispatchers
@@ -163,7 +167,17 @@ class AgentRepository @Inject constructor(
     private val switchMutex = Mutex()
     private val refreshMutex = Mutex()
     private val stateLock = Any()
-    private val history = AgentEventHistory(directory = java.io.File(context.noBackupFilesDir, "agent-history"), cleanupExisting = true)
+    private val historyDirectory = java.io.File(context.noBackupFilesDir, "agent-history")
+
+    /**
+     * The open conversation's stored pages and the session they belong to, or a store that stands for no session.
+     * Guarded by [stateLock]: every read and every write of an event goes through this one store.
+     */
+    private var history = AgentEventHistory(directory = historyDirectory)
+    private var historySession: AgentSession? = null
+
+    /** The last read-only verification of the open conversation, keyed by the session it was made for. */
+    private var recovery: Pair<AgentSession, AgentRecovery>? = null
     private var generation = 0L
     private var handle: AgentSessionHandle? = null
 
@@ -180,6 +194,20 @@ class AgentRepository @Inject constructor(
     private var historyReadJob: Job? = null
     private val jobs = AgentJobs(scope)
     val operationCount: StateFlow<Int> = jobs.count
+
+    /**
+     * The session-level facts the Agent foreground notification publishes. It names a conversation as running
+     * only while its own turn executes, and a host this app holds no fact for as unknown, so a notification can
+     * never describe a background state the app does not have.
+     */
+    val sessionNotice: StateFlow<AgentSessionNoticeFacts> = combine(
+        combine(mutableSelected, mutableConversationState, mutableBusy, mutableLiveLinkStates, mutableLinkRecords) { session, conversation, busy, live, records ->
+            AgentNoticeInput(session, conversation, busy, live, records)
+        },
+        hosts,
+    ) { input, hostRows ->
+        agentSessionNoticeFacts(hostRows, input.session, input.conversation, input.busy, input.live, input.records)
+    }.stateIn(scope, SharingStarted.Eagerly, AgentSessionNoticeFacts())
     private val foregroundLock = Mutex()
     private val maintenanceLock = Any()
     private var maintenance: Job? = null
@@ -257,6 +285,47 @@ class AgentRepository @Inject constructor(
      */
     fun hostLinkStates(): Map<Long, AgentLinkState> =
         mutableLinkRecords.value.filter { it.agent == null }.associate { it.hostId to it.state } + mutableLiveLinkStates.value
+
+    /**
+     * Whether the Agent still holds the conversation that is open here, read from the Agent's own list and never
+     * from a prompt: nothing is sent, nothing is replayed and no second conversation is started.
+     *
+     * A verdict already made for this conversation after the link came back is answered as it is. Without one the
+     * question is asked now, bounded and read-only; a host that cannot be reached, a listing that failed and an
+     * Agent whose session list this build cannot read are answered as [AgentRecoveryState.UNKNOWN] with their own
+     * reason, so "cannot tell" is never shown as either answer.
+     */
+    suspend fun recoveryState(): AgentRecovery {
+        val session = synchronized(stateLock) { mutableSelected.value }
+            ?: return AgentRecovery(AgentRecoveryState.UNKNOWN, "no conversation is open")
+        synchronized(stateLock) { recovery?.takeIf { it.first.matches(session) }?.second }?.let { return it }
+        return operation { verifyRecovery(session) }
+    }
+
+    /**
+     * The one read-only existence check this app makes about a session, with the verdict kept for the conversation
+     * it was made for. Every way of not being able to tell ends as [AgentRecoveryState.UNKNOWN] with its reason.
+     */
+    private suspend fun verifyRecovery(session: AgentSession): AgentRecovery {
+        val verdict = when {
+            session.sessionId.isBlank() -> AgentRecovery(AgentRecoveryState.UNKNOWN, "the Agent has not named this conversation yet")
+            !hostTarget(session.hostId).posixCommands -> AgentRecovery(AgentRecoveryState.UNKNOWN, "this build cannot read the session list of ${hostTarget(session.hostId).id}")
+            else -> try {
+                AgentRecoveryCheck(dispatchers.io).verify(pool.hostSession(session.hostId), session)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AgentRecovery(AgentRecoveryState.UNKNOWN, describe(e))
+            }
+        }
+        synchronized(stateLock) {
+            if (mutableSelected.value?.matches(session) == true) recovery = session to verdict
+        }
+        return verdict
+    }
+
+    private fun AgentSession.matches(other: AgentSession): Boolean =
+        hostId == other.hostId && agent == other.agent && sessionId == other.sessionId
 
     private suspend fun probeHost(hostId: Long, interactive: Boolean, force: Boolean): List<AgentAvailability> = probeMutex.withLock {
         val cached = mutableAvailability.value.filter { it.hostId == hostId }
@@ -406,6 +475,10 @@ class AgentRepository @Inject constructor(
     )
 
     private suspend fun openConversation(session: AgentSession, sessionId: String?) = operation {
+        // A conversation whose working directory is not known is kept in the index and shown as such, but it can
+        // be neither continued nor created here: the Agent's own directory is what makes a session usable, and
+        // guessing one would put the conversation in a place the Agent never used.
+        session.unknownDirectoryReason()?.let { reason -> throw AgentDirectoryUnknownException(reason) }
         val started = System.nanoTime()
         fun trace(stage: String) = Timber.tag("AgentRepository").d(
             "hostId=%d agent=%s resume=%s stage=%s elapsedMs=%d",
@@ -434,7 +507,7 @@ class AgentRepository @Inject constructor(
             val child = CoroutineScope(SupervisorJob(scope.coroutineContext[Job]) + dispatchers.io)
             synchronized(stateLock) { conversationScope = child }
             try {
-                synchronized(stateLock) { history.clear() }
+                attachHistory(session)
                 pool.allowUserRetry(session.hostId)
                 currentCoroutineContext().ensureActive()
                 trace("probe_start")
@@ -489,8 +562,18 @@ class AgentRepository @Inject constructor(
                             collectingContext.ensureActive()
                             synchronized(stateLock) {
                                 if (generation == token) {
-                                    mutableEvents.value = history.append(event) { collectingContext.ensureActive() }
-                                    mutableHasEarlier.value = history.hasEarlier
+                                    try {
+                                        mutableEvents.value = history.append(event) { collectingContext.ensureActive() }
+                                        mutableHasEarlier.value = history.hasEarlier
+                                    } catch (e: CancellationException) {
+                                        throw e
+                                    } catch (e: Exception) {
+                                        // A page that cannot be written keeps the conversation live: the pages
+                                        // already stored stay where they are, and this history reports itself
+                                        // incomplete with the reason instead of the conversation ending here.
+                                        history.markIncomplete(describe(e))
+                                        report(e)
+                                    }
                                 }
                             }
                         }
@@ -504,10 +587,34 @@ class AgentRepository @Inject constructor(
                 }
                 trace("consumer_started")
                 trace("load_start")
-                when (opened) {
-                    is AcpSessionHandle -> opened.load()
-                    is ZcodeSessionHandle -> opened.load()
+                // The Agent's answer only means its own request finished. The updates it replayed before that
+                // answer must be consumed and stored by this app's consumer first, so the history is marked
+                // complete on the barrier that follows them - never on the response alone.
+                val barrierReached = when (opened) {
+                    is AcpSessionHandle -> {
+                        opened.load()
+                        withTimeoutOrNull(HISTORY_BARRIER_TIMEOUT_MILLIS) { opened.awaitHistoryBarrier() } != null
+                    }
+
+                    is ZcodeSessionHandle -> {
+                        opened.load()
+                        withTimeoutOrNull(HISTORY_BARRIER_TIMEOUT_MILLIS) { opened.awaitHistoryBarrier() } != null
+                    }
+
                     else -> error("Unsupported agent session handle")
+                }
+                trace("load_done")
+                synchronized(stateLock) {
+                    if (generation == token) {
+                        history.endReplay()
+                        if (barrierReached) {
+                            history.markComplete()
+                        } else {
+                            // The replayed pages are stored and readable, but nothing proved the replay ended:
+                            // the history says so instead of claiming it is complete.
+                            history.markIncomplete("the Agent's history barrier did not complete")
+                        }
+                    }
                 }
                 synchronized(stateLock) {
                     if (generation == token && mutableConversationState.value == AgentConversationState.Loading) {
@@ -515,6 +622,9 @@ class AgentRepository @Inject constructor(
                         mutableSelected.value = loaded
                         mutableActive.value = loaded
                         mutableConversationState.value = AgentConversationState.Ready
+                        // A conversation this app opened without an Agent id has its pages named by the id the
+                        // Agent just gave it, so the next open finds them again.
+                        if (loaded.sessionId != historySession?.sessionId) renameHistory(loaded)
                         trace("open_ready")
                     }
                 }
@@ -541,6 +651,74 @@ class AgentRepository @Inject constructor(
         }
     }
 
+    /**
+     * Binds the conversation being opened to its own stored pages: the session key selects the store, and the
+     * newest stored page it holds becomes the window straight away, so a conversation read before is readable
+     * again - offline too - without the Agent being asked for it a second time. Nothing stored is cleared here.
+     */
+    private fun attachHistory(session: AgentSession) = synchronized(stateLock) {
+        history.close()
+        history = newHistory(session)
+        historySession = session
+        val stored = try {
+            history.attach()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // The stored pages cannot be read: they are kept on disk and this conversation starts from the Agent
+            // alone, with its history reported as unavailable rather than silently empty.
+            report(e)
+            emptyList()
+        }
+        mutableEvents.value = stored
+        mutableHasEarlier.value = history.hasEarlier
+        mutableHasLatest.value = history.hasLatest
+    }
+
+    /** Moves the pages written before the Agent named this conversation onto the store that id names. */
+    private fun renameHistory(session: AgentSession) {
+        history.rename(AgentEventHistory.storeName(session.hostId, session.agent, session.sessionId))
+        historySession = session
+    }
+
+    private fun newHistory(session: AgentSession) = AgentEventHistory(
+        directory = historyDirectory,
+        name = AgentEventHistory.storeName(session.hostId, session.agent, session.sessionId),
+        source = HISTORY_SOURCE_PREFIX + session.agent.wireName,
+    )
+
+    /**
+     * What this app can state about the history of the conversation that is open now: whether every page it set
+     * out to read is stored, or why it is not. A conversation this app has no open has no history status to
+     * answer, and a conversation it does have open answers from its own store, never from another session's.
+     */
+    suspend fun historyStatus(): AgentHistoryStatus = withContext(dispatchers.io) {
+        val (store, session) = synchronized(stateLock) { history to historySession }
+        if (session == null) return@withContext AgentHistoryStatus(HISTORY_UNAVAILABLE, "no conversation is open")
+        AgentHistoryStatus(store.integrityState, store.integrityNote)
+    }
+
+    /**
+     * Removes every stored history page of every session and answers how many sessions were cleared. This is the
+     * only path that removes stored pages: opening a conversation and starting the app never do. The open
+     * conversation keeps the window it has loaded and continues in a fresh, empty store; a page that cannot be
+     * removed throws, so no caller can report a cleanup that did not happen.
+     */
+    suspend fun clearHistory(): Int = withContext(dispatchers.io) {
+        val session = synchronized(stateLock) {
+            history.close()
+            historySession
+        }
+        val cleared = AgentEventHistory.clearAll(historyDirectory)
+        if (session != null) {
+            synchronized(stateLock) {
+                history = newHistory(session)
+                history.markIncomplete("the stored pages of this session were removed by an explicit cleanup")
+            }
+        }
+        cleared
+    }
+
     private fun failConversation(token: Long, error: Exception) = synchronized(stateLock) {
         if (generation == token) {
             mutableActive.value = null
@@ -551,6 +729,11 @@ class AgentRepository @Inject constructor(
             handle = null
             conversationScope?.cancel()
             scope.launch { failed?.close() }
+            // A conversation that failed did not read its whole history: the pages that did arrive stay stored,
+            // and this session is reported incomplete rather than as a history that holds everything.
+            if (historySession != null) history.markIncomplete(describe(error))
+            // Nothing about the Agent's own session was verified for a conversation that just ended.
+            recovery = null
             report(error)
         }
     }
@@ -575,7 +758,10 @@ class AgentRepository @Inject constructor(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    failConversation(generation, e)
+                    // A page that cannot be read keeps the pages already on screen and leaves the conversation
+                    // open: this history is marked incomplete, and the page stays retryable.
+                    history.markIncomplete(describe(e))
+                    report(e)
                     throw e
                 }
             }
@@ -595,7 +781,10 @@ class AgentRepository @Inject constructor(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    failConversation(generation, e)
+                    // The full text of one page could not be read back: the window that is loaded stays, and the
+                    // history reports itself incomplete instead of the conversation ending here.
+                    history.markIncomplete(describe(e))
+                    report(e)
                     throw e
                 }
             }
@@ -755,9 +944,13 @@ class AgentRepository @Inject constructor(
                 mutableEvents.value = if (history.hasLatest) history.loadLatest() else appended
                 mutableHasEarlier.value = history.hasEarlier
                 mutableHasLatest.value = history.hasLatest
-            } catch (e: Exception) {
-                failConversation(generation, e)
+            } catch (e: CancellationException) {
                 throw e
+            } catch (e: Exception) {
+                // The prompt's own row could not be stored. The prompt is still sent - the Agent channel is what
+                // carries it - and this history reports itself incomplete instead of refusing the message.
+                history.markIncomplete(describe(e))
+                report(e)
             }
             mutableBusy.value = true
             promptJob = job
@@ -890,10 +1083,7 @@ class AgentRepository @Inject constructor(
     private fun stillOpen(open: AgentSessionHandle, token: Long): Boolean = synchronized(stateLock) { generation == token && handle === open }
 
     /** True while [expected] is exactly the conversation the repository has open and active. */
-    private fun matchesActive(expected: AgentSession): Boolean {
-        val current = mutableActive.value ?: return false
-        return current.hostId == expected.hostId && current.agent == expected.agent && current.sessionId == expected.sessionId
-    }
+    private fun matchesActive(expected: AgentSession): Boolean = mutableActive.value?.matches(expected) == true
 
     suspend fun respondPermission(expectedSession: AgentSession, expectedEvent: AgentEvent, id: String, option: String) = respondInteraction(expectedSession, expectedEvent, id, "permission") { current -> current.respondPermission(id, option) }
 
@@ -950,6 +1140,11 @@ class AgentRepository @Inject constructor(
             mutableBusy.value = false
             mutableActive.value = null
             mutableConversationState.value = AgentConversationState.Closed
+            // The conversation's pages stay on disk exactly as they are; only its files are let go, so the
+            // conversation that opens next - this one or another - resumes what is already stored.
+            history.close()
+            historySession = null
+            recovery = null
             previous
         }
         try {
@@ -999,7 +1194,11 @@ class AgentRepository @Inject constructor(
                 kotlinx.coroutines.delay(1000)
                 try {
                     pool.redialFailedHosts()
-                    pool.reconnectDisconnected().forEach { hostId -> refreshIndex(hostId, interactive = false) }
+                    val restored = pool.reconnectDisconnected()
+                    // A link that came back says nothing about the conversation this app is showing: the Agent
+                    // itself is asked, once and read-only, before the view claims it is still executing.
+                    verifyRecoveredSession(restored)
+                    restored.forEach { hostId -> refreshIndex(hostId, interactive = false) }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -1014,6 +1213,18 @@ class AgentRepository @Inject constructor(
                 }
             }
         }
+    }
+
+    /**
+     * Verifies the open conversation against the Agent after its host became reachable again. Only the host that
+     * was just restored is asked, only for the conversation that is open, and nothing is sent to the Agent: the
+     * session's existence is the whole question, so no prompt is ever replayed here.
+     */
+    private suspend fun verifyRecoveredSession(restored: List<Long>) {
+        if (restored.isEmpty()) return
+        val session = synchronized(stateLock) { mutableSelected.value } ?: return
+        if (session.hostId !in restored || session.sessionId.isBlank()) return
+        verifyRecovery(session)
     }
 
     /**
@@ -1120,3 +1331,18 @@ class AgentRepository @Inject constructor(
 
 /** Where one host's transcripts live, or the listing problem that kept every candidate from being read. */
 private data class TranscriptRootLookup(val root: String?, val problem: DirectoryListingProblem?)
+
+/** The state one notification line is derived from, held together so their changes arrive as one fact set. */
+private data class AgentNoticeInput(
+    val session: AgentSession?,
+    val conversation: AgentConversationState,
+    val busy: Boolean,
+    val live: Map<Long, AgentLinkState>,
+    val records: List<AgentLinkRecord>,
+)
+
+/** How long the ordered history barrier may take before this app says the history is not complete. */
+private const val HISTORY_BARRIER_TIMEOUT_MILLIS = 30_000L
+
+/** Which source a stored history page came from; a store never answers for pages another source wrote. */
+private const val HISTORY_SOURCE_PREFIX = "agent-history:"

@@ -34,6 +34,7 @@ import org.connectbot.agent.agentSessionContextPack
 import org.connectbot.agent.probeStateOf
 import org.connectbot.data.entity.Host
 import org.connectbot.ui.screens.agents.projectQuestion
+import org.connectbot.ui.screens.agents.validAgentCwd
 import org.json.JSONArray
 import org.json.JSONObject
 import org.rmagentma.core.AgentAvailability
@@ -98,7 +99,9 @@ internal object RendererProjection {
 
     /**
      * Runtime summary of one conversation. The product runs at most one turn on the open conversation, so the
-     * state is derived from that fact instead of a copied AionUi state machine.
+     * state is derived from that fact instead of a copied AionUi state machine. A conversation whose recorded
+     * working directory cannot be used carries no sendable message: the Agent has no directory to run in, so a
+     * caller reads that from `can_send_message` here instead of learning it from a refused send.
      */
     fun runtime(snapshot: RendererSnapshot, pending: AgentEvent?): JSONObject {
         val running = snapshot.turnId != null
@@ -111,7 +114,7 @@ internal object RendererProjection {
         }
         return json(
             "state" to state,
-            "can_send_message" to (snapshot.active && !snapshot.cancelling && !running && pending == null),
+            "can_send_message" to (snapshot.active && !snapshot.cancelling && !running && pending == null && cwdNote(snapshot.session?.cwd) == null),
             "has_task" to (running || pending != null),
             "is_processing" to (running || pending != null || snapshot.cancelling),
             "pending_confirmations" to (if (pending == null) 0 else 1),
@@ -121,6 +124,19 @@ internal object RendererProjection {
         )
     }
 
+    /**
+     * The reason one conversation's recorded working directory cannot be used, or null while it can. It is the same
+     * rule the product applies everywhere else, so a row this host flags is exactly a row no Agent could be launched
+     * in, and the reason travels beside it so a caller can say why a message cannot be delivered there and why no
+     * session can be created in that directory.
+     */
+    fun cwdNote(cwd: String?): String? = when {
+        cwd.isNullOrBlank() -> "该会话没有记录工作目录。"
+        validAgentCwd(cwd) -> null
+        !cwd.startsWith('/') -> "记录的工作目录不是绝对路径：$cwd"
+        else -> "记录的工作目录包含不可用的控制字符。"
+    }
+
     /** One conversation: a derived product session id and the row fields the renderer reads. */
     fun conversation(snapshot: RendererSnapshot, conversationId: String, pending: AgentEvent?, runtime: JSONObject): JSONObject {
         val session = snapshot.session ?: throw IllegalStateException("Conversation projection needs a session")
@@ -128,6 +144,7 @@ internal object RendererProjection {
         val name = listOf(row?.title, session.title, session.preview, session.sessionId, session.cwd)
             .firstOrNull { !it.isNullOrBlank() }
         val link = linkState(snapshot, session.hostId)
+        val cwdProblem = cwdNote(session.cwd)
         return json(
             "id" to conversationId,
             "name" to name,
@@ -147,6 +164,11 @@ internal object RendererProjection {
             // True while this row comes from the index cache rather than a read of the host in this pass.
             "cached" to !live(snapshot, session),
             "workspace" to json("host_id" to projectId(session.hostId), "cwd" to session.cwd),
+            // A conversation whose recorded directory is unusable stays listed and readable — it can be opened to
+            // look at its history — but neither a message nor a new session can be delivered to that directory, so
+            // the row says which it is instead of looking ready.
+            "cwd_missing" to (cwdProblem != null),
+            "cwd_note" to cwdProblem,
             // The renderer's model and mode pickers read the Agent's own option catalogue from `config.read`; this
             // row names no model, and the cached list stays empty because the host keeps no catalogue of its own.
             "model" to json("provider_id" to "", "use_model" to "", "model" to ""),
@@ -185,13 +207,22 @@ internal object RendererProjection {
     }
 
     /**
-     * One saved host as the hosts page reads it: the row itself plus the probe verdict this host already holds.
-     * A row is never dressed up as probed — `detection` says whether any probe answered for it — and the shell
-     * context the Agent would run in is named by the target, so a Windows host reads as the target it really is.
-     * [sessions] is how many conversations the product's index holds for this host, which is what a session index
-     * that was never read reports as a real zero instead of an invented count.
+     * How one saved host authenticates, as the facts that live outside its own row: the label of the key it uses,
+     * and whether a password is stored for it. A stored password is reported as that flag alone — no payload this
+     * host answers ever carries the credential itself.
      */
-    fun hostRow(host: Host, availability: List<AgentAvailability>, sessions: Int): JSONObject {
+    data class HostAuth(val keyName: String? = null, val hasPassword: Boolean = false)
+
+    /**
+     * One saved host as the hosts page reads it: the row itself plus the probe verdict this host already holds, how
+     * it authenticates and whether it holds a saved password. A row is never dressed up as probed — `detection`
+     * says whether any probe answered for it — and the shell context the Agent would run in is named by the target,
+     * so a Windows host reads as the target it really is. [sessions] is how many conversations the product's index
+     * holds for this host, which is what a session index that was never read reports as a real zero instead of an
+     * invented count. A key the product no longer holds keeps its id and answers no name, because a deleted key
+     * cannot be renamed into something that looks present.
+     */
+    fun hostRow(host: Host, availability: List<AgentAvailability>, sessions: Int, auth: HostAuth = HostAuth()): JSONObject {
         val target = remoteTargetOf(host.osType, host.agentTarget)
         return json(
             "id" to projectId(host.id),
@@ -205,12 +236,22 @@ internal object RendererProjection {
             "target" to target.id,
             "target_supported" to target.supported,
             "session_count" to sessions,
+            // The authentication the row holds: `key` (its own saved key when it names one) or `password`, whose
+            // stored credential is reported as a flag and never as a value.
+            "auth_method" to host.authMethod,
+            "key_id" to host.pubkeyId.takeIf { it > 0 },
+            "key_name" to auth.keyName,
+            "has_password" to auth.hasPassword,
             "detection" to detection(availability.filter { it.hostId == host.id }),
         )
     }
 
-    fun hostRows(hosts: List<Host>, availability: List<AgentAvailability>, sessionCounts: Map<Long, Int> = emptyMap()): JSONArray =
-        array(*hosts.map { hostRow(it, availability, sessionCounts[it.id] ?: 0) }.toTypedArray())
+    fun hostRows(
+        hosts: List<Host>,
+        availability: List<AgentAvailability>,
+        sessionCounts: Map<Long, Int> = emptyMap(),
+        auth: Map<Long, HostAuth> = emptyMap(),
+    ): JSONArray = array(*hosts.map { hostRow(it, availability, sessionCounts[it.id] ?: 0, auth[it.id] ?: HostAuth()) }.toTypedArray())
 
     /**
      * What the product holds for one host: `checked` is false until some probe answered for it, and each Agent

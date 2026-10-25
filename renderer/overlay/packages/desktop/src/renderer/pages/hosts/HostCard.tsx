@@ -8,6 +8,7 @@ import { Button, Popconfirm } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import {
+  authMethodLabel,
   capabilityLabels,
   osText,
   probeLabelKey,
@@ -51,6 +52,15 @@ const HostCard: React.FC<Props> = ({ host, refreshing, failure, onRefresh, onEdi
       <div className='truncate text-12px leading-18px text-t-secondary'>
         {host.username ? `${host.username}@` : ''}
         {host.hostname}:{host.port}
+      </div>
+      {/* How this host logs in, as the row states it: a named key, the default key, or a stored password.
+          The password itself is never part of this row. */}
+      <div
+        data-testid={`host-auth-${host.id}`}
+        data-auth-method={host.auth_method ?? ''}
+        className='truncate text-12px leading-18px text-t-secondary'
+      >
+        {authMethodLabel(host, t)}
       </div>
       <div className='flex flex-wrap items-center gap-6px'>
         <span className='text-11px leading-16px text-t-tertiary'>{sessionCountText(host, t)}</span>

@@ -27,22 +27,46 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import org.rmagentma.core.AgentEvent
+import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentOption
 import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
+import java.security.MessageDigest
 import java.util.zip.CRC32
 
+/** Every page this app set out to read for one session is stored, and the Agent's replay reached its barrier. */
+internal const val HISTORY_COMPLETE = "complete"
+
+/** Some pages are missing, unreadable or not read yet; [AgentEventHistory.integrityNote] says why. */
+internal const val HISTORY_PARTIAL = "partial"
+
+/** The stored pages cannot be read at all, so this store answers for none of them. */
+internal const val HISTORY_UNAVAILABLE = "unavailable"
+
+/**
+ * One conversation's stored event pages, keyed by `(hostId, agent, sessionId)`.
+ *
+ * A named store keeps its pages in [directory] - `noBackupFilesDir` in the app - so they survive a process
+ * restart, are never emptied by opening a session, never deleted at start-up and never reach the system backup.
+ * The store only appends: every failure (full store, torn record, unreadable file, dropped link) keeps the pages
+ * already written and reports the history as incomplete instead of dropping them, and only a completed history
+ * read marks it complete. A store without a name writes temporary pages and stands for no session.
+ *
+ * Not thread safe: the conversation owner (the repository) serializes every call.
+ */
 internal class AgentEventHistory(
     private val limit: Int = 500,
     private val textLimit: Int = 32_768,
     private val rawLimit: Int = 64 * 1024,
     private val directory: File = File(System.getProperty("java.io.tmpdir"), "agent-history"),
     private val capacityBytes: Long = 256L * 1024 * 1024,
-    private val cleanupExisting: Boolean = false,
     private val windowBytes: Long = 8L * 1024 * 1024,
+    private var name: String? = null,
+    private val source: String = "",
 ) {
     private val history = mutableListOf<AgentEvent>()
     private val pending = mutableListOf<AgentEvent>()
@@ -52,43 +76,249 @@ internal class AgentEventHistory(
     private var rows: RandomAccessFile? = null
     private var rowCount = 0L
     private var lastKey = -1L
+
+    /** The stored row the Agent's replay is expected to re-deliver next; -1 stops matching, see [replay]. */
+    private var replayRow = -1L
+
+    /** The identity of the record the replay is currently re-delivering, once a whole stored page was matched. */
+    private var replayIdentity: String? = null
+
+    /** How much of an identityless stored row the replay has repeated so far, chunk by chunk. */
+    private var replayText = ""
+
+    /** What this store reports about its own completeness, and the reason it is not [HISTORY_COMPLETE]. */
+    private var state = HISTORY_PARTIAL
+    private var note: String? = null
+
+    /** Set by any read or write that failed while this store was open: complete is never claimed afterwards. */
+    private var failed = false
     private val recentTools = object : LinkedHashMap<String, Long>(128, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean = size > 128
     }
     private var pageStart = 0L
     private var viewingEarlier = false
-    private var cleaned = false
     val hasEarlier: Boolean get() = pageStart > 0
     val hasLatest: Boolean get() = viewingEarlier
 
+    /** What this store reports about the pages it holds. */
+    val integrityState: String get() = state
+
+    /** Why this store is not [HISTORY_COMPLETE], or null while it is. */
+    val integrityNote: String? get() = note
+
     init {
         require(limit > 0 && textLimit > 0 && rawLimit >= 1024 && capacityBytes > 0)
+    }
+
+    /**
+     * Opens this session's store, resumes the pages it already holds and shows its newest page as the current
+     * window, so a conversation that was read before is readable again without reading the Agent a second time.
+     */
+    fun attach(checkActive: () -> Unit = {}): List<AgentEvent> {
+        openStore()
+        readMeta()
+        replayRow = if (rowCount > 0) 0 else -1
+        replayIdentity = null
+        replayText = ""
+        loadPage(rowCount, checkActive)
+        return window()
+    }
+
+    /** Marks the history complete. Only a caller that saw every page of this session read may call this. */
+    fun markComplete() {
+        if (failed) return
+        state = HISTORY_COMPLETE
+        note = null
+        persistMeta()
+    }
+
+    /**
+     * Reports a failure that left some of this session's pages unfetched or unwritten. The pages already stored
+     * stay exactly as they are, and only a later completed read marks the history complete again. What this store
+     * cannot state is recorded for the next run as well, so a process that ends here still reports the pages it
+     * holds as incomplete instead of inheriting a state pages no longer back.
+     */
+    fun markIncomplete(reason: String) {
+        failed = true
+        state = HISTORY_PARTIAL
+        note = reason.take(MAX_NOTE)
+        persistMeta()
+    }
+
+    /** Stops matching the Agent's replay: after the history barrier every event is the live conversation. */
+    fun endReplay() {
+        replayRow = -1
+        replayIdentity = null
+        replayText = ""
+    }
+
+    /** Closes this store's files and keeps every page written; the next open resumes them. */
+    fun close() {
+        try {
+            data?.close()
+            rows?.close()
+        } catch (_: IOException) {
+            // A file that cannot be closed is still on disk: the pages are kept either way.
+        }
+        data = null
+        rows = null
+        dataFile = null
+        indexFile = null
+        history.clear()
+        pending.clear()
+        recentTools.clear()
+        pageStart = 0
+        viewingEarlier = false
+        replayRow = -1
+        replayIdentity = null
+        replayText = ""
+    }
+
+    /**
+     * Moves these pages onto the store the Agent's own session id names, once the Agent answered with the id it
+     * created for a conversation this app opened without one. A store that already exists under that name keeps
+     * every page it holds: the pages written before the Agent answered then stay in this store beside it, and the
+     * fact that this session's history is split over two stores is reported rather than hidden.
+     */
+    fun rename(target: String) {
+        val previous = name ?: return
+        if (previous == target) return
+        val log = dataFile
+        val index = indexFile
+        try {
+            data?.close()
+            rows?.close()
+        } catch (_: IOException) { }
+        data = null
+        rows = null
+        val targetLog = File(directory, "$target.log")
+        val targetIndex = File(directory, "$target.idx")
+        if (log != null && index != null && !targetLog.exists() && !targetIndex.exists() && log.renameTo(targetLog) && index.renameTo(targetIndex)) {
+            name = target
+            File(directory, "$previous.meta.json").takeIf { it.exists() }?.renameTo(File(directory, "$target.meta.json"))
+            openStore()
+            return
+        }
+        name = previous
+        openStore()
+        record("this open's pages stay in their own store: the session already has pages under the Agent's own id")
     }
 
     private fun openStore() {
         if (data != null) return
         if (!directory.isDirectory && !directory.mkdirs()) throw IOException("Cannot create private agent history store")
         try {
-            if (cleanupExisting && !cleaned) {
-                val files = directory.listFiles() ?: throw IOException("Cannot list stale agent history stores")
-                files.filter { it.name.startsWith("history-") && it.extension in setOf("log", "idx") }.forEach {
-                    if (!it.delete()) throw IOException("Cannot clean stale agent history store")
-                }
-                cleaned = true
-            }
-            dataFile = File.createTempFile("history-", ".log", directory)
-            indexFile = File.createTempFile("history-", ".idx", directory)
+            dataFile = if (name == null) File.createTempFile("history-", ".log", directory) else File(directory, "$name.log")
+            indexFile = if (name == null) File.createTempFile("history-", ".idx", directory) else File(directory, "$name.idx")
             data = RandomAccessFile(dataFile!!, "rw")
             rows = RandomAccessFile(indexFile!!, "rw")
-        } catch (e: IOException) {
-            clear()
+            if (name != null) resumeStoredPages()
+        } catch (e: Exception) {
+            // A named store holds pages a user may still want: it is closed, never cleared, when it cannot open.
+            try {
+                if (name == null) clear() else close()
+            } catch (_: IOException) { }
             throw IOException("Cannot open private agent history store", e)
+        }
+    }
+
+    /**
+     * Continues the pages already stored: the index length is where this store writes next and its last row the
+     * order the rows are appended in. A torn or unreadable tail is left out of the index and reported - never
+     * repaired by rewriting the pages before it, and never by deleting them.
+     */
+    private fun resumeStoredPages() {
+        val size = indexFile?.length() ?: 0L
+        rowCount = size / 8
+        if (size % 8 != 0L) {
+            rows?.setLength(rowCount * 8)
+            record("the last stored page was cut off by an interrupted write")
+        }
+        var dropped = 0
+        while (rowCount > 0 && dropped < MAX_DROPPED_TAIL && !rowReadable(rowCount - 1)) {
+            rowCount--
+            rows?.setLength(rowCount * 8)
+            dropped++
+        }
+        if (dropped >= MAX_DROPPED_TAIL) {
+            state = HISTORY_UNAVAILABLE
+            note = "the stored pages of this session are damaged and cannot be read"
+        } else if (dropped > 0) {
+            record("the newest stored page is unreadable and was left out")
+        }
+        lastKey = rowCount - 1
+    }
+
+    /** True when the row at [key] reads back from the stored pages. */
+    private fun rowReadable(key: Long): Boolean = try {
+        readItem(key, preview = true)
+        true
+    } catch (_: IOException) {
+        false
+    }
+
+    /** Keeps the first reason this store is not complete; a later [markComplete] clears it again. */
+    private fun record(reason: String) {
+        if (state != HISTORY_UNAVAILABLE) state = HISTORY_PARTIAL
+        if (note == null) note = reason.take(MAX_NOTE)
+    }
+
+    private fun metaFile(): File? = name?.let { File(directory, "$it.meta.json") }
+
+    /** Restores the integrity the last run of this store reported for these pages. */
+    private fun readMeta() {
+        val file = metaFile() ?: return
+        if (!file.exists()) return
+        try {
+            val value = Json.parseToJsonElement(file.readText()) as? JsonObject ?: throw IOException("Invalid integrity record")
+            val version = value["version"]?.jsonPrimitive?.longOrNull
+            val writtenSource = value["source"]?.jsonPrimitive?.contentOrNull
+            if (version != FORMAT_VERSION.toLong() || (source.isNotEmpty() && !writtenSource.isNullOrEmpty() && writtenSource != source)) {
+                // A record this store did not write describes pages it cannot answer for.
+                state = HISTORY_PARTIAL
+                note = "the stored integrity record was written for another history format or source"
+                return
+            }
+            state = value["state"]?.jsonPrimitive?.contentOrNull ?: HISTORY_PARTIAL
+            note = value["note"]?.jsonPrimitive?.contentOrNull
+            val cursor = value["cursor"]?.jsonPrimitive?.longOrNull
+            if (state == HISTORY_COMPLETE && cursor != rowCount) {
+                // A complete record that names a different number of pages describes pages that are not here.
+                record("the stored integrity record does not match the stored pages")
+            }
+        } catch (e: Exception) {
+            state = HISTORY_PARTIAL
+            note = "the stored integrity record is unreadable".take(MAX_NOTE)
+        }
+    }
+
+    /** Records what this store can honestly say about its pages; a record that cannot be written is not claimed. */
+    private fun persistMeta() {
+        val file = metaFile() ?: return
+        try {
+            val temp = File(directory, file.name + ".tmp")
+            temp.writeText(
+                buildJsonObject {
+                    put("state", state)
+                    note?.let { put("note", it) }
+                    put("cursor", rowCount)
+                    put("source", source)
+                    put("version", FORMAT_VERSION)
+                    put("writtenAt", System.currentTimeMillis())
+                }.toString(),
+            )
+            if (!temp.renameTo(file)) throw IOException("Cannot replace the stored integrity record")
+        } catch (e: Exception) {
+            failed = true
+            state = HISTORY_PARTIAL
+            note = "the stored integrity record could not be written".take(MAX_NOTE)
         }
     }
 
     fun append(event: AgentEvent, checkActive: () -> Unit = {}): List<AgentEvent> {
         checkActive()
         openStore()
+        if (replay(event, checkActive)) return window()
         val last = if (lastKey >= 0) readRecord(offset(lastKey)).second else null
         var key = -1L
         if (event.type in TOOL_TYPES && event.id.isNotEmpty()) {
@@ -127,6 +357,104 @@ internal class AgentEventHistory(
             trim()
         }
         return window()
+    }
+
+    /**
+     * True when the Agent's own history replay delivered a record this store already holds, so no page is written
+     * twice and the conversation shows one copy of it. Records are matched by the identity their source gave them
+     * - the message or tool call the Agent names - and never by their text, because two records may read the same.
+     * A prompt this app wrote itself stands for the Agent's copy of it at the same position, and records that carry
+     * no identity at all are matched by the order they were read in, with their content confirming the match. Rows
+     * the replay does not re-deliver (this app's own diagnostics, an interaction already resolved) are stepped
+     * over by the bounded seek below, so a replay that starts after the oldest stored row still lands on its pages.
+     */
+    private fun replay(event: AgentEvent, checkActive: () -> Unit): Boolean {
+        val identity = sourceIdentity(event)
+        if (identity != null && identity == replayIdentity) {
+            // The rest of a record the Agent replays in parts, already stored as one page.
+            checkActive()
+            return true
+        }
+        while (replayRow >= 0 && replayRow < rowCount) {
+            checkActive()
+            val stored = readStoredRow(replayRow, checkActive)
+            // A prompt this app wrote down itself is the same record as the Agent's own copy of it here: the row
+            // holds the user's own words, so the Agent's copy is what repeats and must not be stored a second
+            // time, whatever identity the Agent gives that copy.
+            if (event.type == "user" && stored.id.startsWith(LOCAL_ID_PREFIX)) {
+                replayRow++
+                return true
+            }
+            if (identity != null) {
+                if (identity == sourceIdentity(stored)) {
+                    replayIdentity = identity
+                    replayRow++
+                    return true
+                }
+                val found = seekReplayRow(identity, checkActive)
+                if (found < 0) {
+                    // Not one of the stored pages: this event is the live conversation, and the row the replay is
+                    // expected to re-deliver next is still the one matched against from here on.
+                    return false
+                }
+                replayIdentity = identity
+                replayRow = found + 1
+                return true
+            }
+            // Records the Agent named nothing: the order they were read in identifies them, and the content the
+            // replay repeats confirms the match.
+            if (sourceIdentity(stored) != null || stored.type != event.type) return false
+            val progress = replayText + event.text
+            when {
+                stored.text == progress -> {
+                    replayRow++
+                    replayText = ""
+                    return true
+                }
+
+                stored.text.startsWith(progress) -> {
+                    // The stored page holds more of this message than the replay has repeated so far.
+                    replayText = progress
+                    return true
+                }
+
+                else -> {
+                    replayText = ""
+                    return false
+                }
+            }
+        }
+        return false
+    }
+
+    /** The row at [key] as the replay sees it: its identity and its text, bounded to the display window's size. */
+    private fun readStoredRow(key: Long, checkActive: () -> Unit): AgentEvent = try {
+        readItem(key, preview = true, checkActive)
+    } catch (e: IOException) {
+        markIncomplete(e.message ?: "a stored history page could not be read")
+        throw e
+    }
+
+    /** The first row from the current match onward that carries [identity], or -1 within a bounded scan. */
+    private fun seekReplayRow(identity: String, checkActive: () -> Unit): Long {
+        var candidate = replayRow + 1
+        val bound = minOf(rowCount, candidate + REPLAY_SEEK_LIMIT)
+        while (candidate < bound) {
+            checkActive()
+            if (sourceIdentity(readStoredRow(candidate, checkActive)) == identity) return candidate
+            candidate++
+        }
+        return -1
+    }
+
+    /**
+     * The stable identity the source gave this record: the tool call it belongs to, or the message it is a part
+     * of. Null means the Agent named nothing, and only the order its records arrived in identifies them.
+     */
+    private fun sourceIdentity(event: AgentEvent): String? = when {
+        event.type in TOOL_TYPES -> event.id.takeIf { it.isNotEmpty() }?.let { "tool:$it" }
+        event.type in STREAM_TYPES -> messageId(event).takeIf { it.isNotEmpty() }?.let { "${event.type}:$it" }
+        else -> event.id.takeIf { it.isNotEmpty() }?.let { "${event.type}:$it" }
     }
 
     fun loadEarlier(checkActive: () -> Unit = {}): List<AgentEvent> {
@@ -172,6 +500,10 @@ internal class AgentEventHistory(
         val log = data!!
         val index = rows!!
         if (payload.size.toLong() + 16 + log.length() + index.length() + 8 > capacityBytes) {
+            // A full store keeps every page it already holds. Pages are never dropped to make room for newer
+            // ones: this session's history is reported incomplete instead, and the next read continues from the
+            // page that failed here.
+            markIncomplete("the stored history reached its storage budget ($capacityBytes bytes)")
             throw IOException("Agent history store capacity exceeded ($capacityBytes bytes)")
         }
         try {
@@ -187,6 +519,7 @@ internal class AgentEventHistory(
             index.seek(event.historyKey * 8)
             index.write(java.nio.ByteBuffer.allocate(8).putLong(position).array())
         } catch (e: IOException) {
+            markIncomplete("a history page could not be written (disk full or unavailable)")
             throw IOException("Cannot write agent history (disk full or unavailable)", e)
         }
     }
@@ -321,6 +654,10 @@ internal class AgentEventHistory(
         return window()
     }
 
+    /**
+     * Deletes this store's pages and starts over. This is what an explicit user cleanup does to one session's
+     * pages; nothing else in this class ever removes a page.
+     */
     fun clear() {
         history.clear()
         pending.clear()
@@ -330,6 +667,7 @@ internal class AgentEventHistory(
         rows = null
         dataFile?.let { if (it.exists() && !it.delete()) throw IOException("Cannot clean agent history store") }
         indexFile?.let { if (it.exists() && !it.delete()) throw IOException("Cannot clean agent history index") }
+        metaFile()?.let { if (it.exists() && !it.delete()) throw IOException("Cannot clean the stored integrity record") }
         dataFile = null
         indexFile = null
         rowCount = 0
@@ -337,6 +675,12 @@ internal class AgentEventHistory(
         recentTools.clear()
         pageStart = 0
         viewingEarlier = false
+        replayRow = -1
+        replayIdentity = null
+        replayText = ""
+        state = HISTORY_PARTIAL
+        note = null
+        failed = false
     }
 
     private fun messageId(event: AgentEvent): String = (event.raw?.get("messageId") as? JsonPrimitive)?.contentOrNull
@@ -442,9 +786,66 @@ internal class AgentEventHistory(
         pageStart = history.firstOrNull()?.historyKey ?: rowCount
     }
 
-    private companion object {
-        val TOOL_TYPES = setOf("tool", "tool_update")
-        val STREAM_TYPES = setOf("content", "thinking", "user")
-        val INTERACTIONS = setOf("permission", "question")
+    companion object {
+        private val TOOL_TYPES = setOf("tool", "tool_update")
+        private val STREAM_TYPES = setOf("content", "thinking", "user")
+        private val INTERACTIONS = setOf("permission", "question")
+
+        /** Page files this store writes, and the order they are recognized in. */
+        private val STORE_SUFFIXES = listOf(".meta.json", ".idx", ".log")
+
+        /**
+         * Stable name of one session's store: the host and the Agent stay readable and the Agent's own session
+         * id is hashed, because that id is the Agent's text and may hold any character a file name cannot.
+         */
+        fun storeName(hostId: Long, agent: AgentKind, sessionId: String): String =
+            "history-$hostId-${agent.wireName}-" + MessageDigest.getInstance("SHA-256")
+                .digest(sessionId.toByteArray(Charsets.UTF_8))
+                .take(8)
+                .joinToString("") { "%02x".format(it) }
+
+        /**
+         * Removes every stored page under [directory] and answers how many sessions' stores were removed. This is
+         * the explicit cleanup a user asks for and the only path that removes stored pages; a file that cannot be
+         * removed throws, so no caller can report a cleanup that did not happen.
+         */
+        fun clearAll(directory: File): Int {
+            val files = directory.listFiles().orEmpty()
+            val stores = files.mapNotNull { storeOf(it.name) }.toSet()
+            files.forEach { file ->
+                if (storeOf(file.name) == null) return@forEach
+                if (file.isDirectory || !file.delete()) throw IOException("Cannot clean the stored history of a session")
+            }
+            if (directory.listFiles().orEmpty().any { storeOf(it.name) != null }) {
+                throw IOException("Cannot clean the stored history of every session")
+            }
+            return stores.size
+        }
+
+        /** The store a page file belongs to, or null for a file this store did not write. */
+        private fun storeOf(fileName: String): String? {
+            if (!fileName.startsWith("history-")) return null
+            val withoutTemp = fileName.removeSuffix(TEMP_SUFFIX)
+            val suffix = STORE_SUFFIXES.firstOrNull { withoutTemp.endsWith(it) } ?: return null
+            return withoutTemp.removeSuffix(suffix).takeIf { it.isNotEmpty() }
+        }
     }
 }
+
+/** The suffix of an integrity record that is being replaced; a stored page file never carries it. */
+private const val TEMP_SUFFIX = ".tmp"
+
+/** How many rows a tail-only replay may skip before this store stops matching the replay row by row. */
+private const val REPLAY_SEEK_LIMIT = 512
+
+/** How many unreadable rows at the end of the store are left out before its pages are called damaged. */
+private const val MAX_DROPPED_TAIL = 8
+
+/** Id prefix of a prompt this app wrote into its own history; the Agent's own copy of it has no such row. */
+private const val LOCAL_ID_PREFIX = "local-"
+
+/** Bounded length of the human-readable reason a store reports for being incomplete. */
+private const val MAX_NOTE = 512
+
+/** Version of the integrity record this store writes; a record of another version is not read as this one. */
+private const val FORMAT_VERSION = 1

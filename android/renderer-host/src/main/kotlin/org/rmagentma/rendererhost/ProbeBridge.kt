@@ -215,8 +215,9 @@ class ProbeBridge(
             "hosts.update", "hosts.delete", "detection.refresh", "hosts.refresh",
             "challenges.read", "challenges.answer", "terminal.open", "terminal.command.start",
             // Cross-conversation state: one search over index rows and remote transcripts, the read-only attention
-            // inbox, the message queue that never sends by itself, one bounded context pack and the index cache.
-            "search.sessions", "inbox.list", "queue.list", "queue.send", "queue.cancel", "reference.pack", "index.clear",
+            // inbox, the message queue that never sends by itself, one bounded context pack, the index cache and
+            // the stored history pages, which are a separate store the user clears on its own.
+            "search.sessions", "inbox.list", "queue.list", "queue.send", "queue.cancel", "reference.pack", "index.clear", "history.clear",
             "assistants.list", "agents.list",
             "providers.list", "mcp.list", "skills.list", "cron.list", "teams.list", "adapters.list",
             "events.subscribe", "events.unsubscribe", "runtime.snapshot", "draft.load", "draft.save",

@@ -138,6 +138,10 @@
     <string name="agent_accept">接受指纹</string>
     <!-- Explicitly reject a presented SSH host fingerprint. -->
     <string name="agent_reject">拒绝</string>
+    <!-- Explicitly accept a presented private key; this challenge expects the literal answer, not typed text. -->
+    <string name="agent_challenge_accept">接受</string>
+    <!-- Title of a key-use confirmation: the private key is presented for approval, not a passphrase to type. -->
+    <string name="agent_key_confirmation">确认使用该私钥</string>
     <!-- Secret input label for SSH authentication. -->
     <string name="agent_secret">密码或密码短语</string>
     <!-- Unknown authentication challenge must not be accepted implicitly. -->

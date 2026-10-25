@@ -211,4 +211,21 @@ class ProbeInteropTest {
         assertTrue(events.any { it.getString("name") == "turn.completed" })
         events.forEachIndexed { index, event -> assertEquals(index + 1L, event.getLong("seq")) }
     }
+
+    @Test fun theProbeHostServesNoTerminalSurfaceAndSaysSo() {
+        val actions = ProbeActions(store(), ProbeAttachments(temporary.root.resolve("terminal-uploads")))
+        val bridge = bridge()
+        // The shared contract promises `opened` on both terminal routes; this synthetic host has no console to open,
+        // so it answers the contract's own code for a build without one instead of a terminal nobody started.
+        for (action in listOf("terminal.open", "terminal.command.start")) {
+            val answer = call(bridge, actions, action)
+            assertFalse(action, answer.getBoolean("ok"))
+            assertEquals(action, 501, answer.getInt("status"))
+            val body = answer.getJSONObject("body")
+            assertFalse(action, body.getBoolean("success"))
+            assertEquals(action, "TERMINAL_UNSUPPORTED", body.getString("code"))
+            assertFalse(action, body.has("opened"))
+            assertFalse(action, body.has("command"))
+        }
+    }
 }

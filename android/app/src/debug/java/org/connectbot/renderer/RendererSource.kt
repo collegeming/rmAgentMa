@@ -19,10 +19,12 @@ package org.connectbot.renderer
 
 import org.connectbot.agent.AgentChallenge
 import org.connectbot.agent.AgentConfigAccess
+import org.connectbot.agent.AgentHistoryStatus
 import org.connectbot.agent.AgentLinkState
 import org.connectbot.agent.AgentMessageKind
 import org.connectbot.agent.AgentMessageQueueStats
 import org.connectbot.agent.AgentQueuedMessage
+import org.connectbot.agent.AgentRecovery
 import org.connectbot.agent.AgentTranscriptOutcome
 import org.connectbot.data.entity.Host
 import org.rmagentma.core.AgentAvailability
@@ -241,4 +243,36 @@ interface RendererSource {
      * did not happen.
      */
     suspend fun clearIndex(): Int
+
+    /**
+     * What the repository's history store holds for the conversation it keeps pages of: the whole retained window,
+     * only part of it, or nothing at all. It is the store's own verdict, so a page is never answered as a complete
+     * history on this host's guess; a store that cannot be read throws and is reported as unavailable instead.
+     */
+    suspend fun historyStatus(): AgentHistoryStatus
+
+    /**
+     * Drops the retained history pages through the repository's own clear entry and answers how many conversations
+     * were cleared. This store is the loaded event history alone and is not the session index: the index is the
+     * conversation list a caller browses, while these pages are the messages of the conversations in it.
+     */
+    suspend fun clearHistory(): Int
+
+    /**
+     * Whether this process is still attached to the recorded session, is gone from it, or never verified it. An
+     * unverified session is reported as unknown rather than as attached, because a caller acts on that difference.
+     */
+    suspend fun recoveryState(): AgentRecovery
+
+    /** The nickname the saved key [keyId] carries, or null when no saved key holds that id. */
+    suspend fun keyName(keyId: Long): String?
+
+    /**
+     * Stores the saved login password of [hostId], or clears it when [password] is null. A password travels in one
+     * direction only: this seam hands it to the product's own credential store and never reads a value back.
+     */
+    suspend fun setHostPassword(hostId: Long, password: String?)
+
+    /** True while a password is stored for [hostId]. This is a flag alone; the value itself is never handed out. */
+    suspend fun hasHostPassword(hostId: Long): Boolean
 }

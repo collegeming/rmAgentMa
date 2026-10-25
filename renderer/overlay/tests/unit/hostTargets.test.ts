@@ -49,6 +49,8 @@ describe('the Agent target of a saved host', () => {
       username: 'ci',
       os_type: 'windows',
       agent_target: 'windows',
+      // The key method is what a host that names no key was created with, and no password is invented for it.
+      auth_method: 'key',
     });
   });
 

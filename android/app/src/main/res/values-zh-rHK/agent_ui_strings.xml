@@ -138,6 +138,10 @@
     <string name="agent_accept" tools:machine_translated="true">接受指紋</string>
     <!-- 明確拒絕所呈現的 SSH 主機指紋。 -->
     <string name="agent_reject" tools:machine_translated="true">拒絕</string>
+    <!-- 明確接受所呈現的私鑰；該請求期望字面回答，而非輸入的文字。 -->
+    <string name="agent_challenge_accept" tools:machine_translated="true">接受</string>
+    <!-- 私鑰使用確認的標題：此處是批准所呈現的私鑰，而非輸入密碼短語。 -->
+    <string name="agent_key_confirmation" tools:machine_translated="true">確認使用該私鑰</string>
     <!-- SSH 身份驗證的金鑰輸入標籤。 -->
     <string name="agent_secret" tools:machine_translated="true">密碼或密碼短語</string>
     <!-- 未知身份驗證挑戰不得隱含接受。 -->

@@ -21,6 +21,7 @@ import kotlinx.coroutines.CancellationException
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConfigBusyException
 import org.connectbot.agent.AgentMessageKind
+import org.connectbot.agent.AgentRecoveryState
 import org.connectbot.agent.agentAttentionSignals
 import org.connectbot.agent.projectAgentAttentionInbox
 import org.connectbot.agent.searchAgentSessions
@@ -117,6 +118,9 @@ internal class RendererActions(
         "queue.cancel" -> cancelQueued(params)
         "reference.pack" -> reference(params)
         "index.clear" -> clearIndex()
+        // The retained history pages are their own store: this drops them, while `index.clear` drops the session
+        // index a caller browses. Clearing one never touches the other.
+        "history.clear" -> clearHistory()
         "terminal.open" -> terminal(params, body)
         "terminal.command.start" -> terminal(params, body)
         "assistants.list" -> success(RendererProjection.assistants(source.snapshot().availability))
@@ -178,7 +182,9 @@ internal class RendererActions(
 
     /**
      * One conversation. Asking by a derived id is the renderer's selection step, so a conversation that is not
-     * open yet is opened through the repository's exclusive switch before its row is answered.
+     * open yet is opened through the repository's exclusive switch before its row is answered. The row also carries
+     * what this process holds about the recorded session: whether it is still attached to it, gone from it or never
+     * verified it, so a caller reconciles a resumed surface on that fact instead of assuming one.
      */
     private suspend fun conversation(params: JSONObject): ProbeResult {
         val requested = params.optString("conversationId")
@@ -187,7 +193,10 @@ internal class RendererActions(
 
             is Selection.Open -> {
                 val pending = selection.snapshot.pending()
-                success(RendererProjection.conversation(selection.snapshot, requested, pending, RendererProjection.runtime(selection.snapshot, pending)))
+                success(
+                    RendererProjection.conversation(selection.snapshot, requested, pending, RendererProjection.runtime(selection.snapshot, pending))
+                        .put("recovery", recovery()),
+                )
             }
         }
     }
@@ -206,7 +215,10 @@ internal class RendererActions(
         val requestedAgent = (body.opt("agent") as? String).orEmpty().ifEmpty { params.optString("agent") }
         val agent = AgentKind.fromWire(requestedAgent) ?: return fail(422, "AGENT_UNKNOWN", "未知的 Agent：$requestedAgent。")
         val cwd = (body.opt("cwd") as? String).orEmpty().ifEmpty { params.optString("cwd") }
-        if (!validAgentCwd(cwd)) return fail(422, "INVALID_CWD", "工作目录必须是绝对路径，且不能包含控制字符。")
+        // A new session needs a real directory: one the request did not bring, or one that is not absolute, is
+        // refused with what has to be typed instead — which is also what a workspace whose recorded directory
+        // nobody wrote down answers through this route.
+        if (!validAgentCwd(cwd)) return fail(422, "INVALID_CWD", "工作目录必须是绝对路径，且不能包含控制字符；该工作区没有记录可用的工作目录时，请在这里填写一个。")
         val failure = try {
             source.createSession(host.id, agent, cwd)
         } catch (cancelled: CancellationException) {
@@ -242,7 +254,7 @@ internal class RendererActions(
         // A cursor this window does not hold means the page cannot be served honestly from here.
         if (before != null && items.none { it.optString("id") == before }) return fail(422, "INVALID_CURSOR", "游标不在当前已加载的历史中。")
         if (after != null && items.none { it.optString("id") == after }) return fail(422, "INVALID_CURSOR", "游标不在当前已加载的历史中。")
-        return success(RendererProjection.page(items, limit, before, after, snapshot.hasEarlier))
+        return success(pageWithHistory(RendererProjection.page(items, limit, before, after, snapshot.hasEarlier)))
     }
 
     /**
@@ -273,7 +285,7 @@ internal class RendererActions(
         val items = RendererProjection.messages(earlier.events, conversationId, earlier.epoch, earlier.turnId)
         // The window now holds the earlier page alone, so it is answered whole, and the newer part the caller
         // still has is what `has_more_after` names.
-        return success(RendererProjection.page(items, limit, before = null, after = null, hasEarlier = earlier.hasEarlier, hasLater = true))
+        return success(pageWithHistory(RendererProjection.page(items, limit, before = null, after = null, hasEarlier = earlier.hasEarlier, hasLater = true)))
     }
 
     private suspend fun latest(query: JSONObject, conversationId: String): ProbeResult {
@@ -284,6 +296,9 @@ internal class RendererActions(
 
     private suspend fun send(body: JSONObject, conversationId: String): ProbeResult {
         val snapshot = openFor(conversationId) ?: return notFound()
+        // A conversation whose recorded working directory cannot be used has nowhere for the Agent to run, so the
+        // message is refused as that fact rather than sent into a directory this product cannot even state.
+        RendererProjection.cwdNote(snapshot.session?.cwd)?.let { return fail(409, CWD_MISSING, "该会话没有可用的工作目录，无法发送：$it") }
         if (!snapshot.active || snapshot.session == null) return fail(409, "CONVERSATION_NOT_READY", "会话尚未打开或不处于可发送状态。")
         if (snapshot.turnId != null) return fail(409, "TURN_BUSY", "上一个回合尚未结束。")
         if (snapshot.pending() != null) return fail(409, "APPROVAL_PENDING", "有审批请求待回答，暂不能发送。")
@@ -517,6 +532,9 @@ internal class RendererActions(
                 "messages" to JSONArray(RendererProjection.messages(snapshot.events, conversationId, snapshot.epoch, snapshot.turnId)),
                 "pending" to pending,
                 "config_options" to catalogue(snapshot),
+                // What this process holds about the recorded session travels with the snapshot, so a resumed
+                // surface reconciles on the repository's own verdict rather than on an assumption.
+                "recovery" to recovery(),
                 // Background execution is not implemented on this host and must not look verified.
                 "backgroundVerified" to false,
             ),
@@ -693,13 +711,16 @@ internal class RendererActions(
     }
 
     /**
-     * The product's own saved hosts, each with whatever probe verdict it already holds. These are the SSH hosts
-     * an Agent can run on — the same rows the renderer already draws as projects — so a host of another protocol
-     * is not listed here, and a row nobody probed says so instead of looking installed.
+     * The product's own saved hosts, each with whatever probe verdict it already holds and how it authenticates:
+     * the method, the key's id and label, and whether a password is stored — as a flag, never as the password. These
+     * are the SSH hosts an Agent can run on — the same rows the renderer already draws as projects — so a host of
+     * another protocol is not listed here, and a row nobody probed says so instead of looking installed.
      */
     private suspend fun listHosts(): ProbeResult {
         val snapshot = source.snapshot()
-        val items = RendererProjection.hostRows(snapshot.hosts, snapshot.availability, sessionCounts(snapshot))
+        val counts = sessionCounts(snapshot)
+        val auth = snapshot.hosts.associate { it.id to hostAuth(it) }
+        val items = RendererProjection.hostRows(snapshot.hosts, snapshot.availability, counts, auth)
         return success(json("items" to items, "total" to items.length(), "has_more" to false))
     }
 
@@ -707,7 +728,8 @@ internal class RendererActions(
      * Creates one saved host from the fields of the request body. Structured fields travel in the body because the
      * bridge carries only string parameters; nickname and address are required, everything else takes the value a
      * new SSH host is created with. The nickname column is unique across every host, so a taken name is refused
-     * before anything is written.
+     * before anything is written. A password the request names is stored through the product's own credential
+     * store and is never part of the answer.
      */
     private suspend fun createHost(body: JSONObject): ProbeResult {
         val fields = hostFields(body)
@@ -716,9 +738,16 @@ internal class RendererActions(
         if (protocol != SSH_PROTOCOL) invalid("只能新建 SSH 主机：Agent 连接需要 SSH。")
         val hostname = fields.hostname?.takeIf { it.isNotBlank() } ?: invalid("地址不能为空。")
         val target = hostTarget(fields.osType ?: HOST_OS_LINUX, fields.agentTarget ?: AGENT_TARGET_NATIVE)
+        val method = fields.authMethod ?: AUTH_METHOD_KEY
+        if (method !in AUTH_METHODS) return fail(422, AUTH_METHOD_INVALID, "认证方式只能是 ${AUTH_METHODS.joinToString(" 或 ")}。")
+        // A new host holds no password yet, so asking for password authentication has to bring one.
+        if (method == AUTH_METHOD_PASSWORD && fields.password !is HostPassword.Store) {
+            return fail(422, PASSWORD_REQUIRED, "认证方式为密码时必须给出密码；这台主机还没有保存过密码。")
+        }
         if (source.hostByNickname(nickname) != null) return fail(409, "HOST_NICKNAME_TAKEN", "已有同名主机：$nickname。")
-        val created = Host.createSshHost(nickname, hostname, fields.port ?: DEFAULT_SSH_PORT, fields.username.orEmpty())
-            .copy(osType = target.osType, agentTarget = target.agentTarget)
+        val base = Host.createSshHost(nickname, hostname, fields.port ?: DEFAULT_SSH_PORT, fields.username.orEmpty())
+            .copy(osType = target.osType, agentTarget = target.agentTarget, authMethod = method)
+        val created = base.copy(pubkeyId = keyIdOf(base.pubkeyId, fields.keyId))
         val saved = try {
             source.saveHost(created)
         } catch (cancelled: CancellationException) {
@@ -726,13 +755,17 @@ internal class RendererActions(
         } catch (error: Exception) {
             return fail(500, "HOST_SAVE_FAILED", "主机未能保存：${reason(error)}")
         }
+        storePassword(saved.id, fields.password)?.let { return it }
         return success(savedHostRow(saved))
     }
 
     /**
      * Updates one saved host in place. A field the body omits keeps what the row holds, and the row is written back
      * as itself with only those fields replaced, so a changed address rewrites that address alone: the id, the
-     * saved key association, the profile, the jump host and the known hosts of this host stay its own.
+     * saved key association, the profile, the jump host and the known hosts of this host stay its own. The
+     * authentication method, the key a host uses and its saved password are fields of that same update: a password
+     * the request names is stored (an explicit `null` clears it) and one the request leaves out is kept, so a form
+     * that only changes an address never drops a saved credential.
      */
     private suspend fun updateHost(params: JSONObject, body: JSONObject): ProbeResult {
         val host = requestedHost(params) ?: return hostNotFound()
@@ -741,6 +774,16 @@ internal class RendererActions(
         if (fields.protocol != null && fields.protocol != SSH_PROTOCOL) invalid("SSH 主机不能改成 ${fields.protocol}：Agent 连接需要 SSH。")
         val hostname = (fields.hostname ?: host.hostname).takeIf { it.isNotBlank() } ?: invalid("地址不能为空。")
         val target = hostTarget(fields.osType ?: host.osType, fields.agentTarget ?: host.agentTarget)
+        // A method the request names has to be one this app can use; one it does not name keeps what the row holds.
+        if (fields.authMethod != null && fields.authMethod !in AUTH_METHODS) {
+            return fail(422, AUTH_METHOD_INVALID, "认证方式只能是 ${AUTH_METHODS.joinToString(" 或 ")}。")
+        }
+        val method = fields.authMethod ?: host.authMethod
+        // A host switched to password authentication needs a password: either the one this request brings or one it
+        // already holds. Neither means the row would claim a method it cannot use.
+        if (method == AUTH_METHOD_PASSWORD && fields.password !is HostPassword.Store && !source.hasHostPassword(host.id)) {
+            return fail(422, PASSWORD_REQUIRED, "认证方式为密码时必须给出密码；这台主机还没有保存过密码。")
+        }
         if (nickname != host.nickname && source.hostByNickname(nickname) != null) {
             return fail(409, "HOST_NICKNAME_TAKEN", "已有同名主机：$nickname。")
         }
@@ -751,6 +794,8 @@ internal class RendererActions(
             username = fields.username ?: host.username,
             osType = target.osType,
             agentTarget = target.agentTarget,
+            authMethod = method,
+            pubkeyId = keyIdOf(host.pubkeyId, fields.keyId),
         )
         val saved = try {
             source.saveHost(updated)
@@ -759,7 +804,34 @@ internal class RendererActions(
         } catch (error: Exception) {
             return fail(500, "HOST_SAVE_FAILED", "主机未能保存：${reason(error)}")
         }
+        storePassword(saved.id, fields.password)?.let { return it }
         return success(savedHostRow(saved))
+    }
+
+    /**
+     * Stores, keeps or clears the saved login password of one host. A password only travels into the product's own
+     * credential store: it is never read back, echoed into a payload or written to a log, and a write that failed is
+     * answered as a failure because the row would otherwise look like it holds a credential it does not.
+     */
+    private suspend fun storePassword(hostId: Long, password: HostPassword): ProbeResult? = when (password) {
+        // The request named no password, so whatever this host already holds stays as it is.
+        HostPassword.Unchanged -> null
+        is HostPassword.Store -> try {
+            source.setHostPassword(hostId, password.value)
+            null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            fail(500, "HOST_SAVE_FAILED", "密码未能保存：${reason(error)}")
+        }
+        HostPassword.Clear -> try {
+            source.setHostPassword(hostId, null)
+            null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            fail(500, "HOST_SAVE_FAILED", "已保存的密码未能清除：${reason(error)}")
+        }
     }
 
     /**
@@ -1060,13 +1132,82 @@ internal class RendererActions(
     }
 
     /**
-     * The row one host write answers with: the stored host and the number of conversations the product holds for it
-     * now, read back from the same snapshot the hosts page reads.
+     * Drops the retained history pages through the repository's own clear entry and answers how many conversations
+     * those pages belonged to. This is a different store from the session index: the index is the conversation list
+     * a caller browses, while these pages are the messages read back out of them, so a clear here never removes a
+     * conversation row and `index.clear` never removes a message. A clear that failed is answered as a failure
+     * rather than as a cleanup that happened.
+     */
+    private suspend fun clearHistory(): ProbeResult {
+        val cleared = try {
+            source.clearHistory()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return fail(500, "HISTORY_CLEAR_FAILED", "历史缓存未能清理：${reason(error)}")
+        }
+        return success(json("cleared" to true, "conversations" to cleared))
+    }
+
+    /**
+     * One history page together with what the repository's own history store holds: the whole retained window, only
+     * part of it, or nothing readable. The store is the only source of this fact, and a store that cannot be read
+     * is answered as unavailable with its reason — never as a complete history, because a caller that believed it
+     * held everything would stop asking for what is missing.
+     */
+    private suspend fun pageWithHistory(page: JSONObject): JSONObject = page.put("history", historyStatus())
+
+    /** What the history store holds right now, in the three states a caller can act on. */
+    private suspend fun historyStatus(): JSONObject {
+        val status = try {
+            source.historyStatus()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return json("state" to HISTORY_UNAVAILABLE, "note" to "历史状态不可读：${reason(error)}")
+        }
+        return when (status.state.lowercase()) {
+            HISTORY_COMPLETE, HISTORY_PARTIAL -> json("state" to status.state.lowercase(), "note" to status.note)
+            // A state this host does not know is no evidence of a complete history.
+            else -> json("state" to HISTORY_UNAVAILABLE, "note" to (status.note ?: "历史状态未知。"))
+        }
+    }
+
+    /**
+     * Whether this process is still attached to the recorded session. The repository's own verdict is the only
+     * source: a session nobody verified is answered as unknown, never as attached, because a caller reconciles a
+     * resumed surface on this fact. A verdict that cannot be read is unknown with its reason beside it.
+     */
+    private suspend fun recovery(): JSONObject {
+        val state = try {
+            source.recoveryState()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return json("state" to RECOVERY_UNKNOWN, "note" to "恢复状态不可读：${reason(error)}")
+        }
+        val reported = when (state.state) {
+            AgentRecoveryState.ATTACHED -> RECOVERY_ATTACHED
+            AgentRecoveryState.GONE -> RECOVERY_GONE
+            else -> RECOVERY_UNKNOWN
+        }
+        return json("state" to reported, "note" to state.note)
+    }
+
+    /**
+     * The row one host write answers with: the stored host, how many conversations the product holds for it now and
+     * the credential facts of that row — the key's label and whether a password is stored, never the password.
      */
     private suspend fun savedHostRow(host: Host): JSONObject {
         val snapshot = source.snapshot()
-        return RendererProjection.hostRow(host, snapshot.availability, sessionCounts(snapshot)[host.id] ?: 0)
+        return RendererProjection.hostRow(host, snapshot.availability, sessionCounts(snapshot)[host.id] ?: 0, hostAuth(host))
     }
+
+    /** The credential facts of one saved host: its key's label, and whether a password is stored as a flag alone. */
+    private suspend fun hostAuth(host: Host): RendererProjection.HostAuth = RendererProjection.HostAuth(
+        keyName = host.pubkeyId.takeIf { it > 0 }?.let { source.keyName(it) },
+        hasPassword = source.hasHostPassword(host.id),
+    )
 
     /** Every conversation the product holds: the open one plus every indexed row, each counted once. */
     private fun heldSessions(snapshot: RendererSnapshot): List<AgentSession> =
@@ -1202,7 +1343,32 @@ internal class RendererActions(
         val protocol: String?,
         val osType: String?,
         val agentTarget: String?,
+        val authMethod: String?,
+        val keyId: HostKey,
+        val password: HostPassword,
     )
+
+    /**
+     * The password field of one host write, as the three things a request can mean: nothing was said about it, a
+     * value has to be stored, or the saved one has to be cleared. An empty string means nothing was said, because an
+     * empty password is no password — a form that submits its empty field never wipes a credential by accident.
+     */
+    private sealed interface HostPassword {
+        data object Unchanged : HostPassword
+        data class Store(val value: String) : HostPassword
+        data object Clear : HostPassword
+    }
+
+    /**
+     * The key association of one host write, as the three things a request can mean: nothing was said about it, a
+     * saved key has to be associated, or the association has to be removed — which is how a host that switches to
+     * password authentication stops naming a key at all.
+     */
+    private sealed interface HostKey {
+        data object Unchanged : HostKey
+        data class Set(val id: Long) : HostKey
+        data object Clear : HostKey
+    }
 
     private fun hostFields(body: JSONObject): HostFields = HostFields(
         nickname = hostText(body, "nickname", "昵称", MAX_NICKNAME),
@@ -1212,7 +1378,39 @@ internal class RendererActions(
         protocol = hostText(body, "protocol", "协议", MAX_PROTOCOL),
         osType = hostText(body, "os_type", "操作系统", MAX_OS_TYPE),
         agentTarget = hostText(body, "agent_target", "Agent 目标", MAX_AGENT_TARGET),
+        authMethod = hostText(body, "auth_method", "认证方式", MAX_AUTH_METHOD),
+        keyId = hostKey(body),
+        password = hostPassword(body),
     )
+
+    /** The key association a request names; only a positive whole id is stored, and anything else is refused. */
+    private fun hostKey(body: JSONObject): HostKey {
+        if (!body.has("key_id")) return HostKey.Unchanged
+        if (body.isNull("key_id")) return HostKey.Clear
+        val value = body.opt("key_id")
+        val parsed = when (value) {
+            is Number -> value.toDouble().takeIf { it % 1.0 == 0.0 }?.toLong()
+            is String -> value.toLongOrNull()
+            else -> null
+        }
+        return parsed?.takeIf { it > 0 }?.let(HostKey::Set) ?: invalid("密钥 id 必须是正整数。")
+    }
+
+    /** The key association a write leaves behind: the named key, the row's own when nothing was said, or none. */
+    private fun keyIdOf(current: Long, requested: HostKey): Long = when (requested) {
+        HostKey.Unchanged -> current
+        is HostKey.Set -> requested.id
+        HostKey.Clear -> NO_KEY
+    }
+
+    /** The password a request carries: an absent field says nothing, an explicit null clears it, empty says nothing. */
+    private fun hostPassword(body: JSONObject): HostPassword {
+        if (!body.has("password")) return HostPassword.Unchanged
+        if (body.isNull("password")) return HostPassword.Clear
+        val value = body.opt("password") as? String ?: invalid("密码必须是字符串。")
+        if (value.length > MAX_PASSWORD) invalid("密码超出长度限制。")
+        return if (value.isEmpty()) HostPassword.Unchanged else HostPassword.Store(value)
+    }
 
     /** A field that is absent or explicitly null carries nothing; any other shape has to be a usable string. */
     private fun hostText(body: JSONObject, key: String, label: String, max: Int): String? {
@@ -1369,6 +1567,44 @@ internal class RendererActions(
         const val MAX_PROTOCOL = 16
         const val MAX_OS_TYPE = 16
         const val MAX_AGENT_TARGET = 128
+
+        /**
+         * How a saved host authenticates: its own saved key, or a password this product stores for it. Both
+         * literals are the entity's own vocabulary, so a host row written here carries exactly what a connection
+         * reads back from it.
+         */
+        const val AUTH_METHOD_KEY = Host.AUTH_METHOD_KEY
+        const val AUTH_METHOD_PASSWORD = Host.AUTH_METHOD_PASSWORD
+        val AUTH_METHODS = listOf(AUTH_METHOD_KEY, AUTH_METHOD_PASSWORD)
+        const val MAX_AUTH_METHOD = 16
+
+        /** Code a host write carries when its `auth_method` is not one this app can use. */
+        const val AUTH_METHOD_INVALID = "AUTH_METHOD_INVALID"
+
+        /** A stored password is bounded like every other user input; no value of it ever leaves this host. */
+        const val MAX_PASSWORD = 4096
+
+        /** The key association of a host that names no key, as the host row itself spells it. */
+        const val NO_KEY = -1L
+
+        /**
+         * Code of a conversation whose recorded working directory cannot be used: no message can be delivered to a
+         * directory this product cannot state, so the send is refused as that fact instead of being attempted.
+         */
+        const val CWD_MISSING = "CWD_MISSING"
+
+        /** The three states one history page reports, and the one a store that cannot be read is reported as. */
+        const val HISTORY_COMPLETE = "complete"
+        const val HISTORY_PARTIAL = "partial"
+        const val HISTORY_UNAVAILABLE = "unavailable"
+
+        /** The three recovery states of the recorded session; an unverified session is never `attached`. */
+        const val RECOVERY_ATTACHED = "attached"
+        const val RECOVERY_GONE = "gone"
+        const val RECOVERY_UNKNOWN = "unknown"
+
+        /** Code a password-authenticating host write carries when neither the request nor the store holds one. */
+        const val PASSWORD_REQUIRED = "PASSWORD_REQUIRED"
 
         /** A credential answer is bounded like every other user input; a passphrase or password stays far shorter. */
         const val MAX_SECRET_CHARS = 4096

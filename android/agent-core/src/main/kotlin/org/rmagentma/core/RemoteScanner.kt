@@ -109,7 +109,10 @@ class RemoteScanner(private val ioDispatcher: CoroutineDispatcher = Dispatchers.
                             val kind = AgentKind.fromWire(row.string("agent"))
                             val id = row.string("sessionId")
                             val cwd = row.string("cwd")
-                            if (kind !in supported || id.isBlank() || !cwd.startsWith('/')) {
+                            // A session whose source named no directory, or named a relative one, is kept as it
+                            // was read: it exists on the host, and the app reports it as a directory-unknown
+                            // record instead of deleting a session it cannot place.
+                            if (kind !in supported || id.isBlank()) {
                                 errors += "Remote scanner returned an invalid session record"
                                 continue
                             }

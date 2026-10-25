@@ -386,6 +386,25 @@ class AgentSshPool @Inject constructor(
     }
 
     private suspend fun authenticate(client: SSHClient, host: Host, interactive: Boolean) {
+        // A host that authenticates with a password uses the one saved for it and nothing else: no key is tried
+        // against it and no prompt appears while a saved password is there. A rejected password is its own
+        // answer instead of another authentication attempt, so a host the user configured this way is not asked
+        // for credentials it was never set up to use.
+        if (host.authMethod == Host.AUTH_METHOD_PASSWORD) {
+            val saved = passwords.getPassword(host.id)
+            if (saved != null) {
+                try {
+                    runInterruptible(io) { client.authPassword(host.username, saved.toCharArray()) }
+                    return
+                } catch (e: UserAuthException) {
+                    throw AgentConnectionNeedsUser("The saved password for ${host.nickname.ifBlank { host.hostname }} was rejected")
+                }
+            }
+            if (!interactive) throw AgentConnectionNeedsUser("Saved credentials are required to reconnect; retry explicitly")
+            val password = ask(host, "password", context.getString(R.string.agent_backend_password, host.username, host.hostname), true)
+            runInterruptible(io) { client.authPassword(host.username, password.toCharArray()) }
+            return
+        }
         val candidates = when {
             !host.useKeys || host.pubkeyId == -2L -> emptyList()
             host.pubkeyId > 0 -> listOf(keys.getById(host.pubkeyId) ?: throw AgentConnectionNeedsUser("SSH key was deleted"))

@@ -19,6 +19,7 @@ package org.connectbot.renderer
 
 import android.content.SharedPreferences
 import androidx.core.content.edit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -28,16 +29,19 @@ import org.connectbot.agent.AgentChallenge
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConversationState
 import org.connectbot.agent.AgentDraftStore
+import org.connectbot.agent.AgentHistoryStatus
 import org.connectbot.agent.AgentIndexStore
 import org.connectbot.agent.AgentLinkState
 import org.connectbot.agent.AgentMessageKind
 import org.connectbot.agent.AgentMessageQueue
 import org.connectbot.agent.AgentMessageQueueStats
 import org.connectbot.agent.AgentQueuedMessage
+import org.connectbot.agent.AgentRecovery
 import org.connectbot.agent.AgentRepository
 import org.connectbot.agent.AgentSshPool
 import org.connectbot.agent.AgentTranscriptOutcome
 import org.connectbot.data.HostRepository
+import org.connectbot.data.PubkeyRepository
 import org.connectbot.data.entity.Host
 import org.connectbot.di.CoroutineDispatchers
 import org.connectbot.util.PreferenceConstants
@@ -71,6 +75,7 @@ class AgentRendererSource @Inject constructor(
     private val pool: AgentSshPool,
     private val drafts: AgentDraftStore,
     private val messages: AgentMessageQueue,
+    private val keys: PubkeyRepository,
     private val preferences: SharedPreferences,
     private val dispatchers: CoroutineDispatchers,
 ) : RendererSource {
@@ -342,6 +347,43 @@ class AgentRendererSource @Inject constructor(
         repository.clearIndex()
         return index.read().size
     }
+
+    /** What the repository's own history store holds for the loaded conversation, exactly as that store states it. */
+    override suspend fun historyStatus(): AgentHistoryStatus = repository.historyStatus()
+
+    /**
+     * The retained history pages are dropped through the repository's own entry, which is a different store from
+     * the session index: clearing this one removes the messages those conversations showed, never the rows a caller
+     * browses. The count answered here is the repository's own number of cleared conversations.
+     */
+    override suspend fun clearHistory(): Int = repository.clearHistory()
+
+    /**
+     * Whether this process is still attached to the recorded session is the repository's own verdict; this seam
+     * never upgrades an unverified session to attached, because a caller acts on that difference.
+     */
+    override suspend fun recoveryState(): AgentRecovery = repository.recoveryState()
+
+    /**
+     * The key's own label, read from the product's key repository; no key material is ever handed out. A read that
+     * fails answers no label instead of failing the page that only draws a row: the row still carries the key's own
+     * id, and a label nobody could read is not a reason to hide the host.
+     */
+    override suspend fun keyName(keyId: Long): String? = try {
+        keys.getById(keyId)?.nickname
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        null
+    }
+
+    /**
+     * A saved login password is written through the product's own credential store, which wraps it at rest. The
+     * value only ever travels in that direction: nothing here reads a stored password back out.
+     */
+    override suspend fun setHostPassword(hostId: Long, password: String?) = hosts.setHostPassword(hostId, password)
+
+    override suspend fun hasHostPassword(hostId: Long): Boolean = hosts.hasHostPassword(hostId)
 
     private fun theme(): String = ThemeMode.fromString(preferences.getString(PreferenceConstants.THEME_MODE, null)).name.lowercase()
 

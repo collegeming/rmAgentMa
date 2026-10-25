@@ -59,6 +59,28 @@ export function useHostDirectory(): HostDirectory {
   return useSyncExternalStore(subscribeHostDirectory, hostDirectorySnapshot, hostDirectorySnapshot);
 }
 
+/**
+ * Writes one refreshed host back into the list this session already read: the probe verdicts and the session
+ * count a `hosts.refresh` answered are that host's own fields, so only its row is replaced and every other row
+ * — including one refreshed later or earlier — is left as it is.
+ */
+export function applyHostRefresh(
+  hostId: string,
+  detection: SavedHost['detection'] | undefined,
+  sessions: unknown
+): void {
+  if (!snapshot.loaded || !detection) return;
+  const index = snapshot.hosts.findIndex((host) => host.id === hostId);
+  if (index < 0) return;
+  const hosts = [...snapshot.hosts];
+  hosts[index] = {
+    ...hosts[index],
+    detection,
+    ...(typeof sessions === 'number' && Number.isFinite(sessions) ? { session_count: sessions } : {}),
+  };
+  publish({ hosts, failure: snapshot.failure, loaded: true });
+}
+
 /** Test hook: drop the shared answer and its subscribers. */
 export function resetHostDirectory(): void {
   snapshot = { hosts: [], failure: null, loaded: false };

@@ -721,6 +721,10 @@
   <string name="agent_select_host" tools:machine_translated="true">选择主机</string>
   <!-- 在工作区分组目录中创建会话的抽屉操作。 -->
   <string name="agent_new_in_workspace" tools:machine_translated="true">新建</string>
+  <!-- 工作区记录的工作目录缺失或非绝对路径时显示的原因；该目录中无法新建会话。 -->
+  <string name="agent_workspace_cwd_missing" tools:machine_translated="true">该工作区没有记录可用的工作目录，无法在这里新建会话。</string>
+  <!-- 会话自身记录的工作目录缺失或非绝对路径时显示的原因；该会话无法打开。 -->
+  <string name="agent_session_cwd_missing" tools:machine_translated="true">该会话没有记录可用的工作目录，无法打开。</string>
   <!-- 折叠状态的工作区标题；主机昵称与会话数。 -->
   <string name="agent_workspace_collapsed" tools:machine_translated="true">▸ %1$s · %2$d</string>
   <!-- 展开状态的工作区标题；主机昵称与会话数。 -->

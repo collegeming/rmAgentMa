@@ -143,19 +143,25 @@ class AgentIndexStoreTest {
     }
 
     @Test
-    fun rejectsRelativePathsAndControlCharactersWithoutTruncatingLegalText() = runTest {
+    fun keepsRowsWithAnUnknownDirectoryAndRefusesUnusableIdentitiesOrText() = runTest {
         val store = AgentIndexStore(context(), kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
         val valid = session("valid", preview = "line one\nline two\tvalue")
+        val relative = session("relative").copy(cwd = "relative/path")
+        val unnamed = session("unnamed").copy(cwd = "")
         val result = store.replace(
             1,
             AgentKind.KIMI,
             listOf(
                 valid,
-                session("relative").copy(cwd = "relative/path"),
+                relative,
+                unnamed,
                 session("bad\u0000id"),
                 session("bad-text", preview = "text\u001b[31m"),
             ),
         )
-        assertThat(result).containsExactly(valid)
+        // A session whose own working directory the source did not name, or named as a relative path, keeps its
+        // row and its own value: it exists on the host, and deleting the row would hide a real conversation. A
+        // row whose identity or text cannot be carried at all is still refused.
+        assertThat(result).containsExactlyInAnyOrder(valid, relative, unnamed)
     }
 }

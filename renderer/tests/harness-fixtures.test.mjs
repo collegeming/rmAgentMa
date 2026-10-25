@@ -2,12 +2,13 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { ATTACHMENT_REFERENCE_PATTERN, AttachmentStore, CHUNK_BYTES, UPLOAD_WINDOW_MS } from '../harness/attachment-store.mjs';
-import { MessageQueue, SessionIndex, fixtureHosts } from '../harness/host-fixture.mjs';
+import { HistoryStore, HostStore, MessageQueue, SessionIndex, SEEDED_HOST_PASSWORD, fixtureHosts, seededOlderHistory } from '../harness/host-fixture.mjs';
 import { NativeProbeDTO } from '../harness/native-fixture.mjs';
 
 // The offline harness fixtures this suite covers: the upload store every attachment check runs against, the
-// cross-session state (queue, index cache, saved hosts) and the native bridge fixture the packaged-asset probe
-// drives. Each answer has to carry the contract's own field names, so the checks can assert them.
+// cross-session state (queue, index cache, history store, saved hosts) and the native bridge fixture the
+// packaged-asset probe drives. Each answer has to carry the contract's own field names, so the checks can
+// assert them.
 
 const C = 'conv-probe-1';
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -133,9 +134,91 @@ describe('offline queue, index cache and saved hosts', () => {
   });
 });
 
+describe('offline history store and saved hosts with credentials', () => {
+  const window = [{ id: 'window-1' }];
+
+  it('serves one older page, names the end of the history and refuses a cursor it never held', async () => {
+    const store = new HistoryStore({ older: seededOlderHistory(C) });
+    expect(store.report()).toEqual({ state: 'complete', note: null });
+    expect(store.hasOlder()).toBe(true);
+    const page = store.page(window, 'window-1', 50);
+    expect(page.items.map((row) => row.id)).toEqual(['history-older-1']);
+    expect(page).toMatchObject({ has_more_before: false, has_more_after: true });
+    expect(store.page(window, 'window-1', 50).items[0].content.content).toContain('更早的一页历史');
+    expect((await refusal(async () => store.page(window, 'never-loaded', 50))).code).toBe('INVALID_CURSOR');
+    expect((await refusal(async () => store.page(window, 'history-older-1', 50))).code).toBe('HISTORY_EXHAUSTED');
+  });
+
+  it('states an unreadable history and refuses to serve a page from it instead of an empty one', async () => {
+    const store = new HistoryStore({ older: seededOlderHistory(C), state: 'partial', note: '更早的历史只读到了一部分。' });
+    expect(store.report()).toEqual({ state: 'partial', note: '更早的历史只读到了一部分。' });
+    store.state = 'unavailable';
+    store.note = '历史库未能读取。';
+    expect(store.report()).toEqual({ state: 'unavailable', note: '历史库未能读取。' });
+    expect((await refusal(async () => store.page(window, 'window-1', 50))).code).toBe('HISTORY_LOAD_FAILED');
+    expect(() => new HistoryStore({ state: 'gone' })).toThrow(/Unknown history state/);
+  });
+
+  it('reports the conversations it cleared, and the session index cache keeps its own counts', () => {
+    const history = new HistoryStore({ older: seededOlderHistory(C) });
+    expect(history.clear()).toEqual({ cleared: true, conversations: 1 });
+    expect(history.clear()).toEqual({ cleared: true, conversations: 0 });
+    expect(history.hasOlder()).toBe(false);
+    expect(history.report()).toEqual({ state: 'complete', note: null });
+    expect(new SessionIndex([{ session_id: C }]).clear()).toEqual({ cleared: true, sessions_before: 1, sessions: 0 });
+    expect(history.conversations).toBe(0);
+  });
+
+  it('refuses a clear it could not perform with its own code instead of claiming it cleared anything', async () => {
+    const history = new HistoryStore({ older: seededOlderHistory(C) });
+    history.clearFailure = '历史存储被占用';
+    const failure = await refusal(async () => history.clear());
+    expect(failure).toMatchObject({ status: 500, code: 'HISTORY_CLEAR_FAILED' });
+    expect(failure.message).toBe('历史存储被占用');
+    expect(history.conversations).toBe(1);
+    expect(history.hasOlder()).toBe(true);
+  });
+
+  it('states how a host authenticates and keeps a stored password out of every row it answers', () => {
+    const hosts = new HostStore();
+    for (const row of hosts.list().items)
+      for (const field of ['auth_method', 'key_id', 'key_name', 'has_password']) expect(Object.hasOwn(row, field)).toBe(true);
+    expect(hosts.list().items.find((row) => row.auth_method === 'key')).toMatchObject({ key_id: 42, key_name: '离线探针密钥', has_password: false });
+    expect(hosts.list().items.find((row) => row.has_password)).toMatchObject({ auth_method: 'password', key_id: null, key_name: null });
+    expect(JSON.stringify(hosts.list())).not.toContain(SEEDED_HOST_PASSWORD);
+    const created = hosts.create({ nickname: '新建主机', hostname: '10.0.0.9', port: 2200, os_type: 'windows', agent_target: 'windows', auth_method: 'password', password: '新建口令不得回显' });
+    expect(created).toMatchObject({ id: 'host-4', auth_method: 'password', key_id: null, key_name: null, has_password: true, target: 'windows-native', target_supported: true, port: 2200, session_count: 0 });
+    expect(JSON.stringify(created)).not.toContain('新建口令不得回显');
+    expect(JSON.stringify(hosts.list())).not.toContain('新建口令不得回显');
+    expect(hosts.list().items).toHaveLength(4);
+    // A host the request leaves on key authentication names no key, and one key this product does not hold has no label.
+    expect(hosts.create({ nickname: '默认机', hostname: 'default.test' })).toMatchObject({ auth_method: 'key', key_id: null, key_name: null, has_password: false });
+    expect(hosts.create({ nickname: '带密钥', hostname: 'key.test', key_id: 77 })).toMatchObject({ key_id: 77, key_name: '备用离线密钥' });
+    expect(hosts.create({ nickname: '陌生密钥', hostname: 'key.test', key_id: 99 })).toMatchObject({ key_id: 99, key_name: null });
+  });
+
+  it('rewrites only the fields an update names and refuses an unusable method or a password it cannot back', async () => {
+    const hosts = new HostStore();
+    const updated = hosts.update('host-1', { nickname: '改名的主机', password: '改过的口令不得回显' });
+    expect(updated).toMatchObject({ id: 'host-1', nickname: '改名的主机', key_id: 42, key_name: '离线探针密钥', auth_method: 'key', has_password: true, hostname: '127.0.0.1' });
+    expect(JSON.stringify(updated)).not.toContain('改过的口令不得回显');
+    // A key the request does not name keeps the association the row holds, and an explicit null counts as not naming one.
+    expect(hosts.update('host-1', { key_id: null })).toMatchObject({ key_id: 42, key_name: '离线探针密钥' });
+    expect(hosts.update('host-1', { auth_method: 'password' })).toMatchObject({ auth_method: 'password', key_id: 42, has_password: true });
+    // An empty password field says nothing, an explicit null clears the stored one, and neither changes the method.
+    expect(hosts.update('host-1', { password: '' })).toMatchObject({ has_password: true });
+    expect(hosts.update('host-1', { password: null })).toMatchObject({ has_password: false });
+    expect((await refusal(async () => hosts.create({ nickname: '未知方式', auth_method: 'agent' }))).code).toBe('AUTH_METHOD_INVALID');
+    expect((await refusal(async () => hosts.update('host-3', { auth_method: 'password' }))).code).toBe('PASSWORD_REQUIRED');
+    expect((await refusal(async () => hosts.create({ nickname: '无口令', auth_method: 'password' }))).code).toBe('PASSWORD_REQUIRED');
+    expect((await refusal(async () => hosts.create({ nickname: '改名的主机' }))).code).toBe('HOST_NICKNAME_TAKEN');
+    expect((await refusal(async () => hosts.update('host-nope', { nickname: 'x' }))).code).toBe('HOST_NOT_FOUND');
+  });
+});
+
 describe('native bridge fixture', () => {
-  const payload = (body, params = {}) => ({ params, query: {}, body });
-  const call = (fixture, action, body, params = {}) => fixture.handle(action, payload(body, params), DOCUMENT);
+  const payload = (body, params = {}, query = {}) => ({ params, query, body });
+  const call = (fixture, action, body, params = {}, query = {}) => fixture.handle(action, payload(body, params, query), DOCUMENT);
 
   it('answers the four upload actions with the contract fields and refuses them without an open conversation', async () => {
     const fixture = new NativeProbeDTO();
@@ -172,6 +255,80 @@ describe('native bridge fixture', () => {
     expect(hosts.items.find((row) => row.agent_target === 'windows')).toMatchObject({ target: 'windows-native', target_supported: true });
     await expect(call(fixture, 'queue.send', { conversation_id: 'conv-other', kind: 'notify', text: '中文' })).rejects.toMatchObject({ status: 404, code: 'CONVERSATION_NOT_FOUND' });
     await expect(call(fixture, 'not-real', null)).rejects.toMatchObject({ status: 404, code: 'UNKNOWN_ACTION' });
+  });
+
+  it('keeps a draft text alone and refuses one that carries attachments', async () => {
+    const fixture = new NativeProbeDTO();
+    expect((await call(fixture, 'draft.save', { text: '草稿文字', files: [] })).body).toMatchObject({ saved: true, files: [] });
+    await expect(call(fixture, 'draft.save', { text: '草稿文字', files: [{ kind: 'upload', path: '/probe/附件.txt' }] })).rejects.toMatchObject({ status: 422, code: 'ATTACHMENT_UNSUPPORTED' });
+    expect(fixture.draft).toBe('草稿文字');
+    expect(fixture.draftFiles).toEqual([]);
+  });
+
+  it('states the history, the working directory and the recovery of the session on its own answers', async () => {
+    const fixture = new NativeProbeDTO();
+    const window = (await call(fixture, 'messages.list', null)).body.data;
+    expect(window.history).toEqual({ state: 'complete', note: null });
+    expect(window.has_more_before).toBe(true);
+    const older = (await call(fixture, 'messages.before', null, {}, { before: window.oldest_cursor, limit: '50' })).body.data;
+    expect(older.items.map((row) => row.id)).toEqual(['history-older-1']);
+    expect(older.items[0].conversation_id).toBe(C);
+    expect(older.history).toEqual({ state: 'complete', note: null });
+    expect(older).toMatchObject({ has_more_before: false, has_more_after: true });
+    await expect(call(fixture, 'messages.before', null, {}, { before: 'never-loaded', limit: '50' })).rejects.toMatchObject({ status: 422, code: 'INVALID_CURSOR' });
+    await expect(call(fixture, 'messages.before', null, {}, { before: older.oldest_cursor, limit: '50' })).rejects.toMatchObject({ status: 409, code: 'HISTORY_EXHAUSTED' });
+    fixture.history.state = 'unavailable';
+    fixture.history.note = '历史库未能读取。';
+    expect((await call(fixture, 'messages.list', null)).body.data.history).toEqual({ state: 'unavailable', note: '历史库未能读取。' });
+    await expect(call(fixture, 'messages.before', null, {}, { before: window.oldest_cursor, limit: '50' })).rejects.toMatchObject({ status: 500, code: 'HISTORY_LOAD_FAILED' });
+    fixture.history.state = 'complete';
+    fixture.history.note = null;
+    expect((await call(fixture, 'history.clear', null)).body.data).toEqual({ cleared: true, conversations: 1 });
+    expect((await call(fixture, 'index.clear', null)).body.data).toEqual({ cleared: true, sessions_before: 1, sessions: 0 });
+    // A store that could not be cleared is answered as that failure, with the reason it reported.
+    fixture.history.clearFailure = '历史存储被占用';
+    await expect(call(fixture, 'history.clear', null)).rejects.toMatchObject({ status: 500, code: 'HISTORY_CLEAR_FAILED' });
+    fixture.history.clearFailure = null;
+  });
+
+  it('answers the session recovery and the missing working directory where each reader asks for them', async () => {
+    const fixture = new NativeProbeDTO();
+    expect((await call(fixture, 'conversation.read', null)).body.data.recovery).toEqual({ state: 'attached', note: null });
+    expect((await call(fixture, 'runtime.snapshot', null)).body.recovery).toEqual({ state: 'attached', note: null });
+    fixture.recovery = { state: 'gone', note: '会话已不在主机上。' };
+    expect((await call(fixture, 'conversation.read', null)).body.data.recovery).toEqual({ state: 'gone', note: '会话已不在主机上。' });
+    expect((await call(fixture, 'runtime.snapshot', null)).body.recovery).toEqual({ state: 'gone', note: '会话已不在主机上。' });
+    fixture.recovery = { state: 'unknown', note: null };
+    expect((await call(fixture, 'conversation.read', null)).body.data.recovery).toEqual({ state: 'unknown', note: null });
+    expect((await call(fixture, 'conversation.read', null)).body.data).toMatchObject({ cwd_missing: false, cwd_note: null });
+    fixture.cwdMissing = true;
+    fixture.cwdNote = '该会话的工作目录已被删除。';
+    expect((await call(fixture, 'conversation.read', null)).body.data).toMatchObject({ cwd_missing: true, cwd_note: '该会话的工作目录已被删除。', runtime: { can_send_message: false } });
+    expect((await call(fixture, 'conversations.list', null)).body.data.items[0]).toMatchObject({ cwd_missing: true, cwd_note: '该会话的工作目录已被删除。' });
+    await expect(call(fixture, 'messages.send', { content: '工作目录不存在的会话不能发送。', loading_id: 'cwd-missing-probe' })).rejects.toMatchObject({ status: 409, code: 'CWD_MISSING' });
+    expect(fixture.turn).toBe('');
+    fixture.cwdMissing = false;
+    fixture.cwdNote = null;
+    expect((await call(fixture, 'conversation.read', null)).body.data.runtime.can_send_message).toBe(true);
+    expect((await call(fixture, 'messages.send', { content: '目录回来后的发送。', loading_id: 'cwd-missing-probe' })).status).toBe(202);
+  });
+
+  it('serves the saved-host rows through the host store, with the credentials it accepts and refuses', async () => {
+    const fixture = new NativeProbeDTO();
+    const rows = (await call(fixture, 'hosts.list', null)).body.data.items;
+    for (const row of rows)
+      for (const field of ['auth_method', 'key_id', 'key_name', 'has_password']) expect(Object.hasOwn(row, field)).toBe(true);
+    expect(JSON.stringify(rows)).not.toContain(SEEDED_HOST_PASSWORD);
+    await expect(call(fixture, 'hosts.create', { nickname: '未知方式', auth_method: 'agent' })).rejects.toMatchObject({ status: 422, code: 'AUTH_METHOD_INVALID' });
+    await expect(call(fixture, 'hosts.create', { nickname: '无口令', auth_method: 'password' })).rejects.toMatchObject({ status: 422, code: 'PASSWORD_REQUIRED' });
+    const created = (await call(fixture, 'hosts.create', { nickname: '新建主机', hostname: '10.0.0.9', auth_method: 'password', password: '新建口令不得回显' })).body.data;
+    expect(created).toMatchObject({ auth_method: 'password', key_id: null, has_password: true });
+    expect(JSON.stringify(created)).not.toContain('新建口令不得回显');
+    expect((await call(fixture, 'hosts.list', null)).body.data.items).toHaveLength(4);
+    const updated = (await call(fixture, 'hosts.update', { nickname: '改名的主机', password: '改过的口令不得回显' }, { hostId: 'host-1' })).body.data;
+    expect(updated).toMatchObject({ id: 'host-1', nickname: '改名的主机', key_id: 42, key_name: '离线探针密钥', auth_method: 'key', has_password: true });
+    expect(JSON.stringify(updated)).not.toContain('改过的口令不得回显');
+    expect(JSON.stringify((await call(fixture, 'hosts.list', null)).body.data)).not.toContain('改过的口令不得回显');
   });
 });
 

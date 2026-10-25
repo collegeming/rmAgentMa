@@ -34,7 +34,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.connectbot.R
 import org.connectbot.agent.AgentRepository
+import org.connectbot.agent.AgentSessionNoticeFacts
 import org.connectbot.agent.AgentSshPool
+import org.connectbot.agent.agentSessionNoticeText
 import org.connectbot.di.CoroutineDispatchers
 import javax.inject.Inject
 import javax.inject.Provider
@@ -57,11 +59,15 @@ class AgentConnectionService : Service() {
                 NotificationChannel(CHANNEL, getString(R.string.agent_notification_channel), NotificationManager.IMPORTANCE_LOW),
             )
         }
-        publish(0)
+        publish(0, AgentSessionNoticeFacts())
         scope.launch {
-            kotlinx.coroutines.flow.combine(pool.connectionCount, repository.get().operationCount) { count, operations -> count to operations }
-                .collect { (count, operations) ->
-                    publish(count)
+            kotlinx.coroutines.flow.combine(
+                pool.connectionCount,
+                repository.get().operationCount,
+                repository.get().sessionNotice,
+            ) { count, operations, notice -> Triple(count, operations, notice) }
+                .collect { (count, operations, notice) ->
+                    publish(count, notice)
                     if (count == 0 && operations == 0) {
                         repository.get().stopServiceIfIdle { stopSelf() }
                     }
@@ -75,7 +81,7 @@ class AgentConnectionService : Service() {
         }
     }
 
-    private fun publish(count: Int) {
+    private fun publish(count: Int, notice: AgentSessionNoticeFacts) {
         val disconnect = PendingIntent.getService(
             this,
             NOTIFICATION_ID,
@@ -85,10 +91,15 @@ class AgentConnectionService : Service() {
         val launch = packageManager.getLaunchIntentForPackage(packageName)?.let {
             PendingIntent.getActivity(this, NOTIFICATION_ID, it, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         }
+        val connections = resources.getQuantityString(R.plurals.agent_connection_count, count, count)
+        // The count says how many links exist; the session line says what those sessions are doing. A state this
+        // app cannot state is named as unknown there and never shown as a session that is running.
+        val text = agentSessionNoticeText(notice)?.let { "$it · $connections" } ?: connections
         val notification = NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.mipmap.icon)
             .setContentTitle(getString(R.string.agent_notification_title))
-            .setContentText(resources.getQuantityString(R.plurals.agent_connection_count, count, count))
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setOngoing(true)
             .setSilent(true)
             .setContentIntent(launch)

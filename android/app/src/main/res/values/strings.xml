@@ -1695,6 +1695,10 @@
 	<string name="agent_select_host">选择主机</string>
 	<!-- Drawer action that creates a session in the group directory. -->
 	<string name="agent_new_in_workspace">新建</string>
+	<!-- Reason shown on a workspace whose recorded working directory is missing or not absolute; no session can be created in that directory. -->
+	<string name="agent_workspace_cwd_missing">该工作区没有记录可用的工作目录，无法在这里新建会话。</string>
+	<!-- Reason shown on a conversation whose own recorded working directory is missing or not absolute, so it cannot be opened here. -->
+	<string name="agent_session_cwd_missing">该会话没有记录可用的工作目录，无法打开。</string>
 	<!-- Collapsed workspace heading; host nickname and session count. -->
 	<string name="agent_workspace_collapsed">▸ %1$s · %2$d</string>
 	<!-- Expanded workspace heading; host nickname and session count. -->

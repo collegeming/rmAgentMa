@@ -32,7 +32,10 @@ enum class AgentProbeState {
     CONNECT_FAILED,
     UNKNOWN_FAILURE,
 
-    /** The host's Agent target has no entry in this app, so nothing ran and nothing can be launched there. */
+    /**
+     * The probe's own answer could not be read: a Windows lookup that answered nothing this app can use, or a
+     * target this build has no entry for. No installation is claimed and no session opens from this verdict.
+     */
     TARGET_UNSUPPORTED,
 }
 

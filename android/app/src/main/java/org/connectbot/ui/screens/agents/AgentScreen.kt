@@ -829,22 +829,10 @@ private fun NewAgentSessionDialog(
 @Composable
 private fun AgentChallengeDialog(challenge: AgentChallenge, onRespond: (String, String?) -> Unit) {
     var secret by remember(challenge.id) { mutableStateOf("") }
-    val hostKey = challenge.kind == "host_key"
-    val supported = hostKey || challenge.kind == "password" || challenge.kind == "key_passphrase"
+    val input = agentChallengeInput(challenge.kind, challenge.secret)
     AlertDialog(
         onDismissRequest = { onRespond(challenge.id, null) },
-        title = {
-            Text(
-                stringResource(
-                    when (challenge.kind) {
-                        "host_key" -> R.string.agent_host_key
-                        "password" -> R.string.agent_password
-                        "key_passphrase" -> R.string.agent_passphrase
-                        else -> R.string.agent_auth
-                    },
-                ),
-            )
-        },
+        title = { Text(stringResource(agentChallengeTitle(challenge.kind, input))) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.verticalScroll(rememberScrollState())) {
                 SelectionContainer {
@@ -853,25 +841,35 @@ private fun AgentChallengeDialog(challenge: AgentChallenge, onRespond: (String, 
                         Text(challenge.message)
                     }
                 }
-                if (!supported) Text(stringResource(R.string.agent_unknown_challenge))
-                if (supported && !hostKey) {
-                    OutlinedTextField(
+                when (input) {
+                    AgentChallengeInput.UNSUPPORTED -> Text(stringResource(R.string.agent_unknown_challenge))
+                    AgentChallengeInput.SECRET -> OutlinedTextField(
                         value = secret,
                         onValueChange = { secret = it },
                         label = { Text(stringResource(R.string.agent_secret)) },
                         visualTransformation = PasswordVisualTransformation(),
                         singleLine = true,
                     )
+                    // A confirmation asks for no input: it is accepted or rejected with the buttons below, because
+                    // the connection compares its answer with the literal `accept` and nothing a field could hold.
+                    AgentChallengeInput.HOST_KEY, AgentChallengeInput.CONFIRMATION -> Unit
                 }
             }
         },
         confirmButton = {
-            if (supported) {
-                TextButton(onClick = {
-                    onRespond(challenge.id, if (hostKey) "accept" else secret)
+            when (input) {
+                AgentChallengeInput.UNSUPPORTED -> Unit
+                AgentChallengeInput.SECRET -> TextButton(onClick = {
+                    onRespond(challenge.id, secret)
                     secret = ""
                 }) {
-                    Text(stringResource(if (hostKey) R.string.agent_accept else R.string.agent_confirm))
+                    Text(stringResource(R.string.agent_confirm))
+                }
+                AgentChallengeInput.HOST_KEY, AgentChallengeInput.CONFIRMATION -> TextButton(onClick = {
+                    secret = ""
+                    onRespond(challenge.id, AGENT_CHALLENGE_ACCEPT)
+                }) {
+                    Text(stringResource(if (input == AgentChallengeInput.HOST_KEY) R.string.agent_accept else R.string.agent_challenge_accept))
                 }
             }
         },
@@ -880,10 +878,22 @@ private fun AgentChallengeDialog(challenge: AgentChallenge, onRespond: (String, 
                 secret = ""
                 onRespond(challenge.id, null)
             }) {
-                Text(stringResource(if (hostKey) R.string.agent_reject else R.string.agent_cancel))
+                Text(stringResource(if (input == AgentChallengeInput.HOST_KEY) R.string.agent_reject else R.string.agent_cancel))
             }
         },
     )
+}
+
+/**
+ * The title one challenge is shown under. A confirmation is not a passphrase prompt even though it arrives as one,
+ * so it gets its own title instead of asking the user for something no field of it can supply.
+ */
+private fun agentChallengeTitle(kind: String, input: AgentChallengeInput): Int = when {
+    kind == "host_key" -> R.string.agent_host_key
+    kind == "password" -> R.string.agent_password
+    input == AgentChallengeInput.CONFIRMATION -> R.string.agent_key_confirmation
+    kind == "key_passphrase" -> R.string.agent_passphrase
+    else -> R.string.agent_auth
 }
 
 @Composable

@@ -3,6 +3,8 @@
  * Copyright 2026 rmAgentMa contributors
  * SPDX-License-Identifier: Apache-2.0
  */
+import { publishConversationFacts } from './conversationFacts';
+import { publishHistoryReading, readHistoryField } from './historyState';
 import { markHostInterrupted, markHostLive } from './hostConnection';
 
 type HostReply = { requestId: string; documentId: string; ok: boolean; status: number; body: unknown };
@@ -64,8 +66,10 @@ const ROUTES = [
   ['POST', '/api/queue', 'queue.send'],
   ['DELETE', '/api/queue/:queueId', 'queue.cancel'],
   ['POST', '/api/conversations/:conversationId/reference', 'reference.pack'],
-  // The host's own maintenance action: it drops the cached session index and answers the two counts.
+  // The host's own maintenance actions: it drops the cached session index, or the history store's own cache,
+  // and answers how much each held. The two are separate stores and separate actions.
   ['POST', '/api/index/clear', 'index.clear'],
+  ['POST', '/api/history/clear', 'history.clear'],
   ['GET', '/api/projects', 'projects.list'],
   ['GET', '/api/projects/:projectId', 'project.read'],
   ['GET', '/api/hosts', 'hosts.list'],
@@ -353,9 +357,20 @@ export type SavedHost = {
   target: string;
   target_supported: boolean;
   detection: HostDetection;
+  /** How this host logs in: `key` or `password`; anything else is a value this build does not name. */
+  auth_method?: string | null;
+  /** The saved key this host authenticates with, when it holds one. */
+  key_id?: string | null;
+  /** The name of that key as the product stores it, for the row to show without reading the key itself. */
+  key_name?: string | null;
+  /** True while a password is stored for this host; the password itself never leaves the host. */
+  has_password?: boolean;
 };
 
-/** The fields one create or update body carries; an update rewrites only the fields it names. */
+/**
+ * The fields one create or update body carries; an update rewrites only the fields it names. `password` is
+ * write-only: it is sent only when the user typed one, and no answer carries it back.
+ */
 export type HostFields = {
   nickname: string;
   hostname: string;
@@ -363,7 +378,14 @@ export type HostFields = {
   username: string;
   os_type: string;
   agent_target: string;
+  auth_method?: string;
+  key_id?: string;
+  password?: string;
 };
+
+/** The two authentication methods this build offers. */
+export const HOST_AUTH_KEY = 'key';
+export const HOST_AUTH_PASSWORD = 'password';
 
 /** What `detection.refresh` answers: the target that was probed and the verdicts it produced. */
 export type HostDetectionRefresh = {
@@ -456,6 +478,11 @@ export async function hostFetch(input: string, init: RequestInit = {}): Promise<
     payload.body = JSON.parse(init.body) as unknown;
   }
   const reply = await nativeTransport.call(action, payload);
+  // Every message page states what the host holds for that conversation's history, whichever reader asked for
+  // it — the chat's own window, one older page, or the newest row of one type. Recording it here is what lets
+  // the conversation screen say an incomplete history out loud, and no reader has to pass the field along.
+  publishPageHistory(action, payload.params.conversationId, reply.body);
+  if (reply.ok) publishAnswerFacts(reply.body);
   if (noOlderPage(reply)) {
     // The same envelope a page the host really read arrives in, so a caller reads one shape either way.
     return new Response(
@@ -467,6 +494,31 @@ export async function hostFetch(input: string, init: RequestInit = {}): Promise<
     status: reply.status,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+/** The `history` field one message page carries, recorded under the conversation the page belongs to. */
+function publishPageHistory(action: string, conversationId: string | undefined, body: unknown): void {
+  if (!conversationId) return;
+  if (action !== 'messages.list' && action !== 'messages.before' && action !== 'messages.latest') return;
+  const payload = body && typeof body === 'object' ? (body as { data?: unknown }) : null;
+  publishHistoryReading(conversationId, readHistoryField(payload?.data) ?? readHistoryField(body));
+}
+
+/**
+ * What one accepted answer says about the conversations it names: a list of rows, one row, or a page that
+ * carries none of those fields at all. Every answer is offered here and only the rows that really state one of
+ * those facts are recorded, so no route has to remember to pass them on.
+ */
+function publishAnswerFacts(body: unknown): void {
+  if (!body || typeof body !== 'object') return;
+  const data = (body as { data?: unknown }).data ?? body;
+  if (!data || typeof data !== 'object') return;
+  const items = (data as { items?: unknown }).items;
+  if (Array.isArray(items)) {
+    items.forEach(publishConversationFacts);
+    return;
+  }
+  publishConversationFacts(data);
 }
 
 export async function hostPlatformRequest(name: string, _data?: unknown): Promise<unknown> {

@@ -185,6 +185,9 @@ internal fun AgentWorkspaceDrawer(
             workspaces.forEach { workspace ->
                 val workspaceKey = workspace.key
                 val workspaceExpanded = workspaceKey !in collapsedWorkspaceKeys
+                // A directory this product never recorded, or one that is not absolute, cannot host a new session:
+                // the entry is disabled and says why, instead of a button that silently does nothing.
+                val workspaceCwdUsable = canCreateInWorkspace(workspaceKey)
                 item(key = "workspace:${workspaceKey.hostId}:${workspaceKey.cwd}") {
                     Column {
                         TextButton(
@@ -201,11 +204,24 @@ internal fun AgentWorkspaceDrawer(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
-                                Text(workspaceKey.cwd, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                if (workspaceKey.cwd.isNotBlank()) {
+                                    Text(workspaceKey.cwd, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                }
                             }
                         }
-                        TextButton(onClick = { onNew(workspaceKey) }, enabled = canOpenAgent(availability, workspaceKey.hostId, selectedAgent)) {
+                        TextButton(
+                            onClick = { onNew(workspaceKey) },
+                            enabled = workspaceCwdUsable && canOpenAgent(availability, workspaceKey.hostId, selectedAgent),
+                        ) {
                             Text(stringResource(R.string.agent_new_in_workspace))
+                        }
+                        if (!workspaceCwdUsable) {
+                            Text(
+                                stringResource(R.string.agent_workspace_cwd_missing),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(horizontal = 12.dp),
+                            )
                         }
                     }
                 }
@@ -234,9 +250,12 @@ internal fun AgentWorkspaceDrawer(
                         group.sessions.take(DRAWER_SESSION_LIMIT),
                         key = { "session:${it.hostId}:${it.agent.wireName}:${it.sessionId}:${it.cwd}" },
                     ) { session ->
+                        // A conversation whose own directory nobody recorded cannot be opened here; the row keeps
+                        // its place in the group's history and says why instead of a tap that does nothing.
+                        val sessionOpenable = canOpenConversation(availability, session)
                         NavigationDrawerItem(
                             selected = sameAgentSession(active, session),
-                            onClick = { if (canOpenAgent(availability, session.hostId, session.agent)) onOpen(session) },
+                            onClick = { if (sessionOpenable) onOpen(session) },
                             label = {
                                 Column {
                                     Text(
@@ -249,6 +268,13 @@ internal fun AgentWorkspaceDrawer(
                                         Text(session.preview.take(240), maxLines = 2, overflow = TextOverflow.Ellipsis)
                                     }
                                     AgentUnavailableNote(availability, refreshingHosts, session.hostId, session.agent)
+                                    if (!validAgentCwd(session.cwd)) {
+                                        Text(
+                                            stringResource(R.string.agent_session_cwd_missing),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.error,
+                                        )
+                                    }
                                     val waiting = queuedFor(session, queued).size
                                     if (waiting > 0) {
                                         Text(
@@ -258,7 +284,7 @@ internal fun AgentWorkspaceDrawer(
                                     }
                                     TextButton(
                                         onClick = { onOpen(session) },
-                                        enabled = canOpenAgent(availability, session.hostId, session.agent),
+                                        enabled = sessionOpenable,
                                     ) { Text(stringResource(R.string.agent_continue)) }
                                 }
                             },

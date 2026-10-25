@@ -715,6 +715,10 @@
   <string name="agent_select_host" tools:machine_translated="true">選擇主機</string>
   <!-- 在工作區分組目錄中新增會話的抽屜操作。 -->
   <string name="agent_new_in_workspace" tools:machine_translated="true">新增</string>
+  <!-- 工作區記錄的工作目錄缺失或非絕對路徑時顯示的原因；該目錄中無法新增會話。 -->
+  <string name="agent_workspace_cwd_missing" tools:machine_translated="true">此工作區沒有記錄可用的工作目錄，無法在這裡新增會話。</string>
+  <!-- 會話本身記錄的工作目錄缺失或非絕對路徑時顯示的原因；該會話無法開啟。 -->
+  <string name="agent_session_cwd_missing" tools:machine_translated="true">此會話沒有記錄可用的工作目錄，無法開啟。</string>
   <!-- 摺疊狀態的工作區標題；主機暱稱與會話數目。 -->
   <string name="agent_workspace_collapsed" tools:machine_translated="true">▸ %1$s · %2$d</string>
   <!-- 展開狀態的工作區標題；主機暱稱與會話數目。 -->

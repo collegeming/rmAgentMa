@@ -182,6 +182,13 @@ class ZcodeSessionHandle internal constructor(
     /** Latest settings reported by the Agent; current-only snapshots never replace the full catalog. */
     val config: ZcodeSessionConfig get() = connection.config
 
+    /**
+     * Waits until every event the Agent offered before this call - the history replay a load answered with
+     * included - has been consumed by this session's single event consumer, so a caller that stores what it
+     * consumes knows its stored history covers the whole replay.
+     */
+    suspend fun awaitHistoryBarrier() = connection.consumeBarrier()
+
     @Volatile private var ready = false
 
     @Volatile private var closed = false

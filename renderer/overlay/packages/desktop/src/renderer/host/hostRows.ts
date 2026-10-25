@@ -91,3 +91,106 @@ export function filterOptionIds(conversations: TChatConversation[]): { hostIds: 
   }
   return { hostIds: [...hostIds], agentIds: [...agentIds] };
 }
+
+/**
+ * What the host said about the session behind one row — `attached`, `gone` or `unknown` — and its own note.
+ * `conversation.read` and `runtime.snapshot` state it directly, a row may carry it inside its `runtime`, and
+ * nothing else is read as attached: a conversation whose state the host never stated is not drawn as recovered.
+ */
+export type RecoveryReading = { state: string; note: string };
+
+const RECOVERY_STATES = ['attached', 'gone', 'unknown'] as const;
+
+export function recoveryStateName(state: string): (typeof RECOVERY_STATES)[number] | null {
+  return (RECOVERY_STATES as readonly string[]).includes(state) ? (state as (typeof RECOVERY_STATES)[number]) : null;
+}
+
+export function recoveryOf(conversation: TChatConversation | undefined): RecoveryReading | null {
+  const runtime = (conversation as unknown as { runtime?: unknown } | undefined)?.runtime;
+  return recoveryFrom(conversation) ?? recoveryFrom(runtime);
+}
+
+function recoveryFrom(value: unknown): RecoveryReading | null {
+  if (!value || typeof value !== 'object') return null;
+  const field = (value as { recovery?: unknown }).recovery;
+  if (!field || typeof field !== 'object') return null;
+  const stated = field as { state?: unknown; note?: unknown };
+  if (typeof stated.state !== 'string' || !stated.state.trim()) return null;
+  return {
+    state: stated.state.trim(),
+    note: typeof stated.note === 'string' ? stated.note.trim() : '',
+  };
+}
+
+/** The host could not find the session this conversation names, so nothing here can run it again. */
+export const isSessionRecoveryGone = (conversation: TChatConversation | undefined): boolean =>
+  recoveryOf(conversation)?.state === 'gone';
+
+/** The host does not know whether that session still runs; it is never drawn as if it did. */
+export const isSessionRecoveryUnknown = (conversation: TChatConversation | undefined): boolean =>
+  recoveryOf(conversation)?.state === 'unknown';
+
+/**
+ * The host could not use this row's working directory. Such a row can still be read as history, but nothing
+ * is sent or created in it: the host refuses both, and the surface says which directory is missing.
+ */
+export const isCwdMissing = (conversation: TChatConversation | undefined): boolean => {
+  const fields = fieldsOf(conversation) as { cwd_missing?: unknown; workspace?: unknown };
+  if (fields.cwd_missing === true) return true;
+  const workspace = fields.workspace;
+  return Boolean(workspace && typeof workspace === 'object' && (workspace as { missing?: unknown }).missing === true);
+};
+
+/** Why that directory could not be used, as the host stated it; empty while it stated none. */
+export function cwdNoteOf(conversation: TChatConversation | undefined): string {
+  const fields = fieldsOf(conversation) as { cwd_note?: unknown; cwdNote?: unknown };
+  return nonEmptyString(fields.cwd_note) ?? nonEmptyString(fields.cwdNote) ?? '';
+}
+
+/** The session id a renderer conversation id carries: `c1.<hostId>.<hex agent>.<hex sessionId>`. */
+export function sessionIdOfConversationId(conversationId: string): string | null {
+  const parts = conversationId.startsWith('c1.') ? conversationId.slice(3).split('.') : [];
+  if (parts.length !== 3) return null;
+  const value = parts[2];
+  if (!value || value.length % 2 !== 0 || /[^0-9a-f]/.test(value)) return null;
+  const bytes = new Uint8Array(value.length / 2);
+  for (let index = 0; index < bytes.length; index++)
+    bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What a row's title really is. The host's own label is shown when it is a label: a title that only repeats the
+ * session id, or that is a directory path, is not a name the user gave, so the row says it is untitled instead
+ * of putting an identifier where a title belongs.
+ */
+export function conversationTitleOf(conversation: TChatConversation | undefined): string {
+  const name = nonEmptyString(conversation?.name);
+  if (!name) return '';
+  if (name === sessionIdOfConversationId(conversation?.id ?? '')) return '';
+  const workspace = hostWorkspaceOf(conversation);
+  if (workspace && (name === workspace.cwd || name === directoryShortName(workspace.cwd))) return '';
+  if (/^(?:[\\/]|[A-Za-z]:[\\/])/.test(name)) return '';
+  return name;
+}
+
+/**
+ * When this row last moved, in milliseconds, or null while no field of it holds a time: a row the host never
+ * timed shows 未知 rather than a date invented from zero.
+ */
+export function activityTimeOf(conversation: TChatConversation | undefined): number | null {
+  const fields = fieldsOf(conversation) as {
+    modified_at?: unknown;
+    created_at?: unknown;
+    updated_at?: unknown;
+    lastActivity?: unknown;
+  };
+  const times = [fields.modified_at, fields.updated_at, fields.created_at, fields.lastActivity].filter(
+    (value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0
+  );
+  return times.length > 0 ? Math.max(...times) : null;
+}

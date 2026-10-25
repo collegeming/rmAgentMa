@@ -195,6 +195,14 @@ class AcpSessionHandle internal constructor(
     private val loading = Mutex()
     private val configWrite = Mutex()
 
+    /**
+     * Waits until every event the Agent offered before this call - the history replay a load answered with
+     * included - has been consumed by this session's single event consumer. A caller that stores what it consumes
+     * calls this after [load] to know its stored history covers the whole replay, rather than only that the
+     * Agent's answer arrived.
+     */
+    suspend fun awaitHistoryBarrier() = connection.consumeBarrier()
+
     @Volatile
     private var ready = false
 

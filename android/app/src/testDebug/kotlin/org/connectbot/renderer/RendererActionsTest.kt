@@ -30,11 +30,14 @@ import org.assertj.core.api.Assertions.assertThat
 import org.connectbot.agent.AgentChallenge
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConfigBusyException
+import org.connectbot.agent.AgentHistoryStatus
 import org.connectbot.agent.AgentLinkState
 import org.connectbot.agent.AgentMessageKind
 import org.connectbot.agent.AgentMessageQueueStats
 import org.connectbot.agent.AgentMessageState
 import org.connectbot.agent.AgentQueuedMessage
+import org.connectbot.agent.AgentRecovery
+import org.connectbot.agent.AgentRecoveryState
 import org.connectbot.agent.AgentTranscriptFailure
 import org.connectbot.agent.AgentTranscriptHit
 import org.connectbot.agent.AgentTranscriptOutcome
@@ -476,7 +479,7 @@ class RendererActionsTest {
         val windows = savedHost.copy(id = 8, nickname = "windows-box", osType = "windows", agentTarget = "native")
         val source = FakeSource().apply {
             hosts = listOf(savedHost, windows)
-            availability = listOf(availableRow(7), missingRow(8))
+            availability = listOf(availableRow(7), missingRow(8, AgentKind.KIMI))
         }
         val result = RendererActions(source).handle("hosts.list", payload())
         assertThat(result.status).isEqualTo(200)
@@ -2298,6 +2301,276 @@ class RendererActionsTest {
         val wrongTerminalParameter = receive("terminal.command.start", JSONObject().put("projectId", "host-7"))
         assertThat(wrongTerminalParameter.getInt("status")).isEqualTo(400)
         assertThat(wrongTerminalParameter.getJSONObject("body").getString("code")).isEqualTo("INVALID_REQUEST")
+    }
+
+    // ==================== History state, session recovery, host credentials and a missing directory ====================
+
+    @Test
+    fun aMessagePageCarriesWhatTheHistoryStoreHoldsAndNeverClaimsMore() = runTest {
+        val rows = listOf(AgentEvent(type = "user", text = "你好", historyKey = 1), AgentEvent(type = "content", text = "在", historyKey = 2))
+        val source = openSource().apply {
+            events = rows
+            history = AgentHistoryStatus(state = "partial", note = "更早的一页尚未从主机读回。")
+        }
+        val actions = RendererActions(source)
+
+        val page = dataOf(actions.handle("messages.list", payload(conversation = true)))
+        val history = page.getJSONObject("history")
+        assertThat(history.getString("state")).isEqualTo("partial")
+        assertThat(history.getString("note")).isEqualTo("更早的一页尚未从主机读回。")
+
+        // A complete store says so, and one that cannot be read at all is never answered as complete.
+        source.history = AgentHistoryStatus(state = "complete", note = null)
+        val complete = dataOf(actions.handle("messages.list", payload(conversation = true))).getJSONObject("history")
+        assertThat(complete.getString("state")).isEqualTo("complete")
+        assertThat(complete.isNull("note")).isTrue()
+
+        source.historyFailure = IOException("历史文件不可读")
+        val unreadable = dataOf(actions.handle("messages.list", payload(conversation = true))).getJSONObject("history")
+        assertThat(unreadable.getString("state")).isEqualTo("unavailable")
+        assertThat(unreadable.getString("note")).contains("历史文件不可读")
+
+        // A state this host does not know is no evidence of a complete history either.
+        source.historyFailure = null
+        source.history = AgentHistoryStatus(state = "recovering", note = null)
+        val unknown = dataOf(actions.handle("messages.list", payload(conversation = true))).getJSONObject("history")
+        assertThat(unknown.getString("state")).isEqualTo("unavailable")
+        assertThat(unknown.getString("note")).isNotBlank()
+
+        // The page loaded before the window answers the same fact, because it is the same store.
+        val older = openSource().apply {
+            events = rows
+            hasEarlier = true
+            earlierEvents = listOf(AgentEvent(type = "user", text = "更早", historyKey = 0))
+            history = AgentHistoryStatus(state = "partial", note = "索引只覆盖了一部分。")
+        }
+        val olderPage = dataOf(RendererActions(older).handle("messages.before", payload(conversation = true, query = mapOf("before" to "m1"))))
+        assertThat(olderPage.getJSONObject("history").getString("state")).isEqualTo("partial")
+        assertThat(olderPage.has("items")).isTrue()
+    }
+
+    @Test
+    fun clearingHistoryIsItsOwnStoreAndAnswersWhatItCleared() = runTest {
+        val source = openSource().apply { sessions = listOf(this@RendererActionsTest.session); clearedConversations = 3 }
+        val actions = RendererActions(source)
+        val cleared = dataOf(actions.handle("history.clear", payload()))
+        assertThat(cleared.getBoolean("cleared")).isTrue()
+        assertThat(cleared.getInt("conversations")).isEqualTo(3)
+        assertThat(source.historyClears).isEqualTo(1)
+        // The history pages and the session index are two stores: clearing one never clears the other.
+        assertThat(source.indexClears).isZero()
+        assertThat(source.sessions).hasSize(1)
+
+        val failed = source.apply { historyClearFailure = IOException("历史存储被占用") }
+        val failure = RendererActions(failed).handle("history.clear", payload())
+        assertThat(failure.status).isEqualTo(500)
+        assertThat(codeOf(failure)).isEqualTo("HISTORY_CLEAR_FAILED")
+        assertThat((failure.body as JSONObject).getString("error")).contains("历史存储被占用")
+
+        // The index route stays the index route: it reports its own count and its own failure code.
+        val index = dataOf(RendererActions(openSource().apply { sessions = listOf(this@RendererActionsTest.session) }).handle("index.clear", payload()))
+        assertThat(index.getBoolean("cleared")).isTrue()
+        assertThat(index.has("sessions")).isTrue()
+        assertThat(index.has("conversations")).isFalse()
+    }
+
+    @Test
+    fun aConversationAndItsRuntimeSnapshotReportWhetherTheSessionIsStillAttached() = runTest {
+        val source = openSource().apply { recovery = AgentRecovery(state = AgentRecoveryState.ATTACHED, note = null) }
+        val actions = RendererActions(source)
+
+        val row = dataOf(actions.handle("conversation.read", payload(conversation = true)))
+        assertThat(row.getJSONObject("recovery").getString("state")).isEqualTo("attached")
+        assertThat(row.getJSONObject("recovery").isNull("note")).isTrue()
+
+        val snapshot = dataOf(actions.handle("runtime.snapshot", payload()))
+        assertThat(snapshot.getJSONObject("recovery").getString("state")).isEqualTo("attached")
+        assertThat(snapshot.has("messages")).isTrue()
+
+        source.recovery = AgentRecovery(state = AgentRecoveryState.GONE, note = "主机上的会话已经结束。")
+        val gone = dataOf(actions.handle("runtime.snapshot", payload())).getJSONObject("recovery")
+        assertThat(gone.getString("state")).isEqualTo("gone")
+        assertThat(gone.getString("note")).isEqualTo("主机上的会话已经结束。")
+
+        // A session nobody verified is unknown — never attached, because a caller reconciles on this fact.
+        source.recovery = AgentRecovery(state = AgentRecoveryState.UNKNOWN, note = null)
+        assertThat(dataOf(actions.handle("runtime.snapshot", payload())).getJSONObject("recovery").getString("state")).isEqualTo("unknown")
+
+        source.recoveryFailure = IOException("恢复记录不可读")
+        val unreadable = dataOf(actions.handle("runtime.snapshot", payload())).getJSONObject("recovery")
+        assertThat(unreadable.getString("state")).isEqualTo("unknown")
+        assertThat(unreadable.getString("note")).contains("恢复记录不可读")
+    }
+
+    @Test
+    fun aHostRowCarriesHowItAuthenticatesAndNeverThePasswordItself() = runTest {
+        val source = FakeSource().apply {
+            hosts = listOf(savedHost)
+            keys = mapOf(42L to "工作密钥")
+            storedPasswords[7L] = "只有产品持有的口令"
+        }
+        val row = dataOf(RendererActions(source).handle("hosts.list", payload())).getJSONArray("items").getJSONObject(0)
+        assertThat(row.getString("auth_method")).isEqualTo("key")
+        assertThat(row.getLong("key_id")).isEqualTo(42L)
+        assertThat(row.getString("key_name")).isEqualTo("工作密钥")
+        assertThat(row.getBoolean("has_password")).isTrue()
+
+        // A host with no key association answers null, and one nobody stored a password for says false.
+        val plain = FakeSource().apply { hosts = listOf(savedHost.copy(id = 9, nickname = "无密钥", pubkeyId = -1L)) }
+        val plainRow = dataOf(RendererActions(plain).handle("hosts.list", payload())).getJSONArray("items").getJSONObject(0)
+        assertThat(plainRow.isNull("key_id")).isTrue()
+        assertThat(plainRow.isNull("key_name")).isTrue()
+        assertThat(plainRow.getBoolean("has_password")).isFalse()
+
+        // The password travels in one direction: no answer this host gives carries the value back.
+        val answered = RendererActions(source).handle("hosts.update", payload(params = mapOf("hostId" to "host-7"), body = mapOf("password" to "新口令")))
+        assertThat(answered.status).isEqualTo(200)
+        assertThat(answered.body.toString()).doesNotContain("新口令")
+        assertThat(source.storedPasswords[7L]).isEqualTo("新口令")
+        assertThat(dataOf(answered).getBoolean("has_password")).isTrue()
+    }
+
+    @Test
+    fun aPasswordAuthenticationHostWriteNeedsAUsableMethodAndAPassword() = runTest {
+        val source = FakeSource().apply { hosts = listOf(savedHost) }
+        val actions = RendererActions(source)
+
+        // A method this app cannot use is refused with its own code before anything is written.
+        for (method in listOf("agent", "KEEY", "ssh")) {
+            val result = actions.handle("hosts.create", payload(body = mapOf("nickname" to "n", "hostname" to "a.test", "auth_method" to method)))
+            assertThat(result.status).describedAs(method).isEqualTo(422)
+            assertThat(codeOf(result)).describedAs(method).isEqualTo("AUTH_METHOD_INVALID")
+        }
+        val updated = actions.handle("hosts.update", payload(params = mapOf("hostId" to "host-7"), body = mapOf("auth_method" to "agent")))
+        assertThat(updated.status).isEqualTo(422)
+        assertThat(codeOf(updated)).isEqualTo("AUTH_METHOD_INVALID")
+        assertThat(source.savedHosts).isEmpty()
+
+        // Password authentication without a password is refused while this host holds none...
+        val without = actions.handle("hosts.create", payload(body = mapOf("nickname" to "n", "hostname" to "a.test", "auth_method" to "password")))
+        assertThat(without.status).isEqualTo(422)
+        assertThat(codeOf(without)).isEqualTo("PASSWORD_REQUIRED")
+        val missing = actions.handle("hosts.update", payload(params = mapOf("hostId" to "host-7"), body = mapOf("auth_method" to "password")))
+        assertThat(missing.status).isEqualTo(422)
+        assertThat(codeOf(missing)).isEqualTo("PASSWORD_REQUIRED")
+
+        // ...and a create that brings one stores the method and the credential together.
+        val created = actions.handle("hosts.create", payload(body = mapOf("nickname" to "密码机", "hostname" to "b.test", "auth_method" to "password", "password" to "s3cret")))
+        assertThat(created.status).isEqualTo(200)
+        val stored = source.savedHosts.single()
+        assertThat(stored.authMethod).isEqualTo("password")
+        assertThat(source.storedPasswords[stored.id]).isEqualTo("s3cret")
+        assertThat(dataOf(created).getString("auth_method")).isEqualTo("password")
+        assertThat(dataOf(created).getBoolean("has_password")).isTrue()
+
+        // A host that already holds one may be switched to password authentication without carrying it again.
+        val switched = actions.handle("hosts.update", payload(params = mapOf("hostId" to "host-${stored.id}"), body = mapOf("auth_method" to "password")))
+        assertThat(switched.status).isEqualTo(200)
+        assertThat(source.savedHosts.last().authMethod).isEqualTo("password")
+
+        // A password the request does not name is kept; an explicit null clears it; an empty field changes nothing.
+        source.storedPasswords[7L] = "已保存"
+        val kept = actions.handle("hosts.update", payload(params = mapOf("hostId" to "host-7"), body = mapOf("hostname" to "198.51.100.7")))
+        assertThat(kept.status).isEqualTo(200)
+        assertThat(source.storedPasswords[7L]).isEqualTo("已保存")
+        val blank = actions.handle("hosts.update", payload(params = mapOf("hostId" to "host-7"), body = mapOf("password" to "")))
+        assertThat(blank.status).isEqualTo(200)
+        assertThat(source.storedPasswords[7L]).isEqualTo("已保存")
+        val cleared = actions.handle("hosts.update", payload(params = mapOf("hostId" to "host-7"), body = mapOf("password" to JSONObject.NULL)))
+        assertThat(cleared.status).isEqualTo(200)
+        assertThat(source.storedPasswords[7L]).isNull()
+        assertThat(dataOf(cleared).getBoolean("has_password")).isFalse()
+
+        // A writing failure is answered as a failure, because the row would otherwise look like it holds a credential.
+        source.passwordWriteFailure = IOException("凭据存储不可写")
+        val refused = actions.handle("hosts.update", payload(params = mapOf("hostId" to "host-7"), body = mapOf("password" to "x")))
+        assertThat(refused.status).isEqualTo(500)
+        assertThat(codeOf(refused)).isEqualTo("HOST_SAVE_FAILED")
+        assertThat((refused.body as JSONObject).getString("error")).contains("凭据存储不可写")
+    }
+
+    @Test
+    fun aHostKeyAssociationIsWrittenKeptOrRemovedByTheRequest() = runTest {
+        val source = FakeSource().apply { hosts = listOf(savedHost) }
+        val actions = RendererActions(source)
+
+        // A key the request names is the association this row now carries, and its label travels with the answer.
+        source.keys = mapOf(8L to "新密钥")
+        val keyed = actions.handle("hosts.update", payload(params = mapOf("hostId" to "host-7"), body = mapOf("key_id" to 8)))
+        assertThat(keyed.status).isEqualTo(200)
+        assertThat(source.savedHosts.last().pubkeyId).isEqualTo(8L)
+        assertThat(dataOf(keyed).getLong("key_id")).isEqualTo(8L)
+        assertThat(dataOf(keyed).getString("key_name")).isEqualTo("新密钥")
+
+        // A request that says nothing about the key keeps the association this row already had.
+        val untouched = actions.handle("hosts.update", payload(params = mapOf("hostId" to "host-7"), body = mapOf("hostname" to "198.51.100.7")))
+        assertThat(untouched.status).isEqualTo(200)
+        assertThat(source.savedHosts.last().pubkeyId).isEqualTo(8L)
+
+        // An explicit null removes it, which is how a host that switches to password authentication stops naming one.
+        val removed = actions.handle("hosts.update", payload(params = mapOf("hostId" to "host-7"), body = mapOf("key_id" to JSONObject.NULL)))
+        assertThat(removed.status).isEqualTo(200)
+        assertThat(source.savedHosts.last().pubkeyId).isEqualTo(-1L)
+        assertThat(dataOf(removed).isNull("key_id")).isTrue()
+        assertThat(dataOf(removed).isNull("key_name")).isTrue()
+
+        // An id that names no key is refused rather than stored as something the next connection could not use.
+        for (key in listOf(0, -3, "abc", 1.5, true)) {
+            val refused = actions.handle("hosts.update", payload(params = mapOf("hostId" to "host-7"), body = mapOf("key_id" to key)))
+            assertThat(refused.status).describedAs(key.toString()).isEqualTo(422)
+            assertThat(codeOf(refused)).describedAs(key.toString()).isEqualTo("HOST_INVALID")
+        }
+        assertThat(source.savedHosts).hasSize(3)
+    }
+
+    @Test
+    fun aConversationWithNoUsableDirectoryIsFlaggedAndRefusesToSend() = runTest {
+        val broken = this@RendererActionsTest.session.copy(cwd = "")
+        val source = FakeSource().apply {
+            session = broken
+            indexed = broken
+            sessions = listOf(broken)
+            active = true
+            events = listOf(AgentEvent(type = "user", text = "旧消息", historyKey = 1))
+        }
+        val actions = RendererActions(source)
+
+        // The row says which directory is unusable and why, and it is still listed and readable.
+        val row = dataOf(actions.handle("conversation.read", payload(conversation = true)))
+        assertThat(row.getBoolean("cwd_missing")).isTrue()
+        assertThat(row.getString("cwd_note")).isNotBlank()
+        assertThat(row.getJSONObject("runtime").getBoolean("can_send_message")).isFalse()
+        val listed = dataOf(actions.handle("conversations.list", payload())).getJSONArray("items").getJSONObject(0)
+        assertThat(listed.getBoolean("cwd_missing")).isTrue()
+
+        // Sending is refused with its own stable code, and nothing reached the repository.
+        val refused = actions.handle("messages.send", payload(conversation = true, body = mapOf("content" to "你好")))
+        assertThat(refused.status).isEqualTo(409)
+        assertThat(codeOf(refused)).isEqualTo("CWD_MISSING")
+        assertThat(source.sends).isEmpty()
+
+        // A new session in that workspace answers what has to be typed there instead of failing without a reason.
+        val hostOnly = FakeSource().apply { hosts = listOf(Host(id = 7, nickname = "工作机", hostname = "example.test")) }
+        val created = RendererActions(hostOnly).handle("conversations.create", payload(body = mapOf("host_id" to "host-7", "agent" to "kimi", "cwd" to "")))
+        assertThat(created.status).isEqualTo(422)
+        assertThat(codeOf(created)).isEqualTo("INVALID_CWD")
+        assertThat((created.body as JSONObject).getString("error")).contains("工作目录")
+        assertThat(hostOnly.createdConversations).isEmpty()
+
+        // A relative path is unusable by the same rule, and a usable one leaves the row unflagged.
+        source.session = broken.copy(cwd = "relative/app")
+        source.indexed = source.session
+        val relative = dataOf(actions.handle("conversation.read", payload(conversation = true)))
+        assertThat(relative.getBoolean("cwd_missing")).isTrue()
+        assertThat(relative.getString("cwd_note")).contains("relative/app")
+
+        source.session = broken.copy(cwd = "/workspace/app")
+        source.indexed = source.session
+        val healthy = dataOf(actions.handle("conversation.read", payload(conversation = true)))
+        assertThat(healthy.getBoolean("cwd_missing")).isFalse()
+        assertThat(healthy.isNull("cwd_note")).isTrue()
+        assertThat(healthy.getJSONObject("runtime").getBoolean("can_send_message")).isTrue()
+        assertThat(actions.handle("messages.send", payload(conversation = true, body = mapOf("content" to "你好"))).status).isEqualTo(202)
     }
 
     /** One saved host with every identity column a rename or an address change must leave alone. */

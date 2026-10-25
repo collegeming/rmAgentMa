@@ -59,7 +59,7 @@ class AgentProbeStateTest {
     }
 
     @Test
-    fun anUnsupportedHostTargetKeepsItsOwnVerdictInsteadOfAFailure() {
+    fun anUnreadableProbeAnswerKeepsItsOwnVerdictInsteadOfAFailure() {
         val row = availability(error = WINDOWS_NATIVE_UNSUPPORTED)
         assertThat(probeStateOf(row, refreshing = false)).isEqualTo(AgentProbeState.TARGET_UNSUPPORTED)
         // A running refresh is still reported as such, so no stale verdict reads as the new one.

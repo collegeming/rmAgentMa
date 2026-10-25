@@ -38,6 +38,7 @@ import org.connectbot.agent.AgentMessageQueue
 import org.connectbot.agent.AgentRepository
 import org.connectbot.agent.AgentSshPool
 import org.connectbot.data.HostRepository
+import org.connectbot.data.PubkeyRepository
 import org.connectbot.di.CoroutineDispatchers
 import org.json.JSONObject
 import org.junit.After
@@ -92,9 +93,10 @@ class AgentRendererSourceTest {
         `when`(index.read()).thenReturn(emptyList())
         val drafts = mock(AgentDraftStore::class.java)
         val queue = mock(AgentMessageQueue::class.java)
+        val keys = mock(PubkeyRepository::class.java)
         val preferences = mock(SharedPreferences::class.java)
         pool = mock(AgentSshPool::class.java)
-        source = AgentRendererSource(repository, hosts, index, pool, drafts, queue, preferences, dispatchers)
+        source = AgentRendererSource(repository, hosts, index, pool, drafts, queue, keys, preferences, dispatchers)
     }
 
     @After

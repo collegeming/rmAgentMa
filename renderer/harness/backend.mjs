@@ -3,7 +3,7 @@ import { mkdirSync, readdirSync, writeFileSync, existsSync, readFileSync, realpa
 import { resolve, join, dirname } from 'node:path';
 import { AcpClient, toConfigOptions } from './acp-client.mjs';
 import { startFakeModel, fakeOverlay, LOCAL_VALUES } from './fake-model.mjs';
-import { MessageQueue, SessionIndex, fixtureHosts } from './host-fixture.mjs';
+import { HistoryStore, HostStore, MessageQueue, SessionIndex, cwdFields, seededOlderHistory } from './host-fixture.mjs';
 import { SessionState, CONVERSATION_ID as C, PROJECT_ID as P, id, problem } from './session-state.mjs';
 
 const ok = (data) => ({ success: true, data });
@@ -67,6 +67,12 @@ export async function startBackend({ runDir, dshBin = '/usr/sbin/dsh', port = 0 
   const cancelled = new Map();
   const queue = new MessageQueue();
   const index = new SessionIndex([{ session_id: C }]);
+  const hosts = new HostStore();
+  const history = new HistoryStore({ older: seededOlderHistory(C) });
+  // The two facts this session states about itself: whether its working directory is still there, and whether the
+  // host still holds the session its runtime was attached to. Both are what a check flips to prove a branch.
+  const cwd = { missing: false, note: null };
+  const recovery = { state: 'attached', note: null };
   const settings = { language: 'zh-CN', theme: 'light', colorScheme: 'default', notificationEnabled: false, cronNotificationEnabled: false, keepAwake: false, saveUploadToWorkspace: false };
 
   function publicApproval(approval) { const { rpc_id, ...result } = approval; return result; }
@@ -181,7 +187,27 @@ export async function startBackend({ runDir, dshBin = '/usr/sbin/dsh', port = 0 
     const current = state.options.find((option) => option.id === 'model')?.current_value ?? LOCAL_VALUES[0];
     return { id: C, name: 'dsh 离线完整回路', type: 'acp', created_at: state.messages[0].created_at, modified_at: Date.now(),
       model: { provider_id: 'fake', use_model: current, model: current }, extra: { workspace: work, backend: 'dsh', custom_workspace: true, agent_name: 'dsh' },
-      project_id: P, status: state.turn ? 'running' : 'finished', fork_capability: { at_turn: false }, prompt_capability: { image: false, audio: false }, runtime: state.runtime() };
+      project_id: P, status: state.turn ? 'running' : 'finished', fork_capability: { at_turn: false }, prompt_capability: { image: false, audio: false }, runtime: runtime(),
+      ...cwdFields(cwd.missing, cwd.note) };
+  }
+
+  /**
+   * The runtime of this session with the one fact a missing working directory adds: a conversation that has no
+   * directory to run in cannot take a message, which its own runtime states instead of only a refused send.
+   */
+  function runtime() {
+    const current = state.runtime();
+    return cwd.missing ? { ...current, can_send_message: false } : current;
+  }
+
+  /** The same row as `conversation.read` answers it, which also states whether the runtime is still attached. */
+  function conversationRead() {
+    return { ...conversation(), recovery: { ...recovery } };
+  }
+
+  /** The runtime snapshot with the session's own recovery state, the fact this batch adds to every reader of it. */
+  function snapshot() {
+    return { ...state.snapshot(), runtime: runtime(), recovery: { ...recovery } };
   }
 
   function complete(turnId, result, error) {
@@ -209,6 +235,8 @@ export async function startBackend({ runDir, dshBin = '/usr/sbin/dsh', port = 0 
 
   async function send(body, key) {
     if (typeof body.content !== 'string' || !body.content.trim()) throw problem(422, 'INVALID_CONTENT', 'content must be non-empty text');
+    // A session whose working directory is gone cannot take a prompt: the refusal names that fact and starts no turn.
+    if (cwd.missing) throw problem(409, 'CWD_MISSING', '该会话的工作目录已不在主机上，无法发送。');
     if ([body.files, body.sessions, body.inject_skills].some((value) => value && (!Array.isArray(value) || value.length))) throw problem(422, 'UNSUPPORTED_ATTACHMENT', 'Files, sessions and injected skills are not enabled');
     if (body.content.length > 64000) throw problem(413, 'CONTENT_TOO_LARGE', 'Prompt exceeds probe limit');
     key ??= body.loading_id;
@@ -296,11 +324,11 @@ export async function startBackend({ runDir, dshBin = '/usr/sbin/dsh', port = 0 
   };
   state.listeners.add(emitToSockets);
   function replay(socket, cursor = 0, epoch) {
-    const snapshot = state.snapshot();
+    const current = snapshot();
     if (epoch === state.epoch && Number.isSafeInteger(cursor) && cursor >= 0 && cursor <= state.seq) {
       for (const event of state.events) if (event.epoch === epoch && event.seq > cursor) socket.send(JSON.stringify({ ...event, documentId: socket.data.documentId }));
     }
-    socket.send(JSON.stringify({ type: 'event', documentId: socket.data.documentId, name: 'runtime.snapshot', data: { ...snapshot, replace: true }, epoch: state.epoch, seq: state.seq }));
+    socket.send(JSON.stringify({ type: 'event', documentId: socket.data.documentId, name: 'runtime.snapshot', data: { ...current, replace: true }, epoch: state.epoch, seq: state.seq }));
   }
   const server = Bun.serve({
     hostname: '127.0.0.1', port,
@@ -376,18 +404,21 @@ export async function startBackend({ runDir, dshBin = '/usr/sbin/dsh', port = 0 
         const queueEntry = path.match(/^\/api\/queue\/([^/]+)$/);
         if (method === 'DELETE' && queueEntry) return json(ok(queue.cancel(decodeURIComponent(queueEntry[1]))));
         if (method === 'POST' && path === '/api/index/clear') return json(ok(index.clear()));
-        if (method === 'GET' && path === '/api/hosts') {
-          const items = fixtureHosts();
-          return json(ok({ items, total: items.length }));
-        }
+        // The history store is a store of its own: its clear entry reports the conversations it dropped, and the
+        // session index cache keeps its own counts.
+        if (method === 'POST' && path === '/api/history/clear') return json(ok(history.clear()));
+        if (method === 'GET' && path === '/api/hosts') return json(ok(hosts.list()));
+        if (method === 'POST' && path === '/api/hosts') return json(ok(hosts.create(body)));
+        const hostEntry = path.match(/^\/api\/hosts\/([^/]+)$/);
+        if (method === 'PUT' && hostEntry) return json(ok(hosts.update(decodeURIComponent(hostEntry[1]), body)));
         if (method === 'GET' && emptyRoutes.has(path)) return json(ok([]));
         const match = path.match(/^\/api\/conversations\/([^/]+)(.*)$/);
         if (match) {
           if (match[1] !== C) throw problem(404, 'CONVERSATION_NOT_FOUND', 'Unknown conversation');
           const route = match[2];
-          if (method === 'GET' && route === '') return json(ok(conversation()));
+          if (method === 'GET' && route === '') return json(ok(conversationRead()));
           if (method === 'POST' && route === '/runtime/ensure') return json(ok(await ensure()));
-          if (method === 'GET' && route === '/snapshot') return json(ok(state.snapshot()));
+          if (method === 'GET' && route === '/snapshot') return json(ok(snapshot()));
           if (method === 'GET' && route === '/config-options') return json(ok({ config_options: state.options }));
           if (method === 'PUT' && route.startsWith('/config-options/')) {
             await ensure();
@@ -415,12 +446,30 @@ export async function startBackend({ runDir, dshBin = '/usr/sbin/dsh', port = 0 
           if (method === 'GET' && route === '/messages') {
             const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit') ?? 50)));
             const before = url.searchParams.get('before');
+            // A request that names the cursor of the page it holds is asking for the page below it, which is the
+            // history store's own older page — the same page `messages.before` serves, so the window's own reader
+            // never receives an empty page in place of the history it holds.
+            if (before && !url.searchParams.has('after') && !url.searchParams.has('anchor_message_id')) {
+              const older = history.page(state.messages, before, limit);
+              return json(ok({ items: older.items, oldest_cursor: older.items[0]?.id ?? null, newest_cursor: older.items.at(-1)?.id ?? null,
+                has_more_before: older.has_more_before, has_more_after: older.has_more_after, history: history.report() }));
+            }
             const end = before ? state.messages.findIndex((item) => item.id === before) : state.messages.length;
             if (end < 0 || !Number.isFinite(limit)) throw problem(422, 'INVALID_CURSOR', 'Unknown cursor or invalid limit');
             const start = Math.max(0, end - limit);
             const items = structuredClone(state.messages.slice(start, end));
             for (const message of items) if (message.type === 'acp_permission') { message.content.readonly = true; message.status = 'finish'; }
-            return json(ok({ items, oldest_cursor: items[0]?.id ?? null, newest_cursor: items.at(-1)?.id ?? null, has_more_before: start > 0, has_more_after: end < state.messages.length }));
+            return json(ok({ items, oldest_cursor: items[0]?.id ?? null, newest_cursor: items.at(-1)?.id ?? null,
+              has_more_before: start > 0 || history.hasOlder(), has_more_after: end < state.messages.length, history: history.report() }));
+          }
+          // One older page from the history store, answered in the window's own shape and stating what the host
+          // could read of that store.
+          if (method === 'GET' && route === '/messages/before') {
+            const limit = Number(url.searchParams.get('limit') ?? 50);
+            if (!Number.isFinite(limit) || limit < 1 || limit > 200) throw problem(422, 'INVALID_CURSOR', 'limit 必须是 1..200 的整数。');
+            const page = history.page(state.messages, url.searchParams.get('before') ?? '', Math.floor(limit));
+            return json(ok({ items: page.items, oldest_cursor: page.items[0]?.id ?? null, newest_cursor: page.items.at(-1)?.id ?? null,
+              has_more_before: page.has_more_before, has_more_after: page.has_more_after, history: history.report() }));
           }
           if (method === 'POST' && route === '/messages') return json(ok(await send(body, request.headers.get('Idempotency-Key') ?? body.idempotency_key)));
           if (method === 'GET' && route === '/confirmations') return json(ok(state.pending().map(publicApproval)));
@@ -453,6 +502,8 @@ export async function startBackend({ runDir, dshBin = '/usr/sbin/dsh', port = 0 
     },
   });
   return { port: server.port, url: `http://127.0.0.1:${server.port}`, state, probeHeaders, setAllowedOrigins,
+    // The fixture state a check flips to prove a branch, and the two stores its own answers are read from.
+    history, hosts, cwd, recovery,
     async close() {
       closed = true;
       expireApprovals('backend_closed', true);

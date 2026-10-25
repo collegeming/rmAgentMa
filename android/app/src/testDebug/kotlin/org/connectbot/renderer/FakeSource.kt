@@ -19,11 +19,14 @@ package org.connectbot.renderer
 
 import org.connectbot.agent.AgentChallenge
 import org.connectbot.agent.AgentConfigAccess
+import org.connectbot.agent.AgentHistoryStatus
 import org.connectbot.agent.AgentLinkState
 import org.connectbot.agent.AgentMessageKind
 import org.connectbot.agent.AgentMessageQueueStats
 import org.connectbot.agent.AgentMessageState
 import org.connectbot.agent.AgentQueuedMessage
+import org.connectbot.agent.AgentRecovery
+import org.connectbot.agent.AgentRecoveryState
 import org.connectbot.agent.AgentTranscriptOutcome
 import org.connectbot.data.entity.Host
 import org.rmagentma.core.AgentAvailability
@@ -351,6 +354,54 @@ internal class FakeSource : RendererSource {
         indexed = null
         return sessions.size
     }
+
+    /** What the history store reports, what it was asked to clear, and how many conversations that cleared. */
+    var history = AgentHistoryStatus(state = "complete", note = null)
+    var historyFailure: Exception? = null
+    var historyClears = 0
+    var clearedConversations = 2
+    var historyClearFailure: Exception? = null
+
+    override suspend fun historyStatus(): AgentHistoryStatus {
+        historyFailure?.let { throw it }
+        return history
+    }
+
+    /** Clearing really counts the conversations the fake holds, so a route that reports a count proves one ran. */
+    override suspend fun clearHistory(): Int {
+        historyClearFailure?.let { throw it }
+        historyClears++
+        return clearedConversations
+    }
+
+    /** What the repository answers about the recorded session: attached, gone or never verified. */
+    var recovery = AgentRecovery(state = AgentRecoveryState.UNKNOWN, note = null)
+    var recoveryFailure: Exception? = null
+
+    override suspend fun recoveryState(): AgentRecovery {
+        recoveryFailure?.let { throw it }
+        return recovery
+    }
+
+    /** The saved keys of this fake, by id; a key id this map does not hold has no label to answer. */
+    var keys: Map<Long, String> = emptyMap()
+
+    override suspend fun keyName(keyId: Long): String? = keys[keyId]
+
+    /**
+     * Every password a route wrote, keyed by host, and the failure such a write reports. The fake keeps the value so
+     * a test can prove which one was stored, and a test can equally prove that no answer this host gives carries it
+     * back.
+     */
+    val storedPasswords = mutableMapOf<Long, String?>()
+    var passwordWriteFailure: Exception? = null
+
+    override suspend fun setHostPassword(hostId: Long, password: String?) {
+        passwordWriteFailure?.let { throw it }
+        storedPasswords[hostId] = password
+    }
+
+    override suspend fun hasHostPassword(hostId: Long): Boolean = storedPasswords[hostId] != null
 }
 
 /**

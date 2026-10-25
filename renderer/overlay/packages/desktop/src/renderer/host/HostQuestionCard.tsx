@@ -13,9 +13,10 @@ import {
   singleStringChoices,
   validQuestionAnswer,
 } from '@renderer/host/questionAnswer';
+import { markLiveQuestion } from '@renderer/host/pendingInteraction';
 import { hostFailureText } from '@renderer/pages/hosts/hostsApi';
 import { Button, Input } from '@arco-design/web-react';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 const recordOf = (value: unknown): Record<string, unknown> =>
@@ -62,6 +63,13 @@ const HostQuestionCard: React.FC<{ message: TMessage }> = React.memo(({ message 
       setBusy(false);
     }
   };
+
+  // A question on screen is an interaction waiting for the user: while this card is drawn and unanswered it
+  // registers itself, so leaving the conversation can ask before it drops the question.
+  useEffect(() => {
+    if (answered || stale) return undefined;
+    return markLiveQuestion(message.conversation_id);
+  }, [answered, stale, message.conversation_id]);
 
   if (answered) {
     return (

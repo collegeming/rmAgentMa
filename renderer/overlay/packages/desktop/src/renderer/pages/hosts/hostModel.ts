@@ -7,6 +7,8 @@ import {
   AGENT_TARGET_NATIVE,
   AGENT_TARGET_WINDOWS,
   AGENT_TARGET_WSL_PREFIX,
+  HOST_AUTH_KEY,
+  HOST_AUTH_PASSWORD,
   HOST_OS_LINUX,
   HOST_OS_WINDOWS,
   HOST_PROBE_STATES,
@@ -108,6 +110,10 @@ export type HostDraft = {
   osType: string;
   target: 'native' | 'wsl';
   distribution: string;
+  /** How this host logs in: a key the product holds, or a password the user types here. */
+  authMethod: string;
+  /** The password being typed; it is never read back and never stored by this page. */
+  password: string;
 };
 
 export function emptyDraft(): HostDraft {
@@ -119,6 +125,8 @@ export function emptyDraft(): HostDraft {
     osType: HOST_OS_LINUX,
     target: 'native',
     distribution: '',
+    authMethod: HOST_AUTH_KEY,
+    password: '',
   };
 }
 
@@ -132,34 +140,55 @@ export function draftFromHost(host: SavedHost): HostDraft {
     osType: host.os_type,
     target: wsl ? 'wsl' : 'native',
     distribution: wsl ? host.agent_target.slice(AGENT_TARGET_WSL_PREFIX.length) : '',
+    // The method the row states, or a key when it states none this build knows: an existing password is never
+    // read back, so an unstated method is not guessed to be one.
+    authMethod: host.auth_method === HOST_AUTH_PASSWORD ? HOST_AUTH_PASSWORD : HOST_AUTH_KEY,
+    password: '',
   };
 }
 
+/** How this host logs in, as the row states it; an unknown value is shown as the value it carries. */
+export function authMethodLabel(host: SavedHost, t: TFunction): string {
+  if (host.auth_method === HOST_AUTH_PASSWORD) return t('settings.hosts.authPassword');
+  if (host.auth_method === HOST_AUTH_KEY) {
+    const key = host.key_name || host.key_id || '';
+    return key ? t('settings.hosts.authKeyNamed', { key }) : t('settings.hosts.authKeyDefault');
+  }
+  return host.auth_method ? String(host.auth_method) : t('settings.hosts.valueNone');
+}
+
 /** What stops this draft from being saved; the message each case reads is DRAFT_PROBLEM_KEYS. */
-export type DraftProblem = { kind: 'nickname' | 'hostname' | 'port' | 'distribution' };
+export type DraftProblem = { kind: 'nickname' | 'hostname' | 'port' | 'distribution' | 'password' };
 
 export const DRAFT_PROBLEM_KEYS: Record<DraftProblem['kind'], string> = {
   nickname: 'settings.hosts.nicknameRequired',
   hostname: 'settings.hosts.addressRequired',
   port: 'settings.hosts.portInvalid',
   distribution: 'settings.hosts.distributionRequired',
+  password: 'settings.hosts.passwordRequired',
 };
 
 /**
  * The one problem that blocks a save, or null. A Windows host may run its Agent on Windows itself or in one
  * WSL distribution; a distribution is required for the WSL target, because the host quotes it into the
- * Windows shell and its shell context is what the Agent is launched in.
+ * Windows shell and its shell context is what the Agent is launched in. The password method needs a password
+ * the first time it is chosen: an empty field is not a password, and sending one would write nothing.
  */
-export function draftProblem(draft: HostDraft): DraftProblem | null {
+export function draftProblem(draft: HostDraft, editing: boolean): DraftProblem | null {
   if (!draft.nickname.trim()) return { kind: 'nickname' };
   if (!draft.hostname.trim()) return { kind: 'hostname' };
   if (!validPort(draft.port)) return { kind: 'port' };
   if (draft.osType === HOST_OS_WINDOWS && draft.target === 'wsl' && !validWslDistribution(draft.distribution.trim()))
     return { kind: 'distribution' };
+  if (draft.authMethod === HOST_AUTH_PASSWORD && !draft.password && !editing) return { kind: 'password' };
   return null;
 }
 
-/** The request body of one create or update: the OS, and the Agent target that OS can run an Agent in. */
+/**
+ * The request body of one create or update: the OS, the Agent target that OS can run an Agent in, and how the
+ * host logs in. A password travels only when the user typed one — an empty field means "leave the stored
+ * password alone" on an update, and is refused by `draftProblem` on a create.
+ */
 export function hostFields(draft: HostDraft): HostFields {
   const osType = draft.osType === HOST_OS_WINDOWS ? HOST_OS_WINDOWS : HOST_OS_LINUX;
   const agentTarget =
@@ -175,6 +204,8 @@ export function hostFields(draft: HostDraft): HostFields {
     username: draft.username.trim(),
     os_type: osType,
     agent_target: agentTarget,
+    auth_method: draft.authMethod === HOST_AUTH_PASSWORD ? HOST_AUTH_PASSWORD : HOST_AUTH_KEY,
+    ...(draft.authMethod === HOST_AUTH_PASSWORD && draft.password ? { password: draft.password } : {}),
   };
 }
 

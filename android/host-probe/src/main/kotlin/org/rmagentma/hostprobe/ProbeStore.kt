@@ -202,6 +202,11 @@ internal class ProbeStore(file: File, private val schedule: (Long, () -> Unit) -
 
             "commands.list", "artifacts.list", "assistants.list", "agents.list", "providers.list", "mcp.list", "skills.list", "cron.list", "teams.list", "adapters.list" -> ProbeResult(body = JSONArray())
 
+            // This probe is a synthetic host with no terminal surface of its own — the product's console is not part
+            // of it — so both terminal routes answer the contract's own code for a build without one instead of a
+            // terminal nobody opened.
+            "terminal.open", "terminal.command.start" -> throw ProbeFailure(501, "TERMINAL_UNSUPPORTED")
+
             else -> throw ProbeFailure(404, "UNKNOWN_ACTION")
         }
         return if (action in setOf("events.subscribe", "events.unsubscribe", "runtime.snapshot", "draft.load", "draft.save")) result else result.copy(body = json("success" to true, "data" to result.body))

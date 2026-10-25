@@ -156,6 +156,9 @@ internal class ZcodeConnection(
 
     suspend fun awaitConsumer() = withTimeout(requestTimeoutMs) { buffer.awaitConsumer() }
 
+    /** Awaits the point where every event offered so far was consumed by this connection's single consumer. */
+    suspend fun consumeBarrier() = withTimeout(requestTimeoutMs) { buffer.barrier() }
+
     suspend fun request(method: String, params: JsonObject): JsonObject = withTimeout(requestTimeoutMs) {
         if (pending.size >= MAX_INCOMING_REQUESTS) throw IOException("Too many pending ZCode requests")
         val id = JsonPrimitive(ids.incrementAndGet())

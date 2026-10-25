@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { AUTH_METHODS, HISTORY_STATES, RECOVERY_STATES, SEEDED_HOST_PASSWORD } from './host-fixture.mjs';
 
 const conversationId = 'conv-probe-1';
 const apiBase = `/api/conversations/${conversationId}`;
@@ -12,6 +13,7 @@ const requiredChecks = [
   'history-readonly-after-refresh', 'ui-reject-without-effect', 'pending-refresh-and-ui-reject',
   'pending-ui-cancel-without-effect', 'stale-approval-rejected', 'stream-ui-cancel',
   'old-turn-cancel-cannot-stop-new-turn', 'queue-withdrawal', 'index-clear', 'host-targets',
+  'history-pages-and-clear', 'host-auth-fields', 'cwd-missing-send-refused', 'conversation-recovery',
   'ws-reconnect-history-recovery', 'network-and-page-errors',
 ];
 
@@ -530,6 +532,179 @@ export async function runBrowserChecks({ aionuiRoot, chromeBin, output, url, bac
       assert.equal(posix.agent_target, 'native', 'a Linux host keeps the native agent target');
       assert.equal(posix.target, 'posix', 'a Linux host runs its Agent in its own POSIX shell');
       return { targets: hosts.items.map((row) => `${row.os_type}/${row.agent_target}/${row.target}/${row.target_supported}`) };
+    });
+    // The history store over HTTP: every page of the conversation states how much of that store the host could
+    // read, one older page is served below the window, and the store's clear entry is its own — separate from
+    // the session index cache the maintenance page drops through index.clear.
+    await check('history-pages-and-clear', async () => {
+      const refusals = [];
+      const refused = async (label, relative, init, status, code) => {
+        const result = await json(relative, init);
+        assert.equal(result.status, status, `${label} answered ${result.status}, expected ${status} ${code} (${JSON.stringify(result.body)})`);
+        assert.equal(result.body.code, code, `${label} must answer ${code}, got ${result.body.code}`);
+        refusals.push({ label, status, code });
+        return result;
+      };
+      const window = unwrap((await json(`${apiBase}/messages?limit=50`)).body);
+      assert.ok(Array.isArray(window.items) && window.items.length > 0, 'messages.list must answer the loaded window');
+      assert.ok(window.history && HISTORY_STATES.includes(window.history.state), `messages.list field history.state must be one of ${HISTORY_STATES.join('/')}, got ${JSON.stringify(window.history)}`);
+      assert.equal(window.history.state, 'complete', `messages.list must report the history it read whole as complete, got ${window.history.state}`);
+      assert.equal(window.history.note, null, 'messages.list field history.note must stay null while the history was read whole');
+      assert.equal(window.has_more_before, true, 'the store holds one older row, so the window must not claim to be the start of the history');
+      const cursor = window.oldest_cursor;
+      assert.ok(cursor, 'messages.list field oldest_cursor must name the cursor the paging protocol asks with');
+      const older = await json(`${apiBase}/messages/before?before=${encodeURIComponent(cursor)}&limit=50`);
+      assert.equal(older.status, 200, `messages.before answered ${older.status} (${JSON.stringify(older.body)})`);
+      const olderPage = unwrap(older.body);
+      assert.ok(Array.isArray(olderPage.items) && olderPage.items.length >= 1, `messages.before must serve the older page the store holds, got ${JSON.stringify(olderPage.items)}`);
+      assert.equal(olderPage.items.at(-1).conversation_id, conversationId, 'messages.before row field conversation_id must name this conversation');
+      assert.ok(olderPage.history && HISTORY_STATES.includes(olderPage.history.state), `messages.before page field history.state must be one of ${HISTORY_STATES.join('/')}, got ${JSON.stringify(olderPage.history)}`);
+      assert.equal(olderPage.history.state, 'complete', 'the older page states the same history the window does');
+      assert.equal(olderPage.has_more_after, true, 'messages.before page field has_more_after must be true: the caller still holds the newer part');
+      assert.equal(olderPage.has_more_before, false, 'nothing is below the oldest row the store holds');
+      // The window's own reader, which asks the same cursor with `before=` on the messages route, is served the
+      // same older page instead of an empty one.
+      const windowPaging = unwrap((await json(`${apiBase}/messages?before=${encodeURIComponent(cursor)}&limit=50`)).body);
+      assert.deepEqual(windowPaging.items.map((row) => row.id), olderPage.items.map((row) => row.id), 'the window route must answer the same older page the dedicated route serves');
+      assert.equal(windowPaging.has_more_before, false, 'the window route must state the same end of the history');
+      await refused('messages.before with a cursor outside the window', `${apiBase}/messages/before?before=never-loaded&limit=50`, {}, 422, 'INVALID_CURSOR');
+      await refused('messages.before below the oldest row', `${apiBase}/messages/before?before=${encodeURIComponent(olderPage.oldest_cursor)}&limit=50`, {}, 409, 'HISTORY_EXHAUSTED');
+      // A store the host could not read says so on the page, with the reason it knows, and refuses to serve a page
+      // from it instead of answering an empty one that would read like the start of the history.
+      const restore = { state: backend.history.state, note: backend.history.note };
+      try {
+        backend.history.state = 'unavailable';
+        backend.history.note = '历史库未能读取。';
+        const unreadable = unwrap((await json(`${apiBase}/messages?limit=50`)).body);
+        assert.equal(unreadable.history.state, 'unavailable', `messages.list must report an unreadable history store as unavailable, got ${unreadable.history.state}`);
+        assert.equal(unreadable.history.note, '历史库未能读取。', 'an unavailable history must carry the reason it knows');
+        assert.ok(unreadable.items.length > 0, 'an unreadable history store must not empty the window the host already loaded');
+        await refused('messages.before from an unreadable store', `${apiBase}/messages/before?before=${encodeURIComponent(cursor)}&limit=50`, {}, 500, 'HISTORY_LOAD_FAILED');
+        backend.history.state = 'partial';
+        backend.history.note = '更早的历史只读到了一部分。';
+        const partial = unwrap((await json(`${apiBase}/messages?limit=50`)).body);
+        assert.equal(partial.history.state, 'partial', 'a history that was read in part must say so rather than read as complete');
+        assert.equal(partial.history.note, '更早的历史只读到了一部分。', 'a partly read history must carry what stayed unread');
+      } finally {
+        backend.history.state = restore.state;
+        backend.history.note = restore.note;
+      }
+      const indexBefore = (await probeStatus()).index.sessions;
+      const cleared = await json('/api/history/clear', { method: 'POST', body: '{}' });
+      assert.equal(cleared.status, 200, `history.clear answered ${cleared.status} (${JSON.stringify(cleared.body)})`);
+      assert.deepEqual(unwrap(cleared.body), { cleared: true, conversations: 1 }, `history.clear must report the conversations it cleared, got ${JSON.stringify(unwrap(cleared.body))}`);
+      const again = unwrap((await json('/api/history/clear', { method: 'POST', body: '{}' })).body);
+      assert.deepEqual(again, { cleared: true, conversations: 0 }, 'a history store that holds nothing must report zero conversations rather than invent one');
+      assert.equal((await probeStatus()).index.sessions, indexBefore, 'history.clear must leave the session index cache alone; index.clear is the entry that drops it');
+      // A store that could not be cleared is answered as that failure, with the reason it reported.
+      backend.history.clearFailure = '历史存储被占用';
+      try {
+        await refused('history.clear from a store that cannot be cleared', '/api/history/clear', { method: 'POST', body: '{}' }, 500, 'HISTORY_CLEAR_FAILED');
+      } finally {
+        backend.history.clearFailure = null;
+      }
+      return { state: window.history.state, cursor, olderRows: olderPage.items.map((row) => row.id), refusals, cleared, again };
+    });
+    // The saved hosts' own credentials over HTTP: a row states how it authenticates, the key it uses and whether
+    // it holds a password — never the password itself, and never for a host a request only updated.
+    await check('host-auth-fields', async () => {
+      const refusals = [];
+      const refused = async (label, relative, init, status, code) => {
+        const result = await json(relative, init);
+        assert.equal(result.status, status, `${label} answered ${result.status}, expected ${status} ${code} (${JSON.stringify(result.body)})`);
+        assert.equal(result.body.code, code, `${label} must answer ${code}, got ${result.body.code}`);
+        refusals.push({ label, status, code });
+      };
+      const rows = unwrap((await json('/api/hosts')).body).items;
+      for (const row of rows)
+        for (const field of ['auth_method', 'key_id', 'key_name', 'has_password'])
+          assert.ok(field in row, `hosts.list row ${row.id} must carry field ${field}`);
+      for (const row of rows)
+        assert.ok(AUTH_METHODS.includes(row.auth_method), `hosts.list row ${row.id} field auth_method must be one of ${AUTH_METHODS.join('/')}, got ${row.auth_method}`);
+      const keyed = rows.find((row) => row.auth_method === 'key');
+      assert.ok(keyed && Number.isInteger(keyed.key_id) && keyed.key_name, `a key-authenticated host must name the key it uses, got ${JSON.stringify(keyed)}`);
+      assert.ok(!JSON.stringify(rows).includes(SEEDED_HOST_PASSWORD), 'hosts.list must never carry a stored password');
+      await refused('hosts.create with an unknown auth method', '/api/hosts', { method: 'POST', body: JSON.stringify({ nickname: '探针主机-未知方式', hostname: '10.0.0.9', auth_method: 'agent' }) }, 422, 'AUTH_METHOD_INVALID');
+      await refused('hosts.create on password authentication without a password', '/api/hosts', { method: 'POST', body: JSON.stringify({ nickname: '探针主机-无口令', hostname: '10.0.0.9', auth_method: 'password' }) }, 422, 'PASSWORD_REQUIRED');
+      const created = unwrap((await json('/api/hosts', { method: 'POST', body: JSON.stringify({ nickname: '探针主机-口令', hostname: '10.0.0.9', port: 22, username: 'probe', os_type: 'linux', agent_target: 'native', auth_method: 'password', password: '离线探针新口令' }) })).body);
+      assert.equal(created.auth_method, 'password', `hosts.create field auth_method must be the method it stored, got ${created.auth_method}`);
+      assert.equal(created.key_id, null, 'hosts.create field key_id must stay null for a host that names no key');
+      assert.equal(created.has_password, true, 'hosts.create must state that this host now holds a password');
+      assert.ok(!JSON.stringify(created).includes('离线探针新口令'), 'hosts.create must never echo the password it stored');
+      const afterCreate = unwrap((await json('/api/hosts')).body).items;
+      assert.equal(afterCreate.length, rows.length + 1, 'hosts.list must list the host that was created');
+      assert.ok(!JSON.stringify(afterCreate).includes('离线探针新口令'), 'hosts.list must never carry a stored password');
+      const updated = unwrap((await json(`/api/hosts/${encodeURIComponent(keyed.id)}`, { method: 'PUT', body: JSON.stringify({ nickname: '重命名的离线主机', password: '离线探针改过的口令' }) })).body);
+      assert.equal(updated.id, keyed.id, 'hosts.update must answer the same host it wrote');
+      assert.equal(updated.key_id, keyed.key_id, 'hosts.update field key_id must stay the association the request did not name');
+      assert.equal(updated.auth_method, keyed.auth_method, 'hosts.update field auth_method must stay what the request did not name');
+      assert.equal(updated.has_password, true, 'hosts.update must state that this host holds a password');
+      assert.ok(!JSON.stringify(updated).includes('离线探针改过的口令'), 'hosts.update must never echo the password it stored');
+      assert.ok(!JSON.stringify(unwrap((await json('/api/hosts')).body)).includes('离线探针改过的口令'), 'hosts.list must never carry a stored password after an update');
+      // A host switched to password authentication needs one: a stored credential counts, one it holds none of does not.
+      await refused('hosts.update to password authentication without a password', '/api/hosts/host-3', { method: 'PUT', body: JSON.stringify({ auth_method: 'password' }) }, 422, 'PASSWORD_REQUIRED');
+      return { refusals, created: { id: created.id, auth_method: created.auth_method, has_password: created.has_password }, keyed: { id: keyed.id, key_id: keyed.key_id, key_name: keyed.key_name } };
+    });
+    // A session whose working directory is gone states it on its own row, and its send is refused as that fact
+    // instead of starting a turn the Agent could not run in that directory.
+    await check('cwd-missing-send-refused', async () => {
+      const sendableBefore = (await runtime()).can_send_message;
+      const restore = { missing: backend.cwd.missing, note: backend.cwd.note };
+      try {
+        backend.cwd.missing = true;
+        backend.cwd.note = '该会话的工作目录已被删除。';
+        const read = unwrap((await json(apiBase)).body);
+        assert.equal(read.cwd_missing, true, 'conversation.read field cwd_missing must report a directory that is gone');
+        assert.equal(read.cwd_note, '该会话的工作目录已被删除。', 'conversation.read field cwd_note must carry the reason the host knows');
+        assert.equal(read.runtime.can_send_message, false, 'a conversation whose directory is unusable must state that no message can be sent there');
+        const listed = unwrap((await json('/api/conversations')).body).items.find((row) => row.id === conversationId);
+        assert.equal(listed.cwd_missing, true, 'the conversation list row must carry the same fact as conversation.read');
+        assert.equal(listed.cwd_note, '该会话的工作目录已被删除。', 'the conversation list row must carry the same note');
+        const refused = await json(`${apiBase}/messages`, { method: 'POST', body: JSON.stringify({ content: '工作目录不存在的会话不能发送。', loading_id: 'cwd-missing-probe' }) });
+        assert.equal(refused.status, 409, `messages.send for a session whose directory is gone answered ${refused.status} (${JSON.stringify(refused.body)})`);
+        assert.equal(refused.body.code, 'CWD_MISSING', `messages.send must refuse this session with CWD_MISSING, got ${refused.body.code}`);
+        assert.equal((await runtime()).turn_id, null, 'a send refused for a missing directory must not start a turn');
+      } finally {
+        backend.cwd.missing = restore.missing;
+        backend.cwd.note = restore.note;
+      }
+      const restored = unwrap((await json(apiBase)).body);
+      assert.equal(restored.cwd_missing, false, 'a directory that is there again must read as present');
+      assert.equal(restored.cwd_note, null, 'a directory that is there carries no note');
+      assert.equal(restored.runtime.can_send_message, sendableBefore, 'a usable directory must leave the sendability this conversation had before');
+      return { note: '该会话的工作目录已被删除。', status: 409, code: 'CWD_MISSING' };
+    });
+    // Whether the host still holds the session a runtime was attached to: every reader of that runtime states it,
+    // and a session that is gone or unreadable is reported as itself rather than as a live conversation.
+    await check('conversation-recovery', async () => {
+      const recoveryOf = async () => ({
+        'conversation.read': unwrap((await json(apiBase)).body).recovery,
+        'runtime.snapshot event': (report.frames.filter((frame) => frame.name === 'runtime.snapshot').at(-1)?.data ?? {}).recovery,
+      });
+      const attached = await recoveryOf();
+      for (const [reader, stated] of Object.entries(attached)) {
+        assert.ok(stated && RECOVERY_STATES.includes(stated.state), `${reader} field recovery.state must be one of ${RECOVERY_STATES.join('/')}, got ${JSON.stringify(stated)}`);
+        assert.equal(stated.state, 'attached', `${reader} must report the session it holds as attached`);
+        assert.equal(stated.note, null, `${reader} must carry no note while the runtime is attached`);
+      }
+      const observed = [];
+      const restore = { state: backend.recovery.state, note: backend.recovery.note };
+      try {
+        for (const state of ['gone', 'unknown']) {
+          backend.recovery.state = state;
+          backend.recovery.note = `恢复状态：${state}`;
+          const reports = await recoveryOf();
+          assert.equal(reports['conversation.read'].state, state, `conversation.read must report recovery ${state}, got ${reports['conversation.read'].state}`);
+          assert.equal(reports['conversation.read'].note, `恢复状态：${state}`, `conversation.read must carry the reason it knows with recovery ${state}`);
+          observed.push({ state, read: reports['conversation.read'] });
+        }
+      } finally {
+        backend.recovery.state = restore.state;
+        backend.recovery.note = restore.note;
+      }
+      const back = unwrap((await json(apiBase)).body).recovery;
+      assert.equal(back.state, 'attached', 'a runtime that is attached again must read as attached');
+      return { attached, observed, readers: report.frames.filter((frame) => frame.name === 'runtime.snapshot').length };
     });
     await check('ws-reconnect-history-recovery', async () => {
       const turn = await sendUI('慢速 slow 断流后刷新恢复中文。');

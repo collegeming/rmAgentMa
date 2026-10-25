@@ -111,29 +111,9 @@ class RemoteTargetTest {
         assertFalse(validWslDistribution("a".repeat(65)))
     }
 
-    @Test
-    fun unsupportedTargetKeepsItsOwnProbeVerdictInsteadOfAConnectionFailure() = runBlocking {
-        val commands = mutableListOf<String>()
-        val host = object : HostSession {
-            override val hostId = 7L
-            override suspend fun exec(command: String): ExecChannel {
-                commands += command
-                return object : ExecChannel {
-                    override val stdout = ByteArrayInputStream(ByteArray(0))
-                    override val stdin = ByteArrayOutputStream()
-                    override val stderr = ByteArrayInputStream(ByteArray(0))
-                    override fun close() = Unit
-                }
-            }
-        }
-        val unsupported = UnsupportedTarget()
-        val rows = RemoteAgentProbe().probe(host, target = unsupported)
-        assertEquals(AgentKind.entries.size, rows.size)
-        assertTrue(rows.all { !it.available && it.error == WINDOWS_NATIVE_UNSUPPORTED })
-        assertTrue(commands.isEmpty())
-    }
-
-    /** A Windows target is probed on the Windows side, and only a path Windows really resolved is reported. */
+    /**
+     * A Windows target is probed on the Windows side, and only a path Windows really resolved is reported.
+     */
     @Test
     fun windowsTargetReportsThePathsTheLookupFound() = runBlocking {
         val commands = mutableListOf<String>()
@@ -168,9 +148,12 @@ class RemoteTargetTest {
         assertTrue(command.contains("foreach"))
     }
 
-    /** A relay that never answered is the target having no entry, not a host holding no installation. */
+    /**
+     * A relay that never answered is the probe's own verdict having no answer to read, not a host that holds no
+     * installation and not a target without an entry in this app.
+     */
     @Test
-    fun aWindowsRelayThatNeverAnsweredIsReportedAsTheTargetHavingNoEntry() = runBlocking {
+    fun aWindowsRelayThatNeverAnsweredIsReportedAsAVerdictThisAppCannotRead() = runBlocking {
         val host = object : HostSession {
             override val hostId = 9L
             override suspend fun exec(command: String): ExecChannel = object : ExecChannel {
@@ -208,12 +191,4 @@ class RemoteTargetTest {
         assertEquals(AgentKind.entries.size, rows.size)
         assertTrue(rows.all { !it.available && it.error == "probe_transport_failed" })
     }
-}
-
-/** A target this build knows it cannot enter, so a probe must report that instead of a connection failure. */
-private class UnsupportedTarget : RemoteTarget {
-    override val id = "future-target"
-    override val supported = false
-    override val posixCommands = false
-    override fun shellCommand(command: String): String? = null
 }

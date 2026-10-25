@@ -63,8 +63,11 @@ def text(value):
 def record(agent, sid, title, cwd, created, updated, preview="", count=None):
     if not isinstance(sid, str) or not sid:
         raise ValueError("missing session id")
-    if not isinstance(cwd, str) or not os.path.isabs(cwd):
-        raise ValueError("session cwd must be an absolute path")
+    # A directory the source did not name, or named as a relative path, is reported exactly as it was read: the
+    # session exists on the host, so dropping the row here would hide a real conversation. The app keeps such a
+    # record and marks it as a directory-unknown one, which cannot be continued until a usable directory is known.
+    if not isinstance(cwd, str):
+        cwd = ""
     result = {"agent": agent, "sessionId": sid, "title": str(title or ""),
               "cwd": cwd, "createdAt": millis(created),
               "updatedAt": millis(updated, millis(created)), "preview": preview}
