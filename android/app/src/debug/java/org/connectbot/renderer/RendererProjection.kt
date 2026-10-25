@@ -207,7 +207,7 @@ internal object RendererProjection {
     }
 
     fun hostRows(hosts: List<Host>, availability: List<AgentAvailability>, sessionCounts: Map<Long, Int> = emptyMap()): JSONArray =
-        array(*hosts.map { hostRow(it, availability, sessionCounts[host.id] ?: 0) }.toTypedArray())
+        array(*hosts.map { hostRow(it, availability, sessionCounts[it.id] ?: 0) }.toTypedArray())
 
     /**
      * What the product holds for one host: `checked` is false until some probe answered for it, and each Agent
@@ -503,7 +503,8 @@ internal object RendererProjection {
 
     /** One attention row: the conversation to open and every reason it waits for the user, most urgent first. */
     fun inboxItem(item: AgentAttentionItem): JSONObject {
-        val session = AgentSession(hostId = item.key.hostId, agent = item.key.agent, sessionId = item.key.sessionId)
+        // The conversation id derives from the host, agent and session alone, so this stand-in needs no working directory.
+        val session = AgentSession(hostId = item.key.hostId, agent = item.key.agent, sessionId = item.key.sessionId, cwd = "")
         return json(
             "conversation_id" to RendererConversationId.of(session),
             "host_id" to projectId(item.key.hostId),
@@ -688,7 +689,7 @@ internal object RendererProjection {
                     json("content" to rawLine(event), "type" to TIP_INFO)
                         .put("title", event.title)
                         .put("status", event.status)
-                        .put("session_id" to conversationId),
+                        .put("session_id", conversationId),
                 )
 
             // A resolved interaction is the product's own bookkeeping row for something the chat already drew;

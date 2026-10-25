@@ -21,11 +21,11 @@ import kotlinx.coroutines.CancellationException
 import org.connectbot.agent.AgentConfigAccess
 import org.connectbot.agent.AgentConfigBusyException
 import org.connectbot.agent.AgentMessageKind
-import org.connectbot.agent.agentAttentionSignals
 import org.connectbot.agent.projectAgentAttentionInbox
 import org.connectbot.agent.searchAgentSessions
 import org.connectbot.data.entity.Host
 import org.connectbot.ui.screens.agents.AgentHostState
+import org.connectbot.ui.screens.agents.agentAttentionSignals
 import org.connectbot.ui.screens.agents.agentHostChoices
 import org.connectbot.ui.screens.agents.filterAgentSessions
 import org.connectbot.ui.screens.agents.projectQuestion
