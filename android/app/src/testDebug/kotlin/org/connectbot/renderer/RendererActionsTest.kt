@@ -904,11 +904,14 @@ class RendererActionsTest {
     @Test
     fun conversationRowsCarryTheirLinkStateTheirCacheFlagAndTheirWorkspace() = runTest {
         val other = AgentSession(hostId = 8, agent = AgentKind.DSH, sessionId = "session-b", cwd = "/workspace/other", updatedAt = 500)
+        val otherHost = Host(id = 8, nickname = "另一台", username = "colle", hostname = "second.test")
         val source = FakeSource().apply {
             session = this@RendererActionsTest.session
+            host = this@RendererActionsTest.host
             indexed = this@RendererActionsTest.session
             active = true
             sessions = listOf(this@RendererActionsTest.session, other)
+            hosts = listOf(this@RendererActionsTest.host, otherHost)
             linkStates = mapOf(7L to AgentLinkState.DISCONNECTED)
         }
         val rows = dataOf(RendererActions(source).handle("conversations.list", payload())).getJSONArray("items")
