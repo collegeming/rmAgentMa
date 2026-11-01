@@ -477,8 +477,10 @@ class AgentRepository @Inject constructor(
     private suspend fun openConversation(session: AgentSession, sessionId: String?) = operation {
         // A conversation whose working directory is not known is kept in the index and shown as such, but it can
         // be neither continued nor created here: the Agent's own directory is what makes a session usable, and
-        // guessing one would put the conversation in a place the Agent never used.
-        session.unknownDirectoryReason()?.let { reason -> throw AgentDirectoryUnknownException(reason) }
+        // guessing one would put the conversation in a place the Agent never used. What counts as absolute is the
+        // target's own rule, so a Windows conversation is judged by Windows paths.
+        val target = hostTarget(session.hostId)
+        session.unknownDirectoryReason(target)?.let { reason -> throw AgentDirectoryUnknownException(reason) }
         val started = System.nanoTime()
         fun trace(stage: String) = Timber.tag("AgentRepository").d(
             "hostId=%d agent=%s resume=%s stage=%s elapsedMs=%d",
@@ -520,8 +522,9 @@ class AgentRepository @Inject constructor(
                     ?: throw java.io.IOException("${session.agent.wireName} executable not found: the probe detected no installation")
                 // The launch text this app builds is POSIX shell text, so a target that does not run one has no
                 // launch here yet: saying that is better than handing the host a line its own shell cannot read.
-                val target = hostTarget(session.hostId)
-                if (!target.posixCommands) {
+                // A Windows target's ZCode desktop build is the one Agent this build can write such a text for.
+                val windowsLaunch = if (target.posixCommands) null else windowsZcodeLaunchLine(session.agent, target, executable, session.cwd)
+                if (!target.posixCommands && windowsLaunch == null) {
                     throw java.io.IOException("${session.agent.wireName} cannot start on ${target.id}: this build has no launch command for that target")
                 }
                 val remote = pool.hostSession(session.hostId)
@@ -529,7 +532,7 @@ class AgentRepository @Inject constructor(
                 // the Agent is launched on: a directory the host cannot use fails as itself, leaves the cached probe
                 // verdict untouched and opens no half-ready handle, so the user corrects the path and retries.
                 trace("cwd_check_start")
-                RemoteWorkingDirectoryCheck(dispatchers.io).verify(remote, session.cwd, target)
+                if (target.posixCommands) RemoteWorkingDirectoryCheck(dispatchers.io).verify(remote, session.cwd, target)
                 trace("cwd_check_end")
                 trace("prepare_start")
                 val opened: AgentSessionHandle = when (session.agent) {
@@ -537,6 +540,7 @@ class AgentRepository @Inject constructor(
                         child,
                         dispatchers.io,
                         ZcodeLaunchConfig(executable = executable),
+                        launchText = windowsLaunch?.let { line -> { _: String -> line } },
                     ).prepare(remote, sessionId, session.cwd, workspaceIdentity = null, replayHistory = true)
 
                     else -> AcpDriver(session.agent, child, dispatchers.io, executable).prepare(remote, sessionId, session.cwd)

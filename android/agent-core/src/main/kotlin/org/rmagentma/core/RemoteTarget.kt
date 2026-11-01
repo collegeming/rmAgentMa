@@ -125,6 +125,9 @@ const val WINDOWS_NATIVE_ID = "windows-native"
  * `powershell.exe -EncodedCommand` takes base64 of the command text as UTF-16LE and runs the exact text back.
  * PowerShell ships with every Windows that can hold OpenSSH, and the encoded text is the same text in both places
  * it is used, so a command a probe replicated is the command a session runs.
+ *
+ * The whole line is one cmd.exe command line, so the encoded text stays inside that command line's length limit;
+ * the probe and launch texts this app generates leave room for the paths they carry.
  */
 fun windowsShellCommand(command: String): String {
     val encoded = Base64.getEncoder().encodeToString(command.toByteArray(Charsets.UTF_16LE))
@@ -135,12 +138,20 @@ fun windowsShellCommand(command: String): String {
  * A Windows target's own lookup for one executable: `where` (spelled `where.exe`, because PowerShell resolves the
  * bare word to its own `Where-Object` alias) prints the absolute paths Windows itself would start. One line per
  * Agent is printed, so the answer stays parseable without trusting the order the remote happened to answer in.
+ *
+ * ZCode is the one Agent the desktop build does not put on `PATH`, so when `where` finds no launcher the lookup
+ * reads its registry registration instead ([windowsZcodeLookupPrelude]). Every other Agent keeps the plain
+ * `where` answer.
  */
 fun windowsLookupCommand(agents: List<AgentKind>): String {
     val names = agents.joinToString(",") { "'${it.command}'" }
-    return "if (-not (Get-Command where.exe -ErrorAction SilentlyContinue)) { 'probe_unavailable'; exit 0 }; " +
+    val zcode = AgentKind.ZCODE in agents
+    val prelude = if (zcode) windowsZcodeLookupPrelude() else ""
+    val fallback = if (zcode) "elseif (\$name -eq '${AgentKind.ZCODE.command}') { ${windowsZcodeLookupAnswer()} } " else ""
+    return "if (-not (Get-Command where.exe -ErrorAction SilentlyContinue)) { '$WINDOWS_LOOKUP_UNAVAILABLE'; exit 0 }; " +
+        prelude +
         "foreach (\$name in @($names)) { \$found = @(where.exe \$name 2>\$null)[0]; " +
-        "if (\$found) { \"found \$name \$found\" } else { \"missing \$name\" } }"
+        "if (\$found) { \"found \$name \$found\" } ${fallback}else { \"missing \$name\" } }"
 }
 
 /** The answers one [windowsLookupCommand] run prints; anything else is an answer this app cannot read. */

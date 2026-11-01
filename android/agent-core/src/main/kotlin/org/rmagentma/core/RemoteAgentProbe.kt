@@ -117,7 +117,9 @@ class RemoteAgentProbe(private val ioDispatcher: CoroutineDispatcher = Dispatche
      * An answer that could not be read at all — no PowerShell on the host, or a line this app cannot parse — is
      * the lookup's own verdict, reported as `windows_native_unsupported` rather than as a missing installation; an
      * Agent the lookup really did not find is reported as exactly that, and a lookup that never reached the host
-     * keeps the probe's own transport code instead of claiming either.
+     * keeps the probe's own transport code instead of claiming either. An Agent whose own fallback lookup could
+     * not be read (ZCode's registry registration) keeps that same `windows_native_unsupported` verdict for its
+     * row alone, instead of reading as an installation that is not there.
      */
     private suspend fun windowsProbe(host: HostSession): List<AgentAvailability> = withContext(ioDispatcher) {
         val answers = try {
@@ -132,23 +134,24 @@ class RemoteAgentProbe(private val ioDispatcher: CoroutineDispatcher = Dispatche
             return@withContext transportFailure(host)
         }
         AgentKind.entries.map { kind ->
-            val executable = answers?.get(kind)
-            when {
-                answers == null -> AgentAvailability(host.hostId, kind, "", false, WINDOWS_NATIVE_UNSUPPORTED)
-                executable == null -> AgentAvailability(host.hostId, kind, "", false, "executable_missing")
-                else -> AgentAvailability(host.hostId, kind, executable, true)
+            when (val answer = answers?.get(kind)) {
+                null -> AgentAvailability(host.hostId, kind, "", false, WINDOWS_NATIVE_UNSUPPORTED)
+                is WindowsAnswer.Found -> AgentAvailability(host.hostId, kind, answer.path, true)
+                WindowsAnswer.Missing -> AgentAvailability(host.hostId, kind, "", false, "executable_missing")
+                WindowsAnswer.Unavailable -> AgentAvailability(host.hostId, kind, "", false, WINDOWS_NATIVE_UNSUPPORTED)
             }
         }
     }
 
     /** Every Agent on a host this probe never reached, reported with the probe's own transport code. */
-    private fun transportFailure(host: HostSession): List<AgentAvailability> =
-        AgentKind.entries.map { AgentAvailability(host.hostId, it, "", false, "probe_transport_failed") }
+    private fun transportFailure(host: HostSession): List<AgentAvailability> = AgentKind.entries.map {
+        AgentAvailability(host.hostId, it, "", false, "probe_transport_failed")
+    }
 
     /** One bounded Windows lookup run: every line is one answer, and null means no answer could be read at all. */
-    private suspend fun readWindowsLookup(host: HostSession): Map<AgentKind, String?>? {
+    private suspend fun readWindowsLookup(host: HostSession): Map<AgentKind, WindowsAnswer>? {
         val channel = host.exec(windowsLookupCommand(AgentKind.entries))
-        val answers = mutableMapOf<AgentKind, String?>()
+        val answers = mutableMapOf<AgentKind, WindowsAnswer>()
         var readable = true
         try {
             val reader = NdjsonReader(channel.stdout, WINDOWS_LOOKUP_MAX_BYTES)
@@ -167,26 +170,41 @@ class RemoteAgentProbe(private val ioDispatcher: CoroutineDispatcher = Dispatche
     }
 
     /** Reads one lookup answer into [answers], and answers false for a line this app cannot use. */
-    private fun record(line: String, answers: MutableMap<AgentKind, String?>): Boolean {
+    private fun record(line: String, answers: MutableMap<AgentKind, WindowsAnswer>): Boolean {
         val parts = line.split(" ", limit = 3)
-        if (parts[0] == WINDOWS_LOOKUP_UNAVAILABLE) return false
-        val kind = parts.getOrNull(1)?.let { name -> AgentKind.entries.firstOrNull { it.command == name } } ?: return false
+        val kind = parts.getOrNull(1)?.let { name -> AgentKind.entries.firstOrNull { it.command == name } }
+        // A bare `probe_unavailable` is the whole lookup having no answer; with an Agent it is that Agent's own.
+        if (parts[0] == WINDOWS_LOOKUP_UNAVAILABLE) {
+            if (kind == null) return false
+            answers[kind] = WindowsAnswer.Unavailable
+            return true
+        }
+        if (kind == null) return false
         return when (parts[0]) {
             WINDOWS_LOOKUP_MISSING -> {
-                answers[kind] = null
+                answers[kind] = WindowsAnswer.Missing
                 true
             }
 
             // A path the app cannot address as a Windows path is not a path it may launch.
             WINDOWS_LOOKUP_FOUND -> {
                 val path = parts.getOrNull(2).orEmpty().trim().takeIf(::isWindowsAbsolutePath) ?: return false
-                answers[kind] = path
+                answers[kind] = WindowsAnswer.Found(path)
                 true
             }
 
             else -> false
         }
     }
+}
+
+/** One Agent's Windows lookup answer: the path Windows resolved, the fact it has none, or no readable answer. */
+private sealed interface WindowsAnswer {
+    data class Found(val path: String) : WindowsAnswer
+
+    data object Missing : WindowsAnswer
+
+    data object Unavailable : WindowsAnswer
 }
 
 internal fun requireRemoteArgument(value: String) {

@@ -74,6 +74,13 @@ class ZcodeDriver(
     private val launchConfig: ZcodeLaunchConfig = ZcodeLaunchConfig(),
     private val requestTimeoutMs: Long = 30000,
     private val turnTimeoutMs: Long = 30 * 60 * 1000L,
+    /**
+     * The launch line for one working directory when this build writes it itself instead of [launchConfig], used by
+     * a host whose shell is not POSIX (a Windows desktop installation). It is handed to the host session unwrapped,
+     * because the target's relay wraps every command once, and it must keep the channel's stdin attached: the
+     * protocol below is spoken over exactly that channel. Null keeps [launchConfig]'s own POSIX line.
+     */
+    private val launchText: ((String) -> String)? = null,
 ) : AgentDriver {
     override val agent = AgentKind.ZCODE
 
@@ -154,7 +161,8 @@ class ZcodeDriver(
     }
 
     private suspend fun connect(host: HostSession, cwd: String): ZcodeConnection = withContext(ioDispatcher) {
-        val channel = host.exec(launchConfig.command(cwd))
+        val line = launchText?.invoke(cwd) ?: launchConfig.command(cwd)
+        val channel = host.exec(line)
         try {
             ZcodeConnection(channel, scope, ioDispatcher, requestTimeoutMs)
         } catch (e: Exception) {

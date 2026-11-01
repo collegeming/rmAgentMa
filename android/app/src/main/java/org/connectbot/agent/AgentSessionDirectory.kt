@@ -18,6 +18,8 @@
 package org.connectbot.agent
 
 import org.rmagentma.core.AgentSession
+import org.rmagentma.core.RemoteTarget
+import org.rmagentma.core.isWindowsAbsolutePath
 import java.io.IOException
 
 /**
@@ -36,17 +38,28 @@ class AgentDirectoryUnknownException(val reason: String) : IOException(
  * session still exists on the host, and deleting the row would hide a real conversation. It is reported as its
  * own reason here, and the Agent's own value stays untouched on the session so a source that later reports a
  * usable directory only has to be read again.
+ *
+ * What counts as absolute is the target's own rule: a POSIX path on a POSIX or WSL target, a drive-absolute or
+ * UNC path on a Windows one.
  */
-fun AgentSession.unknownDirectoryReason(): String? {
+fun AgentSession.unknownDirectoryReason(target: RemoteTarget = RemoteTarget.Posix): String? {
+    if (target is RemoteTarget.WindowsNative) {
+        if (isWindowsAbsolutePath(cwd)) return null
+        if (cwd.isBlank()) return "the session reports no working directory"
+        return "the session's working directory is not an absolute path: " + cwd.sanitizedDirectory()
+    }
     if (cwd.startsWith('/')) return null
     if (cwd.isBlank()) return "the session reports no working directory"
-    return "the session's working directory is not an absolute path: " + cwd
-        .map { if (it.isISOControl()) ' ' else it }
-        .joinToString("")
-        .take(MAX_DIRECTORY_REASON)
+    return "the session's working directory is not an absolute path: " + cwd.sanitizedDirectory()
 }
 
+/** The directory as a label: control characters removed, bounded, because this text reaches a notification. */
+private fun String.sanitizedDirectory(): String = map { if (it.isISOControl()) ' ' else it }
+    .joinToString("")
+    .take(MAX_DIRECTORY_REASON)
+
 /** True when this session's working directory can be used for continuing it or starting another one beside it. */
-fun AgentSession.hasKnownDirectory(): Boolean = unknownDirectoryReason() == null
+fun AgentSession.hasKnownDirectory(target: RemoteTarget = RemoteTarget.Posix): Boolean =
+    unknownDirectoryReason(target) == null
 
 private const val MAX_DIRECTORY_REASON = 120

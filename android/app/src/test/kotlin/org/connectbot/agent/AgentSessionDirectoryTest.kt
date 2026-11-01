@@ -21,6 +21,7 @@ import org.assertj.core.api.Assertions.assertThat
 import org.junit.Test
 import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
+import org.rmagentma.core.RemoteTarget
 
 class AgentSessionDirectoryTest {
     private fun session(cwd: String) = AgentSession(hostId = 1L, agent = AgentKind.KIMI, sessionId = "s-1", cwd = cwd)
@@ -29,6 +30,24 @@ class AgentSessionDirectoryTest {
     fun answersNoReasonForAnAbsoluteDirectory() {
         assertThat(session("/work/project").unknownDirectoryReason()).isNull()
         assertThat(session("/work/project").hasKnownDirectory()).isTrue()
+    }
+
+    /** What is absolute is the target's rule: a Windows conversation names a drive path, not a POSIX one. */
+    @Test
+    fun aWindowsTargetJudgesItsDirectoryAsAWindowsPath() {
+        val windows = session("C:\\work\\project")
+        assertThat(windows.unknownDirectoryReason(RemoteTarget.WindowsNative)).isNull()
+        assertThat(windows.hasKnownDirectory(RemoteTarget.WindowsNative)).isTrue()
+        assertThat(session("\\\\server\\share\\project").hasKnownDirectory(RemoteTarget.WindowsNative)).isTrue()
+
+        // A POSIX path names no directory on Windows, and a Windows path names none on a POSIX or WSL target.
+        assertThat(session("/work/project").unknownDirectoryReason(RemoteTarget.WindowsNative)).contains("not an absolute path")
+        assertThat(windows.unknownDirectoryReason(RemoteTarget.Posix)).contains("not an absolute path")
+        assertThat(windows.unknownDirectoryReason(RemoteTarget.Wsl("Ubuntu-22.04"))).contains("not an absolute path")
+        assertThat(session("rel\\dir").hasKnownDirectory(RemoteTarget.WindowsNative)).isFalse()
+        assertThat(session("C:rel").hasKnownDirectory(RemoteTarget.WindowsNative)).isFalse()
+        assertThat(session("").unknownDirectoryReason(RemoteTarget.WindowsNative)).contains("no working directory")
+        assertThat(session("C:\\work\u001b").unknownDirectoryReason(RemoteTarget.WindowsNative)).doesNotContain("\u001b")
     }
 
     @Test
