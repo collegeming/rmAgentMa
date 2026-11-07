@@ -72,7 +72,7 @@ class WindowsZcodeStartTest {
         override fun getNoBackupFilesDir(): File = temporary.root
     }
 
-    private fun newRepository(context: Context, pool: AgentSshPool): AgentRepository {
+    private suspend fun newRepository(context: Context, pool: AgentSshPool): AgentRepository {
         val hosts = mock(HostRepository::class.java)
         `when`(hosts.observeSshHosts()).thenReturn(emptyFlow())
         `when`(hosts.findHostById(hostId)).thenReturn(windowsHost)
