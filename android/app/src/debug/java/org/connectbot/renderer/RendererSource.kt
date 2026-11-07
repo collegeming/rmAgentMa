@@ -26,6 +26,7 @@ import org.connectbot.agent.AgentMessageQueueStats
 import org.connectbot.agent.AgentQueuedMessage
 import org.connectbot.agent.AgentRecovery
 import org.connectbot.agent.AgentTranscriptOutcome
+import org.connectbot.agent.AgentTranscriptRead
 import org.connectbot.data.entity.Host
 import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
@@ -212,6 +213,15 @@ interface RendererSource {
      * reports as that host's failure rather than as a search result.
      */
     suspend fun searchTranscripts(query: String, sessions: List<AgentSession>): AgentTranscriptOutcome
+
+    /**
+     * One bounded, read-only page of [session]'s own history, read from [host] and answered as the host sent it:
+     * the rows, the cursor after them and the failure that kept them from arriving. Nothing is opened, sent or
+     * written here, and the conversation stays whatever it was. A page this host cannot read at all — an Agent
+     * whose history is not a file, or a target with no POSIX shell to run the reader — throws
+     * [UnsupportedOperationException] instead of reporting remote silence.
+     */
+    suspend fun transcriptPage(host: Host, session: AgentSession, cursor: String?, limit: Int): AgentTranscriptRead
 
     /**
      * Every message the product still holds in its cross-conversation queue, oldest first, each with its own

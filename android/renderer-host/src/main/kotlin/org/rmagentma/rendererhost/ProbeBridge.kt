@@ -114,19 +114,29 @@ class ProbeBridge(
             requireProbe(payload.isNull("body") || payload.optJSONObject("body") != null)
             val allowedParams = when (action) {
                 "config.set" -> setOf("conversationId", "optionId")
+
                 "approvals.review" -> setOf("conversationId", "requestRef")
+
                 "interactions.review" -> setOf("conversationId", "requestRef")
+
                 "challenges.answer" -> setOf("challengeId")
+
                 "project.read" -> setOf("projectId")
+
                 "hosts.update", "hosts.delete", "detection.refresh", "hosts.refresh" -> setOf("hostId")
+
                 // A queued message is withdrawn by the id this host assigned when it queued it.
                 "queue.cancel" -> setOf("queueId")
+
                 // A terminal command is asked for either the open conversation or one saved host, and its
                 // directory travels in the body because the bridge carries only string parameters.
                 "terminal.open", "terminal.command.start" -> setOf("conversationId", "hostId")
+
                 // The Agent and the working directory of a new conversation travel in params or in the body.
                 "conversations.create" -> setOf("hostId", "agent", "cwd")
+
                 in CONVERSATION_ACTIONS -> setOf("conversationId")
+
                 else -> emptySet()
             }
             requireProbe(params.keys().asSequence().all { it in allowedParams })
@@ -209,6 +219,8 @@ class ProbeBridge(
         val ACTIONS = setOf(
             "auth.read", "settings.client.read", "settings.client.write", "settings.read",
             "conversations.list", "conversations.create", "conversation.read", "messages.list", "messages.before", "messages.latest",
+            // One read-only page of another conversation's own history, read from its host and never opened here.
+            "conversation.transcript",
             "runtime.ensure", "config.read", "config.set", "messages.send", "turn.cancel",
             "approvals.list", "approvals.review", "interactions.review", "runtime.visible", "commands.list", "usage.read",
             "artifacts.list", "projects.list", "project.read", "hosts.list", "hosts.create",

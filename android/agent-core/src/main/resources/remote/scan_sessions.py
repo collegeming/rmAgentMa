@@ -20,6 +20,10 @@ import threading
 AGENTS = ("kimi", "opencode", "zcode", "dsh")
 TIMEOUT = 15
 MAX_LINE = 32 * 1024 * 1024
+# A Windows target runs this script too; the platform decides how a child is killed and whether a storage
+# path that is missing at all is reported, because on Windows this scanner is the only reader of those stores.
+WINDOWS = os.name == "nt"
+HAS_PROCESS_GROUP = hasattr(os, "killpg")
 
 
 def emit(value):
@@ -28,6 +32,12 @@ def emit(value):
 
 def error(agent, message):
     emit({"level": "error", "agent": agent, "message": message})
+
+
+def missing_store(agent, path):
+    """A store this scanner expects but the host does not have: that Agent's own error, not an empty history."""
+    if WINDOWS:
+        error(agent, "session storage not found: " + str(path))
 
 
 def millis(value, fallback=0):
@@ -116,6 +126,11 @@ def kimi_index(root):
 
 
 def kill_process_group(process):
+    # Windows has no process group this script can signal, so the CLI child itself is the only one stopped; its
+    # own children then answer to the host's job object, not to this scanner.
+    if not HAS_PROCESS_GROUP:
+        process.kill()
+        return
     import signal
     try:
         os.killpg(process.pid, signal.SIGKILL)
@@ -123,8 +138,17 @@ def kill_process_group(process):
         pass
 
 
+def cli_command(executable, *args):
+    # A CLI Windows installs as a .cmd shim is started through the command interpreter, which every Python
+    # version can do, instead of relying on CreateProcess resolving a batch file.
+    if WINDOWS and Path(executable).suffix.lower() in (".cmd", ".bat"):
+        return [os.environ.get("COMSPEC", "cmd.exe"), "/c", executable, *args]
+    return [executable, *args]
+
+
 def cli_json(command):
-    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+    # start_new_session is accepted on Windows and ignored there, so the same call serves both platforms.
+    process = subprocess.Popen(cli_command(*command), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, start_new_session=True)
     timer = threading.Timer(TIMEOUT, kill_process_group, args=(process,))
     timer.daemon = True
@@ -151,6 +175,11 @@ def kimi_records(limit, query=""):
     except (OSError, ValueError, TypeError, AttributeError) as exc:
         error("kimi", "session index unreadable: " + type(exc).__name__)
     executable = shutil.which("kimi")
+    if WINDOWS and not root.is_dir() and not executable:
+        # Neither the CLI nor the store this script reads answered, so the host has no list to report; a Windows
+        # host says so itself instead of leaving an empty history nobody checked.
+        missing_store("kimi", root)
+        return
     if executable:
         try:
             rows = cli_json([executable, "session", "list", "--all", "--json",
@@ -239,6 +268,9 @@ def sqlite_records(agent, limit, query):
     else:
         path = Path.home() / ".zcode/cli/db/db.sqlite"
     if not path.is_file():
+        # A Windows target has no other reader of these stores, so the absence is that Agent's own answer
+        # instead of an empty history the app would show as "no sessions".
+        missing_store(agent, path)
         return
     with contextlib.closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True,
                                            timeout=5)) as db:

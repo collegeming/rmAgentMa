@@ -29,12 +29,12 @@ class TranscriptTest(unittest.TestCase):
         self.db = None
         self.addCleanup(lambda: self.db.close() if self.db else None)
 
-    def read(self, agent="dsh", sid="same", cwd="/project", limit=100, cursor=None, host=7):
+    def read(self, agent="dsh", sid="same", cwd="/project", limit=100, cursor=None, host=7, env=None):
         args = [sys.executable, str(REMOTE / "read_transcript.py"), "--host-id", str(host),
                 "--agent", agent, "--session-id", sid, "--cwd", cwd, "--limit", str(limit)]
         if cursor is not None:
             args += ["--cursor", cursor]
-        result = subprocess.run(args, env=self.env, capture_output=True, timeout=40)
+        result = subprocess.run(args, env=dict(self.env, **(env or {})), capture_output=True, timeout=40)
         self.assertEqual(result.stderr, b"")
         rows = [json.loads(line) for line in result.stdout.splitlines()]
         return result.returncode, rows
@@ -299,6 +299,141 @@ class TranscriptTest(unittest.TestCase):
         self.db.execute("ALTER TABLE part RENAME COLUMN sequence TO invalid")
         self.db.commit()
         code, rows = self.read(agent="zcode")
+        self.assertEqual((code, rows[0]["error"]), (1, "unsupported_schema"))
+
+    def kimi(self, sid="session_same", cwd="/project", wire=None, state=None):
+        root = self.home / ".kimi-code"
+        directory = root / "sessions/wd_project" / sid
+        directory.mkdir(parents=True, exist_ok=True)
+        with (root / "session_index.jsonl").open("a", encoding="utf-8") as index:
+            index.write(json.dumps({"sessionId": sid, "sessionDir": str(directory), "workDir": cwd}) + "\n")
+        (directory / "state.json").write_text(json.dumps(state or {"id": sid, "cwd": cwd}), encoding="utf-8")
+        path = directory / "agents/main/wire.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text("".join(json.dumps(record, ensure_ascii=False) + "\n" for record in wire or []),
+                        encoding="utf-8")
+        return path
+
+    def test_kimi_repr_prompts_parts_and_duplicates_read_once(self):
+        prompt = {"role": "user", "id": "msg_1", "origin": {"kind": "user"},
+                  "content": [{"type": "text", "text": "read the config"}]}
+        self.kimi(wire=[
+            {"type": "context.append_message", "message": repr(prompt)},
+            {"type": "agent.message.appended", "message": {
+                "message": {"role": "user", "content": prompt["content"]},
+                "meta": {"source": "input", "promptId": "msg_1"}}},
+            {"type": "context.append_loop_event", "event": repr({
+                "type": "content.part", "uuid": "part-text", "part": {"type": "text", "text": "answer"}})},
+            {"type": "context.append_loop_event", "event": repr({
+                "type": "content.part", "uuid": "part-think", "part": {"type": "think", "think": "thought"}})},
+            {"type": "agent.message.appended", "message": {
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "answer"}]},
+                "meta": {"source": "llm", "messageId": "m"}}},
+            {"type": "agent.message.appended", "message": {
+                "message": {"role": "tool", "content": [{"type": "text", "text": "output"}],
+                            "toolCallId": "call_1"},
+                "meta": {"source": "tool"}}},
+        ])
+        code, rows = self.read(agent="kimi", sid="session_same")
+        self.assertEqual(code, 0)
+        self.assertEqual([row["type"] for row in rows[:-1]], ["user", "content", "thinking", "tool"])
+        self.assertEqual([row["text"] for row in rows[:-1]], ["read the config", "answer", "thought", "output"])
+        self.assertEqual(rows[0]["id"], "msg_1")
+        self.assertEqual(rows[-2]["status"], "historical")
+
+    def test_kimi_page_cursor_and_identity(self):
+        parts = [{"type": "context.append_loop_event", "event": repr({
+            "type": "content.part", "uuid": "p%d" % i, "part": {"type": "text", "text": "t%d" % i}})}
+            for i in range(4)]
+        self.kimi(wire=parts)
+        code, first = self.read(agent="kimi", sid="session_same", limit=2)
+        self.assertEqual((code, first[-1]["count"]), (0, 2))
+        self.assertTrue(first[-1]["nextCursor"])
+        code, second = self.read(agent="kimi", sid="session_same", limit=2, cursor=first[-1]["nextCursor"])
+        self.assertEqual(code, 0)
+        self.assertEqual([row["text"] for row in second[:-1]], ["t2", "t3"])
+        self.assertEqual(second[-1]["nextCursor"], "")
+        stale = self.read(agent="kimi", sid="session_same", limit=1, cursor=first[-1]["nextCursor"], host=8)[1]
+        self.assertEqual(stale[0]["error"], "cursor_identity_mismatch")
+        for cwd in ("/other", "relative"):
+            code, rows = self.read(agent="kimi", sid="session_same", cwd=cwd)
+            self.assertEqual((code, rows[0]["record"]), (1, "error"))
+        self.assertEqual(self.read(agent="kimi", sid="session_same", cwd="/other")[1][0]["record"], "error")
+
+    def test_kimi_state_identity_and_broken_repr_errors(self):
+        self.kimi(wire=[{"type": "context.append_message", "message": "{'role': 'user',"}])
+        code, rows = self.read(agent="kimi", sid="session_same")
+        self.assertEqual((code, rows[-1]["count"], rows[-1]["errors"]), (0, 0, 1))
+        self.kimi(sid="session_other", state={"id": "session_swap", "cwd": "/project"})
+        code, rows = self.read(agent="kimi", sid="session_other")
+        self.assertEqual((code, rows[0]["error"]), (1, "session_identity_mismatch"))
+        self.assertEqual(self.read(agent="kimi", sid="session_missing")[1][0]["error"], "session_not_found")
+
+    def opencode(self):
+        path = self.home / ".local/share/opencode/opencode.db"
+        path.parent.mkdir(parents=True)
+        db = sqlite3.connect(path)
+        db.executescript("""
+            CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT,
+                                  time_created INTEGER, time_updated INTEGER);
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+            CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
+                               time_created INTEGER, data TEXT);
+            INSERT INTO session VALUES ('same','title','/project',1,1);
+            INSERT INTO session VALUES ('other','title','/other',2,2);
+        """)
+        db.commit()
+        db.close()
+        return path
+
+    def opencode_message(self, path, mid, time, role, parts):
+        db = sqlite3.connect(path)
+        db.execute("INSERT INTO message VALUES (?,?,?,?)",
+                   (mid, "same", time, json.dumps({"role": role})))
+        for pid, kind, body in parts:
+            db.execute("INSERT INTO part VALUES (?,?,?,?,?)",
+                       (pid, mid, "same", time, json.dumps({"type": kind, "text": body})))
+        db.commit()
+        db.close()
+
+    def test_opencode_orders_without_sequence_column_and_pages(self):
+        path = self.opencode()
+        self.opencode_message(path, "m1", 10, "user", [("p1", "text", "first")])
+        self.opencode_message(path, "m2", 20, "assistant", [("p2", "reasoning", "thought"),
+                                                           ("p3", "tool", "{}")])
+        self.opencode_message(path, "m3", 30, "assistant", [("p4", "text", "second")])
+        before = path.read_bytes()
+        code, first = self.read(agent="opencode", limit=2)
+        self.assertEqual(code, 0)
+        self.assertEqual([row["text"] for row in first[:-1]], ["first", "thought"])
+        self.assertTrue(first[-1]["nextCursor"])
+        code, second = self.read(agent="opencode", cursor=first[-1]["nextCursor"])
+        self.assertEqual(code, 0)
+        self.assertEqual([row["type"] for row in second[:-1]], ["tool", "content"])
+        self.assertEqual([row["text"] for row in second[:-1]], ['{"type":"tool","text":"{}"}', "second"])
+        self.assertEqual(second[-1]["nextCursor"], "")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.read(agent="opencode", cwd="/other")[0], 1)
+        self.assertEqual(self.read(agent="opencode", sid="' OR 1=1 --")[0], 1)
+
+    def test_opencode_skips_undecodable_rows_and_checks_directory(self):
+        path = self.opencode()
+        self.opencode_message(path, "m1", 10, "user", [("p1", "text", "kept")])
+        db = sqlite3.connect(path)
+        db.execute("INSERT INTO message VALUES ('bad', 'same', 11, 'INVALID')")
+        db.execute("INSERT INTO message VALUES ('big', 'same', 12, ?)", ("x" * (5 * 1024 * 1024),))
+        db.commit()
+        db.close()
+        code, rows = self.read(agent="opencode")
+        self.assertEqual((code, [row["text"] for row in rows[:-1]], rows[-1]["errors"]), (0, ["kept"], 2))
+        code, rows = self.read(agent="opencode", cwd="/project/")
+        self.assertEqual((code, rows[0]["error"]), (1, "session_identity_mismatch"))
+        self.assertEqual(self.read(agent="opencode", cwd="/missing")[1][0]["error"], "session_identity_mismatch")
+        db = sqlite3.connect(path)
+        db.execute("ALTER TABLE part RENAME COLUMN time_created TO created")
+        db.commit()
+        db.close()
+        code, rows = self.read(agent="opencode")
         self.assertEqual((code, rows[0]["error"]), (1, "unsupported_schema"))
 
 

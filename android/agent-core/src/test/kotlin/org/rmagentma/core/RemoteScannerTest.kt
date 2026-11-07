@@ -27,6 +27,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.file.Files
+import java.util.Base64
 import java.util.Comparator
 
 class RemoteScannerTest {
@@ -184,5 +185,113 @@ class RemoteScannerTest {
         assertTrue(result.sessions.isEmpty())
     }
 
+    @Test
+    fun windowsTargetIsReadThroughItsOwnRelayAndNotThePosixLine() = runBlocking {
+        val output = """
+            {"agent":"zcode","sessionId":"z-1","cwd":"C:\\work","title":"ZCode","updatedAt":1700}
+            {"level":"complete"}
+        """.trimIndent() + "\n"
+        val host = object : HostSession {
+            override val hostId = 3L
+            override suspend fun exec(command: String): ExecChannel {
+                lastCommand = command
+                return object : ExecChannel {
+                    override val stdout = ByteArrayInputStream(output.toByteArray())
+                    override val stdin = payload.capture()
+                    override val stderr = ByteArrayInputStream(byteArrayOf())
+                    override fun close() = Unit
+                }
+            }
+        }
+        val result = withTimeout(5000) {
+            RemoteScanner().scan(host, setOf(AgentKind.ZCODE), 10, RemoteTarget.WindowsNative)
+        }
+        assertEquals(1, result.sessions.size)
+        assertEquals("C:\\work", result.sessions.single().cwd)
+        assertEquals(3L, result.sessions.single().hostId)
+        assertTrue(result.errors.isEmpty())
+        // The Windows relay is what ran: no /bin/sh, and py -3 named as the launcher it is.
+        assertFalse(lastCommand.contains("/bin/sh"))
+        assertTrue(lastCommand.contains("py -3"))
+        // The script arrived on stdin in the lines the relay reads, base64 of the UTF-8 source.
+        val lines = payload.toString(Charsets.US_ASCII).trimEnd('\n').split('\n')
+        assertEquals(WINDOWS_SCAN_PAYLOAD_END, lines.last())
+        val script = javaClass.classLoader.getResource("remote/scan_sessions.py")!!.readBytes().toString(Charsets.UTF_8)
+        assertEquals(script, String(Base64.getDecoder().decode(lines.dropLast(1).joinToString("")), Charsets.UTF_8))
+    }
+
+    @Test
+    fun aWindowsRelayThatNeverCompletedIsNotAnEmptyHistory() = runBlocking {
+        val host = object : HostSession {
+            override val hostId = 4L
+            override suspend fun exec(command: String): ExecChannel = object : ExecChannel {
+                // The relay died after printing nothing: that is not a host without sessions.
+                override val stdout = ByteArrayInputStream(byteArrayOf())
+                override val stdin = ByteArrayOutputStream()
+                override val stderr = ByteArrayInputStream(byteArrayOf())
+                override fun close() = Unit
+            }
+        }
+        val result = withTimeout(5000) {
+            RemoteScanner().scan(host, setOf(AgentKind.ZCODE), 10, RemoteTarget.WindowsNative)
+        }
+        assertTrue(result.sessions.isEmpty())
+        assertEquals(1, result.errors.size)
+        assertTrue(result.errors.single().contains("did not complete"))
+    }
+
+    @Test
+    fun aWindowsRelayWithNoPythonIsReportedAsThatFact() = runBlocking {
+        val host = object : HostSession {
+            override val hostId = 6L
+            override suspend fun exec(command: String): ExecChannel = object : ExecChannel {
+                override val stdout = ByteArrayInputStream(
+                    "{\"level\":\"error\",\"category\":\"py_missing\"}\n{\"level\":\"complete\"}\n".toByteArray(),
+                )
+                override val stdin = ByteArrayOutputStream()
+                override val stderr = ByteArrayInputStream(byteArrayOf())
+                override fun close() = Unit
+            }
+        }
+        val result = withTimeout(5000) {
+            RemoteScanner().scan(host, setOf(AgentKind.ZCODE), 10, RemoteTarget.WindowsNative)
+        }
+        assertTrue(result.sessions.isEmpty())
+        assertEquals(1, result.errors.size)
+        assertTrue(result.errors.single().contains("Python launcher"))
+    }
+
+    @Test
+    fun thePosixLineIsUnchangedWhenNoTargetIsNamed() = runBlocking {
+        val host = object : HostSession {
+            override val hostId = 8L
+            override suspend fun exec(command: String): ExecChannel {
+                lastCommand = command
+                return object : ExecChannel {
+                    override val stdout = ByteArrayInputStream(byteArrayOf())
+                    override val stdin = ByteArrayOutputStream()
+                    override val stderr = ByteArrayInputStream(byteArrayOf())
+                    override fun close() = Unit
+                }
+            }
+        }
+        withTimeout(5000) { RemoteScanner().scan(host, setOf(AgentKind.KIMI), 5) }
+        // The default target is POSIX, and its command is the one this app has always sent.
+        assertTrue(lastCommand.startsWith("/bin/sh -c "))
+        assertTrue(lastCommand.contains("| base64 -d | python3 -"))
+    }
+
     private var lastCommand = ""
+    private val payload = ByteArrayOutputStream()
+}
+
+/** Stands in for the channel's stdin so a test can read what the scanner wrote without closing the stream. */
+private fun ByteArrayOutputStream.capture(): java.io.OutputStream = object : java.io.OutputStream() {
+    override fun write(b: Int) = this@capture.write(b)
+
+    override fun write(b: ByteArray, off: Int, len: Int) = this@capture.write(b, off, len)
+
+    override fun flush() = this@capture.flush()
+
+    override fun close() = this@capture.flush()
 }

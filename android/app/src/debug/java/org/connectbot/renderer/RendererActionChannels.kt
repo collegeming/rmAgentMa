@@ -62,8 +62,7 @@ internal class RendererActionChannels(
      * the identical one already running, and [answer] receives its result, or the code naming why it is late, once
      * that is known. The value returned for a concurrent action is the placeholder alone.
      */
-    fun dispatch(action: String, payload: JSONObject, run: () -> ProbeResult, answer: (ProbeResult) -> Unit): ProbeResult =
-        if (channelOf(action) == Channel.ORDERED) run() else defer(action, payload, run, answer)
+    fun dispatch(action: String, payload: JSONObject, run: () -> ProbeResult, answer: (ProbeResult) -> Unit): ProbeResult = if (channelOf(action) == Channel.ORDERED) run() else defer(action, payload, run, answer)
 
     /**
      * Starts one read, or joins the identical read already in flight: a second tap of "probe again" is answered
@@ -179,9 +178,18 @@ internal class RendererActionChannels(
 
         /**
          * The reads that may take a minute: both probes, one older history page, one content search over a host and
-         * the read that opens a conversation not open yet. Everything else should answer far sooner.
+         * the read that opens a conversation not open yet. Everything else should answer far sooner — including one
+         * transcript page, whose caller still waits the short window for it.
          */
-        val SLOW_READ_ACTIONS = setOf("detection.refresh", "hosts.refresh", "messages.before", "search.sessions", "conversation.read")
+        val SLOW_READ_ACTIONS = setOf(
+            "detection.refresh",
+            "hosts.refresh",
+            "messages.before",
+            "search.sessions",
+            "conversation.read",
+            // One remote page of a conversation's own history reaches the host like the content search does.
+            "conversation.transcript",
+        )
 
         /** Code of a probe that outlived its bound; a probe is the one read that really takes seconds. */
         const val PROBE_STILL_RUNNING = "PROBE_STILL_RUNNING"
@@ -218,6 +226,8 @@ internal class RendererActionChannels(
             "messages.before",
             // One bounded remote scan per host over the selected transcripts' content.
             "search.sessions",
+            // One bounded remote page of one conversation's own history; it reaches a host like that scan does.
+            "conversation.transcript",
             // One bounded, read-only remote listing of a project's workspace root.
             "project.read",
             // Reads of what the product already holds. They answer quickly on their own; they leave the ordered

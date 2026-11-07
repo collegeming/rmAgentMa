@@ -191,4 +191,60 @@ class RemoteTargetTest {
         assertEquals(AgentKind.entries.size, rows.size)
         assertTrue(rows.all { !it.available && it.error == "probe_transport_failed" })
     }
+
+    @Test
+    fun theWindowsScannerRunsTheSameScriptThroughThePythonLauncher() {
+        val command = windowsScanCommand(setOf(AgentKind.ZCODE, AgentKind.KIMI), 20)
+        // The launcher is resolved before the scan, so a host without Python 3 answers its own category rather
+        // than an exit status the reader would have to guess at.
+        assertTrue(command.contains("Get-Command py.exe"))
+        assertTrue(command.contains("py_missing"))
+        assertTrue(command.contains("py -3 -X utf8"))
+        // -X utf8 is what keeps a Windows Python title decodable as the UTF-8 this app's reader accepts.
+        assertTrue(command.contains("scanner_exit_failed"))
+        assertTrue(command.contains("Write-Output '{\"level\":\"$WINDOWS_SCAN_COMPLETE\"}'"))
+        // The script is not an argument: its base64 would exceed the command line Windows accepts.
+        assertFalse(command.contains("base64 -d"))
+        assertTrue(command.contains(WINDOWS_SCAN_PAYLOAD_END))
+        // The Agent names travel as the arguments the script parses, in a stable order.
+        assertTrue(command.contains("--agent kimi zcode --limit 20"))
+        // The text is what the target relays, and the relay stays inside the command line length Windows accepts.
+        val relay = RemoteTarget.WindowsNative.shellCommand(command)
+        assertTrue(relay.startsWith("powershell.exe -NoProfile -NonInteractive -EncodedCommand "))
+        assertTrue(relay.length < 8191)
+        // PowerShell's own decoder reads the text back byte for byte, so what runs is exactly this command.
+        assertEquals(command, String(Base64.getDecoder().decode(relay.substringAfter("-EncodedCommand ")), Charsets.UTF_16LE))
+    }
+
+    @Test
+    fun theWindowsScanPayloadCarriesTheScriptAsLinesBase64AndAnEndingSentinel() {
+        val script = "import sys\nprint('你好')\n"
+        val payload = String(windowsScanPayload(script), Charsets.US_ASCII)
+        val lines = payload.trimEnd('\n').split('\n')
+        assertEquals(WINDOWS_SCAN_PAYLOAD_END, lines.last())
+        // Every payload line is base64 the relay concatenates back; the source comes back byte for byte.
+        assertTrue(lines.dropLast(1).all { it.isNotEmpty() && it.all { c -> c.isLetterOrDigit() || c in "+/=" } })
+        assertEquals(script, String(Base64.getDecoder().decode(lines.dropLast(1).joinToString("")), Charsets.UTF_8))
+        // No line can be mistaken for the sentinel, and no line exceeds what one stdin line carries.
+        assertTrue(lines.dropLast(1).none { it == WINDOWS_SCAN_PAYLOAD_END })
+        assertTrue(lines.dropLast(1).all { it.length <= 76 })
+    }
+
+    @Test
+    fun theWindowsScannerRefusesALimitOrAnEmptyAgentSetItCouldNotPlace() {
+        for (limit in listOf(0, 1001, -1)) {
+            try {
+                windowsScanCommand(setOf(AgentKind.KIMI), limit)
+                throw AssertionError("Limit $limit should be refused")
+            } catch (_: IllegalArgumentException) {
+                // expected
+            }
+        }
+        try {
+            windowsScanCommand(emptySet(), 1)
+            throw AssertionError("An empty Agent set should be refused")
+        } catch (_: IllegalArgumentException) {
+            // expected
+        }
+    }
 }

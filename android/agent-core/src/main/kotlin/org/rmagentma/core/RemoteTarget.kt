@@ -160,6 +160,65 @@ const val WINDOWS_LOOKUP_MISSING = "missing"
 const val WINDOWS_LOOKUP_UNAVAILABLE = "probe_unavailable"
 
 /**
+ * The completion row the Windows scanner prints after the script has run, whether or not the script exited
+ * successfully. A relay that never printed it answered nothing this app can read, which is not an empty history.
+ */
+const val WINDOWS_SCAN_COMPLETE = "complete"
+
+/**
+ * The session scanner on a Windows target: the same `scan_sessions.py` the POSIX line carries, run by the
+ * Python launcher Windows installs (`py -3`).
+ *
+ * Two things differ from the POSIX line. The script cannot travel as a command-line argument — its base64 is longer
+ * than the command line Windows accepts — so it arrives on the channel's stdin ([windowsScanPayload]) and this text
+ * writes it to one temporary `.py` file that the Python run reads and deletes. And `py -3` is itself a launcher, not
+ * Python, so it is resolved before the run and reported as missing with its own category, instead of as an exit
+ * status the reader would have to guess at.
+ *
+ * `-X utf8` is what makes the output readable: without it Windows Python encodes stdout in the console code page,
+ * and the reader would reject a title it cannot decode as invalid UTF-8.
+ */
+fun windowsScanCommand(agents: Set<AgentKind>, limit: Int): String {
+    require(limit in 1..1000) { "Limit must be between 1 and 1000" }
+    require(agents.isNotEmpty()) { "At least one Agent must be scanned" }
+    val names = agents.sortedBy { it.ordinal }.joinToString(" ") { it.wireName }
+    return "if (-not (Get-Command py.exe -CommandType Application -ErrorAction SilentlyContinue)) { " +
+        "Write-Output '{\"level\":\"error\",\"category\":\"py_missing\"}'; exit 127 }; " +
+        "\$encoded = [System.Text.StringBuilder]::new(); " +
+        "while (\$true) { \$line = [Console]::In.ReadLine(); " +
+        "if (\$null -eq \$line -or \$line.Trim() -eq '$WINDOWS_SCAN_PAYLOAD_END') { break }; " +
+        "[void]\$encoded.Append(\$line.Trim()) }; " +
+        "if (\$encoded.Length -eq 0) { Write-Output '{\"level\":\"error\",\"category\":\"scanner_payload_missing\"}'; exit 2 }; " +
+        "\$path = Join-Path \$env:TEMP ('rmagentma-' + [guid]::NewGuid().ToString('N') + '.py'); " +
+        "try { [System.IO.File]::WriteAllBytes(\$path, [Convert]::FromBase64String(\$encoded.ToString())) } " +
+        "catch { Write-Output '{\"level\":\"error\",\"category\":\"scanner_payload_failed\"}'; exit 2 }; " +
+        "try { & py -3 -X utf8 \$path --agent $names --limit $limit; \$status = \$LASTEXITCODE } " +
+        "catch { \$status = 1 } " +
+        "finally { Remove-Item -LiteralPath \$path -Force -ErrorAction SilentlyContinue }; " +
+        "Write-Output '{\"level\":\"$WINDOWS_SCAN_COMPLETE\"}'; " +
+        "if (\$status -ne 0) { Write-Output '{\"level\":\"error\",\"category\":\"scanner_exit_failed\"}' }; " +
+        "exit \$status"
+}
+
+/** The line that ends the payload: base64 holds no character this sentinel does, so no line can be mistaken for it. */
+const val WINDOWS_SCAN_PAYLOAD_END = "RMAGENTMA_EOF"
+
+/** Base64 characters one payload line carries; a line this long is read by every PowerShell without a buffer bound. */
+private const val WINDOWS_SCAN_PAYLOAD_LINE = 76
+
+/**
+ * The script as the lines [windowsScanCommand] reads from stdin: base64 of the UTF-8 bytes in bounded lines, then the
+ * ending sentinel. The writer never has to close the channel's stdin, which would end the channel itself.
+ */
+fun windowsScanPayload(script: String): ByteArray {
+    val encoded = Base64.getEncoder().encodeToString(script.toByteArray(Charsets.UTF_8))
+    return buildString {
+        encoded.chunked(WINDOWS_SCAN_PAYLOAD_LINE).forEach { append(it).append('\n') }
+        append(WINDOWS_SCAN_PAYLOAD_END).append('\n')
+    }.toByteArray(Charsets.US_ASCII)
+}
+
+/**
  * True when [value] is an absolute path Windows can address: a drive-absolute path (`C:\work`) or a UNC path
  * (`\\server\share`). A path with no drive or share is relative, and a value carrying a control character is
  * refused because no such path can be typed or launched.

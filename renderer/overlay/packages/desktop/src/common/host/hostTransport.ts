@@ -41,6 +41,8 @@ const ROUTES = [
   ['GET', '/api/conversations/:conversationId/messages/latest', 'messages.latest'],
   ['POST', '/api/conversations/:conversationId/runtime/ensure', 'runtime.ensure'],
   ['GET', '/api/conversations/:conversationId/config-options', 'config.read'],
+  // One read-only page of another conversation's history; it never opens that conversation.
+  ['GET', '/api/conversations/:conversationId/transcript', 'conversation.transcript'],
   ['PUT', '/api/conversations/:conversationId/config-options/:optionId', 'config.set'],
   ['POST', '/api/conversations/:conversationId/messages', 'messages.send'],
   ['POST', '/api/conversations/:conversationId/cancel', 'turn.cancel'],
@@ -446,6 +448,7 @@ const HOST_WAITING_ACTIONS: readonly string[] = Object.freeze([
   'attachment.finish',
   'challenges.answer',
   'conversation.read',
+  'conversation.transcript',
   'conversations.create',
   'detection.refresh',
   'hosts.refresh',

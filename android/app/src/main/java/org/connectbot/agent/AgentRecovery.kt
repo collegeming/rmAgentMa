@@ -26,6 +26,7 @@ import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.HostSession
 import org.rmagentma.core.RemoteScanner
+import org.rmagentma.core.RemoteTarget
 
 /** Whether the Agent still holds the conversation this app is showing, as far as the Agent itself answers. */
 enum class AgentRecoveryState { ATTACHED, GONE, UNKNOWN }
@@ -36,20 +37,32 @@ data class AgentRecovery(val state: AgentRecoveryState, val note: String?)
 /**
  * One bounded, read-only existence check of a session, through the entry the Agent already offers for its own
  * list: the file scanner reads the Agent's storage, and the one Agent that has no scanner format is asked through
- * its session list. Nothing is created, nothing is resumed and nothing is sent - a second conversation and a
- * replayed prompt are exactly what this check must not do.
+ * its session list. The list is read on the host's own [RemoteTarget], so a Windows host is read by the scanner's
+ * Windows relay rather than skipped. Nothing is created, nothing is resumed and nothing is sent - a second
+ * conversation and a replayed prompt are exactly what this check must not do.
  *
  * Only the Agent's own list decides the answer: a session it names is attached, a session a complete list does
  * not name is gone, and a list that could not be read - or that stopped at its bound before naming this session -
  * is unknown with that reason instead of a guess.
  */
 internal class AgentRecoveryCheck(private val io: CoroutineDispatcher) {
-    suspend fun verify(host: HostSession, session: AgentSession, limit: Int = AGENT_SESSION_PAGE_LIMIT): AgentRecovery {
+    suspend fun verify(
+        host: HostSession,
+        session: AgentSession,
+        limit: Int = AGENT_SESSION_PAGE_LIMIT,
+        target: RemoteTarget = RemoteTarget.Posix,
+    ): AgentRecovery {
         val rows = try {
             if (session.agent == AgentKind.OMP) {
+                // OMP has only its ACP session list, whose launch is POSIX text: a target that cannot run one is
+                // answered as this app being unable to tell, never as a session that is gone.
+                if (!target.posixCommands) {
+                    return AgentRecovery(AgentRecoveryState.UNKNOWN, "this build cannot read the session list of ${target.id}")
+                }
                 listSessions(host, session.agent, limit)
             } else {
-                val scan = RemoteScanner(io).scan(host, setOf(session.agent), limit)
+                // The list is read on the host's own target: a Windows host is read through its own relay as well.
+                val scan = RemoteScanner(io).scan(host, setOf(session.agent), limit, target)
                 // A scan that reported a problem did not read the list: saying the session is gone would claim
                 // more than the listing answered.
                 if (scan.errors.isNotEmpty()) return AgentRecovery(AgentRecoveryState.UNKNOWN, scan.errors.first())

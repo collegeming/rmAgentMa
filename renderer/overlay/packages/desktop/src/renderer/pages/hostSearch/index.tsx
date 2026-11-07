@@ -7,6 +7,7 @@ import { Button, Empty, Input, Select, Spin } from '@arco-design/web-react';
 import { Search } from '@icon-park/react';
 import { loadHostDirectory, hostLabelOf, useHostDirectory } from '@renderer/host/hostDirectory';
 import { searchSessions, type SearchCoverage, type SessionSearchHit } from '@renderer/host/hostActions';
+import HostTranscriptPanel, { type HostTranscriptTarget } from '@renderer/host/HostTranscriptPanel';
 import { HOST_FILTER_ALL } from '@renderer/host/HostHistoryFilterBar';
 import { hostFailureText } from '@renderer/pages/hosts/hostsApi';
 import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
@@ -36,6 +37,8 @@ const HostSearchPage: React.FC = () => {
   const [result, setResult] = useState<SearchState>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  // The conversation whose content is open beside this page; opening it never switches the current one.
+  const [reading, setReading] = useState<SessionSearchHit | null>(null);
 
   const agentIds = useMemo(() => {
     const ids = new Set<string>();
@@ -160,28 +163,45 @@ const HostSearchPage: React.FC = () => {
               return (
                 <div
                   key={`${hit.conversationId || hit.title}-${index}`}
-                  role={openable ? 'button' : undefined}
-                  tabIndex={openable ? 0 : undefined}
-                  className={classNames(
-                    'box-border flex flex-col gap-4px rounded-12px border border-solid border-[var(--color-border-2)] bg-fill-1 p-12px',
-                    openable && 'cursor-pointer hover:bg-fill-2'
-                  )}
-                  onClick={() => openHit(hit)}
-                  onKeyDown={(event) => {
-                    if (openable && (event.key === 'Enter' || event.key === ' ')) {
-                      event.preventDefault();
-                      openHit(hit);
-                    }
-                  }}
+                  className='box-border flex flex-col gap-4px rounded-12px border border-solid border-[var(--color-border-2)] bg-fill-1 p-12px'
                 >
-                  <span className='break-words text-14px leading-20px font-medium text-t-primary'>
-                    {hit.title || t('conversation.hostTools.searchUntitled')}
-                  </span>
-                  <span className='break-all text-11px leading-16px text-t-tertiary'>
-                    {joinParts([hostLabelOf(hit.hostId) ?? (hit.hostId || null), hit.agent || null, hit.cwd || null])}
-                  </span>
-                  {hit.snippet && (
-                    <span className='break-words text-12px leading-18px text-t-secondary'>{hit.snippet}</span>
+                  <div
+                    role={openable ? 'button' : undefined}
+                    tabIndex={openable ? 0 : undefined}
+                    className={classNames(
+                      'box-border flex flex-col gap-4px',
+                      openable && 'cursor-pointer hover:bg-fill-2'
+                    )}
+                    onClick={() => openHit(hit)}
+                    onKeyDown={(event) => {
+                      if (openable && (event.key === 'Enter' || event.key === ' ')) {
+                        event.preventDefault();
+                        openHit(hit);
+                      }
+                    }}
+                  >
+                    <span className='break-words text-14px leading-20px font-medium text-t-primary'>
+                      {hit.title || t('conversation.hostTools.searchUntitled')}
+                    </span>
+                    <span className='break-all text-11px leading-16px text-t-tertiary'>
+                      {joinParts([hostLabelOf(hit.hostId) ?? (hit.hostId || null), hit.agent || null, hit.cwd || null])}
+                    </span>
+                    {hit.snippet && (
+                      <span className='break-words text-12px leading-18px text-t-secondary'>{hit.snippet}</span>
+                    )}
+                  </div>
+                  {openable && (
+                    // Reading that conversation's own history happens here, beside the open one; the rest of
+                    // the row still opens it, so no click has two meanings. The label is this build's own
+                    // Chinese, stated where it is used: the locale bundles are upstream files.
+                    <button
+                      type='button'
+                      className='mt-2px self-start rounded-6px px-6px py-2px text-11px text-t-tertiary hover:bg-fill-2'
+                      data-testid={`host-search-transcript-${hit.conversationId}`}
+                      onClick={() => setReading(hit)}
+                    >
+                      查看会话内容
+                    </button>
                   )}
                 </div>
               );
@@ -189,6 +209,19 @@ const HostSearchPage: React.FC = () => {
           )}
         </div>
       </div>
+
+      <HostTranscriptPanel
+        visible={reading !== null}
+        target={
+          {
+            conversationId: reading?.conversationId ?? '',
+            title: reading?.title,
+            hostId: reading?.hostId || undefined,
+            agent: reading?.agent || undefined,
+          } satisfies HostTranscriptTarget
+        }
+        onClose={() => setReading(null)}
+      />
     </div>
   );
 };

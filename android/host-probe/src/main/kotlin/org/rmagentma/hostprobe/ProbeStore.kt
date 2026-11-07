@@ -207,6 +207,10 @@ internal class ProbeStore(file: File, private val schedule: (Long, () -> Unit) -
             // terminal nobody opened.
             "terminal.open", "terminal.command.start" -> throw ProbeFailure(501, "TERMINAL_UNSUPPORTED")
 
+            // Its synthetic conversation has no transcript file on any host, so a read answers the contract's own
+            // code for a history this build cannot read instead of an empty page.
+            "conversation.transcript" -> throw ProbeFailure(501, "TRANSCRIPT_UNSUPPORTED")
+
             else -> throw ProbeFailure(404, "UNKNOWN_ACTION")
         }
         return if (action in setOf("events.subscribe", "events.unsubscribe", "runtime.snapshot", "draft.load", "draft.save")) result else result.copy(body = json("success" to true, "data" to result.body))

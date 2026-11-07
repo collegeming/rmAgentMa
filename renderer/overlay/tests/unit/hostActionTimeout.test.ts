@@ -23,6 +23,7 @@ const WAITING_ACTIONS = [
   'attachment.finish',
   'challenges.answer',
   'conversation.read',
+  'conversation.transcript',
   'conversations.create',
   'detection.refresh',
   'hosts.refresh',

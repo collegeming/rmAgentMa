@@ -40,6 +40,7 @@ import org.connectbot.agent.AgentRecovery
 import org.connectbot.agent.AgentRepository
 import org.connectbot.agent.AgentSshPool
 import org.connectbot.agent.AgentTranscriptOutcome
+import org.connectbot.agent.AgentTranscriptRead
 import org.connectbot.data.HostRepository
 import org.connectbot.data.PubkeyRepository
 import org.connectbot.data.entity.Host
@@ -282,8 +283,7 @@ class AgentRendererSource @Inject constructor(
      * non-interactively, so a host holding no saved credential fails here as itself instead of prompting a user
      * who only looked at a panel, and every remote command still passes the pool's single target wrapper.
      */
-    override suspend fun listWorkspace(hostId: Long, directory: String): DirectoryListing =
-        RemoteDirectoryListing(dispatchers.io).list(pool.hostSession(hostId, interactive = false), directory)
+    override suspend fun listWorkspace(hostId: Long, directory: String): DirectoryListing = RemoteDirectoryListing(dispatchers.io).list(pool.hostSession(hostId, interactive = false), directory)
 
     /**
      * One upload's own write: the same bounded remote commands a listing uses, on the same host session, so a
@@ -291,8 +291,7 @@ class AgentRendererSource @Inject constructor(
      * replaced. It runs non-interactively like the listing, because a file picked in a chat is not a reason to
      * prompt for a credential.
      */
-    override suspend fun writeWorkspaceFile(hostId: Long, directory: String, name: String, content: ByteArray): String =
-        RemoteFileWriter(dispatchers.io).write(pool.hostSession(hostId, interactive = false), directory, name, content)
+    override suspend fun writeWorkspaceFile(hostId: Long, directory: String, name: String, content: ByteArray): String = RemoteFileWriter(dispatchers.io).write(pool.hostSession(hostId, interactive = false), directory, name, content)
 
     /** Hosts are created, renamed and removed through the same repository the Compose host editor writes to. */
     override suspend fun hostByNickname(nickname: String): Host? = hosts.findHost(mapOf("nickname" to nickname))
@@ -316,8 +315,15 @@ class AgentRendererSource @Inject constructor(
      * bounded read-only listings and then reads only those files, so a host this app cannot reach or a history that
      * is not a file keeps its own reason inside the outcome instead of reading as history without that text.
      */
-    override suspend fun searchTranscripts(query: String, sessions: List<AgentSession>): AgentTranscriptOutcome =
-        repository.searchTranscripts(query, sessions)
+    override suspend fun searchTranscripts(query: String, sessions: List<AgentSession>): AgentTranscriptOutcome = repository.searchTranscripts(query, sessions)
+
+    /**
+     * One read-only page of [session]'s own history on [host], through the repository entry that reads it exactly as
+     * the product's own replay does. Nothing about the open conversation takes part: no switch, no send, no write.
+     * An Agent or a target with no readable file history answers [UnsupportedOperationException], which is a fact
+     * about this build rather than a remote failure.
+     */
+    override suspend fun transcriptPage(host: Host, session: AgentSession, cursor: String?, limit: Int): AgentTranscriptRead = repository.readTranscriptPage(host.id, session, cursor, limit)
 
     /**
      * Queued messages are read from, and written to, the product's own queue file: this seam sends nothing, and the
@@ -329,8 +335,7 @@ class AgentRendererSource @Inject constructor(
 
     override suspend fun queueStats(): AgentMessageQueueStats = messages.stats()
 
-    override suspend fun queue(target: AgentSession, kind: AgentMessageKind, text: String): String? =
-        messages.enqueue(target.hostId, target.agent.wireName, target.sessionId, kind, text)
+    override suspend fun queue(target: AgentSession, kind: AgentMessageKind, text: String): String? = messages.enqueue(target.hostId, target.agent.wireName, target.sessionId, kind, text)
 
     /**
      * Withdraws one queued message before its conversation can take it. The queue records it under its own

@@ -28,6 +28,7 @@ import org.connectbot.agent.AgentQueuedMessage
 import org.connectbot.agent.AgentRecovery
 import org.connectbot.agent.AgentRecoveryState
 import org.connectbot.agent.AgentTranscriptOutcome
+import org.connectbot.agent.AgentTranscriptRead
 import org.connectbot.data.entity.Host
 import org.rmagentma.core.AgentAvailability
 import org.rmagentma.core.AgentEvent
@@ -290,6 +291,20 @@ internal class FakeSource : RendererSource {
         return transcriptOutcome
     }
 
+    /**
+     * What one transcript page answers with, and every read a route asked for, so a test can prove the page was
+     * really read from the host it names — or that no read happened at all.
+     */
+    var transcriptRead = AgentTranscriptRead()
+    var transcriptReadFailure: Exception? = null
+    val transcriptReads = mutableListOf<TranscriptReadCall>()
+
+    override suspend fun transcriptPage(host: Host, session: AgentSession, cursor: String?, limit: Int): AgentTranscriptRead {
+        transcriptReads += TranscriptReadCall(host, session, cursor, limit)
+        transcriptReadFailure?.let { throw it }
+        return transcriptRead
+    }
+
     /** What the queue holds, what it was asked to queue, and what a withdrawal is answered with. */
     var queuedMessages: List<AgentQueuedMessage> = emptyList()
     var queuedStats = AgentMessageQueueStats(stored = 0, pending = 0, delivered = 0, dropped = 0)
@@ -403,6 +418,9 @@ internal class FakeSource : RendererSource {
 
     override suspend fun hasHostPassword(hostId: Long): Boolean = storedPasswords[hostId] != null
 }
+
+/** One transcript page a route really asked [RendererSource] for: the host, the conversation and the terms. */
+internal data class TranscriptReadCall(val host: Host, val session: AgentSession, val cursor: String?, val limit: Int)
 
 /**
  * Stands in for the product's own terminal surface: every hand-over is recorded with the host and the command it

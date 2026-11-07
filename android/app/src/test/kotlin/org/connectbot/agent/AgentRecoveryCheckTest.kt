@@ -26,6 +26,7 @@ import org.rmagentma.core.AgentKind
 import org.rmagentma.core.AgentSession
 import org.rmagentma.core.ExecChannel
 import org.rmagentma.core.HostSession
+import org.rmagentma.core.RemoteTarget
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 
@@ -95,6 +96,57 @@ class AgentRecoveryCheckTest {
             }
             assertThat(answer.state).isEqualTo(AgentRecoveryState.UNKNOWN)
             assertThat(answer.note).contains("bound of 2 sessions")
+        }
+    }
+
+    @Test
+    fun aWindowsTargetIsCheckedThroughItsOwnRelayToo() {
+        runBlocking {
+            val answer = withTimeout(10_000) {
+                AgentRecoveryCheck(Dispatchers.IO).verify(
+                    host("""{"agent":"zcode","sessionId":"s-1","cwd":"C:\\work"}""" + "\n{\"level\":\"complete\"}"),
+                    AgentSession(hostId = 7L, agent = AgentKind.ZCODE, sessionId = "s-1", cwd = "C:\\work"),
+                    target = RemoteTarget.WindowsNative,
+                )
+            }
+            // A Windows host lists its sessions now, so its verdict is the one its own list answered.
+            assertThat(answer.state).isEqualTo(AgentRecoveryState.ATTACHED)
+            assertThat(commands.single()).contains("py -3").doesNotContain("/bin/sh")
+        }
+    }
+
+    @Test
+    fun aWindowsTargetWithoutPythonIsUnknownWithItsOwnReasonInsteadOfGone() {
+        runBlocking {
+            val answer = withTimeout(10_000) {
+                AgentRecoveryCheck(Dispatchers.IO).verify(
+                    host("{\"level\":\"error\",\"category\":\"py_missing\"}\n{\"level\":\"complete\"}"),
+                    AgentSession(hostId = 7L, agent = AgentKind.ZCODE, sessionId = "s-1", cwd = "C:\\work"),
+                    target = RemoteTarget.WindowsNative,
+                )
+            }
+            // A host this build could not read is never answered as a session that is gone.
+            assertThat(answer.state).isEqualTo(AgentRecoveryState.UNKNOWN)
+            assertThat(answer.note).contains("Python launcher")
+        }
+    }
+
+    @Test
+    fun anOmpSessionOnATargetWithoutPosixCommandsIsUnknownAndStartsNoAgent() {
+        runBlocking {
+            val answer = withTimeout(10_000) {
+                AgentRecoveryCheck(Dispatchers.IO).verify(
+                    // OMP has no ACP channel this target could open, so reaching the host here would be a failure.
+                    object : HostSession {
+                        override val hostId = 7L
+                        override suspend fun exec(command: String): ExecChannel = throw AssertionError("No command may run for an OMP session on a Windows target")
+                    },
+                    AgentSession(hostId = 7L, agent = AgentKind.OMP, sessionId = "s-1", cwd = "C:\\work"),
+                    target = RemoteTarget.WindowsNative,
+                )
+            }
+            assertThat(answer.state).isEqualTo(AgentRecoveryState.UNKNOWN)
+            assertThat(answer.note).contains("cannot read the session list")
         }
     }
 

@@ -25,6 +25,7 @@ import org.connectbot.agent.AgentRecoveryState
 import org.connectbot.agent.agentAttentionSignals
 import org.connectbot.agent.projectAgentAttentionInbox
 import org.connectbot.agent.searchAgentSessions
+import org.connectbot.agent.unknownDirectoryReason
 import org.connectbot.data.entity.Host
 import org.connectbot.ui.screens.agents.AgentHostState
 import org.connectbot.ui.screens.agents.agentHostChoices
@@ -78,54 +79,103 @@ internal class RendererActions(
 
     private suspend fun dispatch(action: String, params: JSONObject, query: JSONObject, body: JSONObject): ProbeResult = when (action) {
         "auth.read" -> auth()
+
         "settings.client.read" -> success(json(THEME_KEY to source.snapshot().theme))
+
         "settings.client.write" -> writeSettings(body)
+
         "conversations.list" -> conversations()
+
         "conversations.create" -> createConversation(params, body)
+
         "conversation.read" -> conversation(params)
+
         "messages.list" -> messages(query, params.optString("conversationId"))
+
         "messages.before" -> messagesBefore(query, params.optString("conversationId"))
+
         "messages.latest" -> latest(query, params.optString("conversationId"))
+
+        // One read-only page of another conversation's own history: it is read from that conversation's host and
+        // never selected, opened or sent to, so the open conversation keeps its channel and its loaded window.
+        "conversation.transcript" -> readTranscript(params, query)
+
         "messages.send" -> send(body, params.optString("conversationId"))
+
         "turn.cancel" -> cancel(body, params.optString("conversationId"))
+
         "approvals.list" -> approvals(params.optString("conversationId"))
+
         "approvals.review" -> review(params, body)
+
         "interactions.review" -> reviewQuestion(params, body)
+
         "challenges.read" -> readChallenge()
+
         "challenges.answer" -> answerChallenge(params, body)
+
         "runtime.ensure" -> ensure(params)
+
         "runtime.snapshot" -> snapshot()
+
         "config.read" -> readConfig(params)
+
         "config.set" -> setConfig(params, body)
+
         "draft.load" -> loadDraft(params)
+
         "draft.save" -> saveDraft(params, body)
+
         // The upload store buffers one attachment on this phone and writes it into the open conversation's own
         // directory only when the renderer finishes it; a host without a store answers all four as unsupported.
         "attachment.begin", "attachment.chunk", "attachment.finish", "attachment.abort" -> attachments.handle(action, params, body)
+
         "usage.read" -> usage(params.optString("conversationId"))
+
         "projects.list" -> success(RendererProjection.projects(source.snapshot().hosts))
+
         "project.read" -> readProject(params)
+
         "hosts.list" -> listHosts()
+
         "hosts.create" -> createHost(body)
+
         "hosts.update" -> updateHost(params, body)
+
         "hosts.delete" -> deleteHost(params)
+
         "hosts.refresh" -> refreshHost(params)
+
         "detection.refresh" -> refreshDetection(params)
+
         "search.sessions" -> searchSessions(query)
+
         "inbox.list" -> inbox()
+
         "queue.list" -> queue()
+
         "queue.send" -> sendToQueue(body)
+
         "queue.cancel" -> cancelQueued(params)
+
         "reference.pack" -> reference(params)
+
         "index.clear" -> clearIndex()
+
         // The retained history pages are their own store: this drops them, while `index.clear` drops the session
         // index a caller browses. Clearing one never touches the other.
         "history.clear" -> clearHistory()
+
         "terminal.open" -> terminal(params, body)
+
         "terminal.command.start" -> terminal(params, body)
+
         "assistants.list" -> success(RendererProjection.assistants(source.snapshot().availability))
+
         "agents.list" -> success(RendererProjection.agents(source.snapshot().availability))
+
         "adapters.list" -> success(RendererProjection.adapters(source.snapshot().availability))
+
         else -> unsupported(action)
     }
 
@@ -294,6 +344,85 @@ internal class RendererActions(
         return success(RendererProjection.latest(items, query.optString("type").ifEmpty { null }))
     }
 
+    /**
+     * One read-only page of one conversation's own history, read from that conversation's host. The target is
+     * resolved from the index and the open row alone — [target] — and never selected: this route answers another
+     * conversation's content without touching which conversation is open, so the single live channel stays where
+     * it is. A conversation that really is the open one is read the same way, because one route with two answers
+     * would make "same conversation" mean two different things.
+     *
+     * A target without a POSIX shell is refused as unsupported, because the reader every file-based history runs
+     * is a POSIX line; a directory that product cannot state on its own target is refused as missing, because that
+     * same line carries it as an argument.
+     */
+    private suspend fun readTranscript(params: JSONObject, query: JSONObject): ProbeResult {
+        val limit = if (query.has("limit")) query.optString("limit").toIntOrNull() ?: -1 else DEFAULT_PAGE
+        if (limit !in 1..MAX_PAGE) return fail(422, "INVALID_LIMIT", "limit 必须是 1..$MAX_PAGE 的整数。")
+        val cursor = (query.opt("cursor") as? String)?.takeIf { it.isNotEmpty() }
+        // A cursor is the host's own opaque text and goes back to it inside a command line, so one that is too long
+        // or carries a control character cannot be one this host issued.
+        if (cursor != null && (cursor.length > MAX_CURSOR || cursor.any { it.isISOControl() })) {
+            return fail(422, "INVALID_CURSOR", "游标无效：长度超限或包含控制字符。")
+        }
+        val snapshot = source.snapshot()
+        val conversationId = params.optString("conversationId")
+        val session = target(snapshot, conversationId) ?: return fail(404, "CONVERSATION_NOT_FOUND", "索引中没有这个会话。")
+        val host = snapshot.hosts.firstOrNull { it.id == session.hostId }
+            ?: return fail(404, "CONVERSATION_NOT_FOUND", "该会话的主机已不存在。")
+        val remote = remoteTargetOf(host.osType, host.agentTarget)
+        // The reader every file-based history runs is POSIX text, so a target with no POSIX shell has no page this
+        // build could read at all — whatever its directory looks like there.
+        if (!remote.posixCommands) {
+            return fail(501, "TRANSCRIPT_UNSUPPORTED", "该主机的 Agent 目标没有本机可用的历史读取入口。")
+        }
+        // The directory rule is that target's own, so a conversation whose recorded directory is missing or is not
+        // absolute there is refused before anything is read from it. A directory carrying a control character is no
+        // more usable: the reader hands it to a command line, so it fails the same way.
+        session.unknownDirectoryReason(remote)?.let {
+            return fail(409, CWD_MISSING, "该会话没有可用的工作目录，无法读取历史：$it")
+        }
+        if (!validAgentCwd(session.cwd)) return fail(409, CWD_MISSING, "该会话没有可用的工作目录，无法读取历史：工作目录包含不可用的控制字符。")
+        // The Agent's own session id is what the reader names the history file by, and it travels in the same command
+        // line; one this host cannot state leaves nothing to read, and no page may be invented for it.
+        if (session.sessionId.isBlank() || session.sessionId.any { it.isISOControl() }) {
+            return fail(501, "TRANSCRIPT_UNSUPPORTED", "该会话没有可用的原生会话 id，无法读取历史。")
+        }
+        val read = try {
+            source.transcriptPage(host, session, cursor, limit)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: UnsupportedOperationException) {
+            return fail(501, "TRANSCRIPT_UNSUPPORTED", "该会话的 Agent 没有本机可读的文件历史。")
+        } catch (error: Exception) {
+            return fail(502, "TRANSCRIPT_UNREADABLE", "远端历史读取失败：${remoteReason(reason(error))}")
+        }
+        read.error?.let { return fail(502, "TRANSCRIPT_UNREADABLE", "远端历史读取失败：${remoteReason(it)}") }
+        val items = JSONArray()
+        read.items.forEach { event ->
+            items.put(
+                json(
+                    "type" to event.type,
+                    "text" to event.text,
+                    "id" to event.id,
+                    "title" to event.title,
+                    "status" to event.status,
+                ),
+            )
+        }
+        return success(
+            json(
+                // The identity the caller named, as every other conversation route answers it, so a page can be
+                // requested again by the same id that produced it.
+                "conversation_id" to conversationId,
+                "items" to items,
+                "next_cursor" to read.nextCursor,
+                // A cursor after this page is the only fact that says another page exists; the route never invents one.
+                "has_more" to (read.nextCursor != null),
+                "count" to items.length(),
+            ),
+        )
+    }
+
     private suspend fun send(body: JSONObject, conversationId: String): ProbeResult {
         val snapshot = openFor(conversationId) ?: return notFound()
         // A conversation whose recorded working directory cannot be used has nowhere for the Agent to run, so the
@@ -362,9 +491,11 @@ internal class RendererActions(
     private fun filePath(element: Any?): String? {
         val path = when (element) {
             is String -> element
+
             // The kind a reference declares decides what it is: only an upload reference carries a path this host
             // could hand over, while a project reference names a file in a workspace it does not hold.
             is JSONObject -> if (element.optString("kind", UPLOAD_KIND) != UPLOAD_KIND) null else element.opt("path") as? String
+
             else -> null
         } ?: return null
         // The product's own absolute-path rule, the same one a working directory has to satisfy.
@@ -376,8 +507,7 @@ internal class RendererActions(
      * own title. The block is appended rather than woven in, so the text still reads as what the user wrote, and
      * only paths travel — the file bytes stay on the host where the upload already put them.
      */
-    private fun promptWithFiles(content: String, files: List<String>): String =
-        if (files.isEmpty()) content else content + "\n\n" + ATTACHMENT_BLOCK_TITLE + "\n" + files.joinToString("\n")
+    private fun promptWithFiles(content: String, files: List<String>): String = if (files.isEmpty()) content else content + "\n\n" + ATTACHMENT_BLOCK_TITLE + "\n" + files.joinToString("\n")
 
     /** The file references one send carried: the paths this host accepted, or the refusal it answered instead. */
     private sealed interface FileRefs {
@@ -816,6 +946,7 @@ internal class RendererActions(
     private suspend fun storePassword(hostId: Long, password: HostPassword): ProbeResult? = when (password) {
         // The request named no password, so whatever this host already holds stays as it is.
         HostPassword.Unchanged -> null
+
         is HostPassword.Store -> try {
             source.setHostPassword(hostId, password.value)
             null
@@ -824,6 +955,7 @@ internal class RendererActions(
         } catch (error: Exception) {
             fail(500, "HOST_SAVE_FAILED", "密码未能保存：${reason(error)}")
         }
+
         HostPassword.Clear -> try {
             source.setHostPassword(hostId, null)
             null
@@ -1168,6 +1300,7 @@ internal class RendererActions(
         }
         return when (status.state.lowercase()) {
             HISTORY_COMPLETE, HISTORY_PARTIAL -> json("state" to status.state.lowercase(), "note" to status.note)
+
             // A state this host does not know is no evidence of a complete history.
             else -> json("state" to HISTORY_UNAVAILABLE, "note" to (status.note ?: "历史状态未知。"))
         }
@@ -1210,8 +1343,7 @@ internal class RendererActions(
     )
 
     /** Every conversation the product holds: the open one plus every indexed row, each counted once. */
-    private fun heldSessions(snapshot: RendererSnapshot): List<AgentSession> =
-        (snapshot.indexedSessions + listOfNotNull(snapshot.session)).distinctBy { RendererConversationId.of(it) }
+    private fun heldSessions(snapshot: RendererSnapshot): List<AgentSession> = (snapshot.indexedSessions + listOfNotNull(snapshot.session)).distinctBy { RendererConversationId.of(it) }
 
     /** One body field as text; an absent field and an explicit null both carry nothing rather than the word "null". */
     private fun bodyText(body: JSONObject, key: String): String = body.opt(key) as? String ?: ""
@@ -1325,12 +1457,11 @@ internal class RendererActions(
      * only once that surface was started for this host, while a build without one and a start the system refused
      * each answer their own stable code and reason instead of a terminal nobody opened.
      */
-    private suspend fun openTerminal(host: Host, command: String, data: JSONObject): ProbeResult =
-        when (val started = terminal.start(host.id, command)) {
-            RendererTerminal.Result.Started -> success(data.put("opened", true))
-            RendererTerminal.Result.Unsupported -> fail(501, TERMINAL_UNSUPPORTED, "本机没有可打开的终端入口。")
-            is RendererTerminal.Result.Failed -> fail(500, TERMINAL_START_FAILED, "终端未能打开：${started.reason}")
-        }
+    private suspend fun openTerminal(host: Host, command: String, data: JSONObject): ProbeResult = when (val started = terminal.start(host.id, command)) {
+        RendererTerminal.Result.Started -> success(data.put("opened", true))
+        RendererTerminal.Result.Unsupported -> fail(501, TERMINAL_UNSUPPORTED, "本机没有可打开的终端入口。")
+        is RendererTerminal.Result.Failed -> fail(500, TERMINAL_START_FAILED, "终端未能打开：${started.reason}")
+    }
 
     private fun hostNotFound(): ProbeResult = fail(404, "HOST_NOT_FOUND", "没有这台主机。")
 
@@ -1467,6 +1598,12 @@ internal class RendererActions(
     /** The repository failure behind a stable code, kept readable for whoever has to fix it. */
     private fun reason(error: Exception): String = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName
 
+    /**
+     * The reason a remote read gave, as a text this host may answer with: control characters are folded to spaces
+     * because that text reaches a payload, and the length is bounded because the far end wrote it.
+     */
+    private fun remoteReason(text: String): String = text.map { if (it.isISOControl()) ' ' else it }.joinToString("").trim().take(MAX_REASON_CHARS).ifEmpty { "未知原因" }
+
     /** The snapshot of the conversation [conversationId] names, or null when a different one is open. */
     private suspend fun openFor(conversationId: String): RendererSnapshot? = source.snapshot().takeIf { namesOpen(it, conversationId) }
 
@@ -1556,6 +1693,12 @@ internal class RendererActions(
         val THEME_VALUES = setOf("light", "dark", "system")
         const val DEFAULT_PAGE = 50
         const val MAX_PAGE = 200
+
+        /** A transcript cursor is the host's own opaque text; one past this length cannot be one this host issued. */
+        const val MAX_CURSOR = 2048
+
+        /** How much of a remote failure this host repeats in `error`: enough to act on, bounded because it is theirs. */
+        const val MAX_REASON_CHARS = 300
 
         /** The protocol a host the renderer creates or keeps has to carry: an Agent is reached over SSH. */
         const val SSH_PROTOCOL = "ssh"

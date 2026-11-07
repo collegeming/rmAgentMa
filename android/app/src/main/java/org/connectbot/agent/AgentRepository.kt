@@ -63,6 +63,7 @@ import org.rmagentma.core.RemoteAgentProbe
 import org.rmagentma.core.RemoteDirectoryListing
 import org.rmagentma.core.RemoteScanner
 import org.rmagentma.core.RemoteTarget
+import org.rmagentma.core.RemoteTranscriptReader
 import org.rmagentma.core.RemoteTranscriptSearch
 import org.rmagentma.core.RemoteWorkingDirectoryCheck
 import org.rmagentma.core.TRANSCRIPT_SEARCH_MAX_FILES
@@ -108,6 +109,20 @@ sealed interface AgentConfigAccess {
 
 /** A configuration write the Agent refused because another update was still in flight; it can be retried. */
 class AgentConfigBusyException(val code: Int, message: String) : java.io.IOException(message)
+
+/**
+ * One read-only page of a conversation's own history as its host answered it: the rows, the cursor after them and
+ * the failure that kept the page from arriving whole. A page with an [error] is no page, and a [nextCursor] is the
+ * only fact that says another page exists behind it.
+ */
+data class AgentTranscriptRead(
+    val items: List<AgentEvent> = emptyList(),
+    val nextCursor: String? = null,
+    val error: String? = null,
+)
+
+/** The Agents whose history this build can read as a file on their own host. */
+private val TRANSCRIPT_READ_AGENTS = setOf(AgentKind.KIMI, AgentKind.OPENCODE, AgentKind.DSH, AgentKind.ZCODE)
 
 // shortcut: agent-core reports a delivered write that came back without a snapshot as exactly this IOException, so
 // the message is the only signal that separates it from a rejection or a broken channel; upgrade to a typed result
@@ -283,8 +298,7 @@ class AgentRepository @Inject constructor(
      * history, so a CONNECTED stored by an earlier process never reads as a running link. A host neither source
      * names was never connected here and stays unknown instead of reported as reachable or offline.
      */
-    fun hostLinkStates(): Map<Long, AgentLinkState> =
-        mutableLinkRecords.value.filter { it.agent == null }.associate { it.hostId to it.state } + mutableLiveLinkStates.value
+    fun hostLinkStates(): Map<Long, AgentLinkState> = mutableLinkRecords.value.filter { it.agent == null }.associate { it.hostId to it.state } + mutableLiveLinkStates.value
 
     /**
      * Whether the Agent still holds the conversation that is open here, read from the Agent's own list and never
@@ -309,9 +323,11 @@ class AgentRepository @Inject constructor(
     private suspend fun verifyRecovery(session: AgentSession): AgentRecovery {
         val verdict = when {
             session.sessionId.isBlank() -> AgentRecovery(AgentRecoveryState.UNKNOWN, "the Agent has not named this conversation yet")
-            !hostTarget(session.hostId).posixCommands -> AgentRecovery(AgentRecoveryState.UNKNOWN, "this build cannot read the session list of ${hostTarget(session.hostId).id}")
+
             else -> try {
-                AgentRecoveryCheck(dispatchers.io).verify(pool.hostSession(session.hostId), session)
+                // The check reads the session list on the host's own target, so a Windows host is read there too.
+                val target = hostTarget(session.hostId)
+                AgentRecoveryCheck(dispatchers.io).verify(pool.hostSession(session.hostId), session, target = target)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -324,8 +340,7 @@ class AgentRepository @Inject constructor(
         return verdict
     }
 
-    private fun AgentSession.matches(other: AgentSession): Boolean =
-        hostId == other.hostId && agent == other.agent && sessionId == other.sessionId
+    private fun AgentSession.matches(other: AgentSession): Boolean = hostId == other.hostId && agent == other.agent && sessionId == other.sessionId
 
     private suspend fun probeHost(hostId: Long, interactive: Boolean, force: Boolean): List<AgentAvailability> = probeMutex.withLock {
         val cached = mutableAvailability.value.filter { it.hostId == hostId }
@@ -429,9 +444,9 @@ class AgentRepository @Inject constructor(
             mutableRefreshingHosts.update { it + host.id }
             try {
                 val available = probeHost(host.id, interactive, force = true)
-                // A target that does not run the app's POSIX commands holds no readable session list either, so
-                // the refresh stops at the probe verdict instead of failing once per Agent.
-                if (!remoteTargetOf(host.osType, host.agentTarget).posixCommands) continue
+                // Every target this app can probe is scanned on its own reader: a Windows host through its own
+                // PowerShell relay, every other host through the POSIX line it has always used.
+                val target = remoteTargetOf(host.osType, host.agentTarget)
                 for (agent in AgentKind.entries) {
                     currentCoroutineContext().ensureActive()
                     // Only a completed read promotes this pair to remote-loaded; any path out of the try leaves the
@@ -443,9 +458,17 @@ class AgentRepository @Inject constructor(
                         val found = if (agent == AgentKind.OMP) {
                             val runtime = available.single { it.kind == agent }
                             if (!runtime.available) continue
+                            // OMP has no file format this app reads, only its ACP session list, and that launch is
+                            // POSIX text: a target that cannot run one reports that fact instead of running it.
+                            if (!target.posixCommands) {
+                                mutableErrors.update {
+                                    (it + "${host.nickname} / ${agent.wireName}: this build cannot list sessions of ${target.id}").takeLast(100)
+                                }
+                                continue
+                            }
                             AcpDriver(agent, scope, dispatchers.io, runtime.executable.takeIf { it.isNotBlank() }).listSessions(remote)
                         } else {
-                            val scan = RemoteScanner(dispatchers.io).scan(remote, setOf(agent), AGENT_SESSION_PAGE_LIMIT)
+                            val scan = RemoteScanner(dispatchers.io).scan(remote, setOf(agent), AGENT_SESSION_PAGE_LIMIT, target)
                             if (scan.errors.isNotEmpty()) {
                                 mutableErrors.update { (it + scan.errors.map { error -> "${host.nickname} / ${agent.wireName}: $error" }).takeLast(100) }
                                 continue
@@ -887,12 +910,35 @@ class AgentRepository @Inject constructor(
         )
     }
 
+    /**
+     * One bounded, read-only page of [session]'s own history on [hostId], read through the same remote reader the
+     * product's own history replay uses. Nothing is opened, selected, sent or written: the page is answered as the
+     * host sent it, and a page the reader could not complete travels as that failure instead of as an empty one.
+     * The host session comes from the pool, and every remote command opens and closes its own exec channel there,
+     * so this read holds nothing after it returns.
+     *
+     * A session this build has no reader for, or a target whose commands are not POSIX text, answers
+     * [UnsupportedOperationException]: neither is a remote failure, and neither may be reported as a page.
+     */
+    suspend fun readTranscriptPage(hostId: Long, session: AgentSession, cursor: String?, limit: Int): AgentTranscriptRead {
+        if (session.agent !in TRANSCRIPT_READ_AGENTS) throw UnsupportedOperationException("no readable history for ${session.agent.wireName}")
+        // A session whose Agent id is not one this reader could name has no page this build can read at all.
+        if (session.sessionId.isBlank()) throw UnsupportedOperationException("session has no native id")
+        val host = hostRepository.findHostById(hostId) ?: throw UnsupportedOperationException("host row is gone")
+        val target = remoteTargetOf(host.osType, host.agentTarget)
+        if (!target.posixCommands) throw UnsupportedOperationException("target ${target.id} runs no POSIX command")
+        val events = mutableListOf<AgentEvent>()
+        val page = RemoteTranscriptReader(dispatchers.io).readPage(pool.hostSession(hostId), session, cursor, limit) { events += it }
+        return AgentTranscriptRead(events, page.nextCursor, page.error)
+    }
+
     /** Where one host's transcripts live, or the listing problem that kept every candidate from being read. */
     private suspend fun transcriptRoot(host: HostSession, cwd: String): TranscriptRootLookup {
         var problem: DirectoryListingProblem? = null
         for (candidate in transcriptRootCandidates(cwd)) {
             when (val listing = listingOf(host, candidate)) {
                 is DirectoryListing.Listed -> return TranscriptRootLookup(candidate, null)
+
                 is DirectoryListing.Unavailable -> when (listing.problem) {
                     DirectoryListingProblem.MISSING, DirectoryListingProblem.NOT_A_DIRECTORY -> Unit
                     else -> problem = problem ?: listing.problem
@@ -919,10 +965,9 @@ class AgentRepository @Inject constructor(
     }
 
     /** Transcript file names one session directory holds; a directory nobody read contributes no name. */
-    private suspend fun transcriptFiles(host: HostSession, directory: String): List<String> =
-        (listingOf(host, directory) as? DirectoryListing.Listed)?.entries.orEmpty()
-            .filter { it.kind == DirectoryEntryKind.FILE }
-            .map { it.name }
+    private suspend fun transcriptFiles(host: HostSession, directory: String): List<String> = (listingOf(host, directory) as? DirectoryListing.Listed)?.entries.orEmpty()
+        .filter { it.kind == DirectoryEntryKind.FILE }
+        .map { it.name }
 
     private suspend fun listingOf(host: HostSession, directory: String): DirectoryListing = RemoteDirectoryListing(dispatchers.io).list(host, directory)
 

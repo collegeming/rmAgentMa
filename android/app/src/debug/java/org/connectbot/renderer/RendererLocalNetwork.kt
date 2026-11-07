@@ -38,6 +38,8 @@ internal val NETWORK_ACTIONS = setOf(
     "conversations.create",
     "project.read",
     "search.sessions",
+    // A transcript page is read from a conversation's own host, like a content search is, so it needs the same grant.
+    "conversation.transcript",
     "attachment.finish",
     "terminal.open",
     "terminal.command.start",
@@ -60,5 +62,4 @@ internal fun networkPermissions(sdkInt: Int): List<String> = buildList {
  * answer the host gives instead of running it, with its own stable code and a visible notice, so a refusal is never
  * silent and the action works again once the user granted what it needed.
  */
-internal fun localNetworkRefused(action: String, permissions: List<String>, granted: (String) -> Boolean): Boolean =
-    action in NETWORK_ACTIONS && permissions.any { !granted(it) }
+internal fun localNetworkRefused(action: String, permissions: List<String>, granted: (String) -> Boolean): Boolean = action in NETWORK_ACTIONS && permissions.any { !granted(it) }

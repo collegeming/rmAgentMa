@@ -535,5 +535,108 @@ class ScannerTest(unittest.TestCase):
         self.assertIn("python3 is required", rows[0]["message"])
 
 
+class WindowsScannerTest(unittest.TestCase):
+    """The Windows target: the same script, read against a temporary HOME standing in for %USERPROFILE%."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.addCleanup(mock.patch.stopall)
+        patcher = mock.patch.object(scanner, "WINDOWS", True)
+        patcher.start()
+        self.env_patch = mock.patch.dict(os.environ, {
+            "HOME": str(self.home), "USERPROFILE": str(self.home), "KIMI_CODE_HOME": str(self.home / ".kimi-code"),
+            "XDG_DATA_HOME": str(self.home / ".local/share"), "DSH_HOME": str(self.home / ".dsh"),
+        })
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        home_patch = mock.patch.object(scanner.Path, "home", return_value=self.home)
+        home_patch.start()
+
+    def capture(self, *args):
+        out = io.StringIO()
+        with mock.patch.object(sys, "stdout", new=out):
+            code = scanner.main(list(args))
+        return code, [json.loads(line) for line in out.getvalue().splitlines()]
+
+    def zcode_database(self, agent="zcode"):
+        path = (self.home / ".local/share/opencode/opencode.db"
+                if agent == "opencode" else self.home / ".zcode/cli/db/db.sqlite")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(path)
+        self.addCleanup(db.close)
+        db.executescript("""
+            CREATE TABLE session (id TEXT PRIMARY KEY, title TEXT, directory TEXT,
+                                  time_created INTEGER, time_updated INTEGER);
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT,
+                                  time_created INTEGER, sequence INTEGER);
+            CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, message_id TEXT,
+                               data TEXT, time_created INTEGER, sequence INTEGER);
+        """)
+        db.execute("INSERT INTO session VALUES ('same', ?, 'C:\\work', ?, ?)",
+                   (agent + " title", NOW, NOW))
+        db.commit()
+        return db
+
+    def test_zcode_sessions_come_from_the_databases_on_a_windows_home(self):
+        self.zcode_database("zcode")
+        self.zcode_database("opencode")
+        code, rows = self.capture("--agent", "zcode", "opencode")
+        self.assertEqual(code, 0)
+        self.assertEqual({row["agent"] for row in rows}, {"zcode", "opencode"})
+        self.assertTrue(all(row["sessionId"] == "same" for row in rows))
+        self.assertTrue(all(row["cwd"] == "C:\\work" for row in rows))
+
+    def test_an_absent_store_is_that_agents_own_error_not_an_empty_history(self):
+        # No CLI resolves on this fixture, so the store is the only reader each Agent has.
+        with mock.patch.object(scanner.shutil, "which", return_value=None):
+            code, rows = self.capture("--agent", "zcode", "opencode", "kimi")
+        self.assertEqual(code, 0)
+        self.assertEqual(rows, [{"level": "error", "agent": "zcode",
+                                 "message": "session storage not found: "
+                                            + str(self.home / ".zcode/cli/db/db.sqlite")},
+                                {"level": "error", "agent": "opencode",
+                                 "message": "session storage not found: "
+                                            + str(self.home / ".local/share/opencode/opencode.db")},
+                                {"level": "error", "agent": "kimi",
+                                 "message": "session storage not found: "
+                                            + str(self.home / ".kimi-code")}])
+
+    def test_a_store_that_exists_but_holds_no_sessions_is_not_an_error(self):
+        (self.home / ".kimi-code").mkdir(parents=True)
+        code, rows = self.capture("--agent", "kimi")
+        self.assertEqual(code, 0)
+        # A directory the host really has answered with no sessions; the app shows that history as empty.
+        self.assertEqual(rows, [])
+
+    def test_the_missing_store_is_reported_only_on_a_windows_target(self):
+        # The POSIX reader has kept silence for an absent store, and that answer must not change.
+        with mock.patch.object(scanner, "WINDOWS", False):
+            code, rows = self.capture("--agent", "zcode", "kimi")
+        self.assertEqual(code, 0)
+        self.assertEqual(rows, [])
+
+    def test_a_batch_launcher_is_started_through_the_command_interpreter(self):
+        # Windows installs a Node CLI as a .cmd shim, which CreateProcess cannot start by itself.
+        self.assertEqual(scanner.cli_command("C:\\bin\\kimi.cmd", "session", "list"),
+                         [os.environ.get("COMSPEC", "cmd.exe"), "/c", "C:\\bin\\kimi.cmd", "session", "list"])
+        self.assertEqual(scanner.cli_command("C:\\bin\\kimi.exe", "session"), ["C:\\bin\\kimi.exe", "session"])
+        # The same resolution stays untouched on a host that has no batch shims.
+        with mock.patch.object(scanner, "WINDOWS", False):
+            self.assertEqual(scanner.cli_command("C:\\bin\\kimi.cmd", "x"), ["C:\\bin\\kimi.cmd", "x"])
+
+    def test_a_cli_without_a_process_group_kills_only_its_own_child(self):
+        process = mock.Mock()
+        with mock.patch.object(scanner, "HAS_PROCESS_GROUP", False):
+            scanner.kill_process_group(process)
+        process.kill.assert_called_once_with()
+        process.pid = 4242
+        with mock.patch.object(scanner, "HAS_PROCESS_GROUP", True), \
+                mock.patch.object(scanner.os, "killpg") as killpg:
+            scanner.kill_process_group(process)
+        killpg.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

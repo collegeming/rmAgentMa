@@ -26,6 +26,8 @@ import kotlinx.serialization.json.longOrNull
 /** Events are historical facts only; no permission/question options or active request payloads are retained. */
 data class TranscriptPage(val nextCursor: String? = null, val eventCount: Int = 0, val error: String? = null)
 
+private val TRANSCRIPT_AGENTS = setOf(AgentKind.KIMI, AgentKind.OPENCODE, AgentKind.DSH, AgentKind.ZCODE)
+
 class RemoteTranscriptReader(private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO) {
     suspend fun readPage(
         host: HostSession,
@@ -35,7 +37,7 @@ class RemoteTranscriptReader(private val ioDispatcher: CoroutineDispatcher = Dis
         onEvent: suspend (AgentEvent) -> Unit,
     ): TranscriptPage {
         require(session.hostId == host.hostId) { "Transcript host must match session host" }
-        require(session.agent == AgentKind.DSH || session.agent == AgentKind.ZCODE) { "Unsupported transcript agent" }
+        require(session.agent in TRANSCRIPT_AGENTS) { "Unsupported transcript agent" }
         require(session.cwd.startsWith('/') && session.sessionId.isNotBlank()) { "Invalid transcript identity" }
         requireRemoteArgument(session.cwd)
         requireRemoteArgument(session.sessionId)
