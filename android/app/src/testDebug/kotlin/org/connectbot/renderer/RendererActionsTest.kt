@@ -916,7 +916,12 @@ class RendererActionsTest {
     fun aQuestionFromHistoryIsNeverAnswerable() = runTest {
         val fromHistory = questionEvent("ask-old", "旧问题", 2)
         // The repository does not hold this instance as pending any more, so its answer must not be reported as sent.
-        val refused = RendererActions(openSource().apply { events = listOf(fromHistory); questionAnswerable = false }).handle(
+        val refused = RendererActions(
+            openSource().apply {
+                events = listOf(fromHistory)
+                questionAnswerable = false
+            },
+        ).handle(
             "interactions.review",
             payload(conversation = true, params = mapOf("requestRef" to "ask-old"), body = mapOf("answer" to "main")),
         )
@@ -1019,8 +1024,10 @@ class RendererActionsTest {
         assertThat(items.getJSONObject(2).getJSONObject("content").getString("title")).isEqualTo("新标题")
 
         // A usage report this build cannot read stays visible as a bounded line instead of vanishing.
-        val unreadable = (RendererActions(openSource().apply { events = listOf(AgentEvent(type = "usage", raw = buildJsonObject { put("sessionUpdate", "usage_update") }, historyKey = 1)) })
-            .handle("messages.list", payload(conversation = true)).body as JSONObject)
+        val unreadable = (
+            RendererActions(openSource().apply { events = listOf(AgentEvent(type = "usage", raw = buildJsonObject { put("sessionUpdate", "usage_update") }, historyKey = 1)) })
+                .handle("messages.list", payload(conversation = true)).body as JSONObject
+            )
             .getJSONObject("data").getJSONArray("items").getJSONObject(0)
         assertThat(unreadable.getString("type")).isEqualTo("acp_context_usage")
         assertThat(unreadable.getJSONObject("content").getString("content")).startsWith("[usage]")
@@ -1523,7 +1530,8 @@ class RendererActionsTest {
     @Test
     fun chunksAndTheFinishStepRefuseAnUploadThatIsNotWhereItClaims() = runTest {
         val uploads = temporary.newFolder()
-        val source = openSource()
+        // The host row has to exist for the finish step to reach the write it really makes.
+        val source = openSource().apply { hosts = listOf(this@RendererActionsTest.host) }
         val actions = RendererActions(source, RendererAttachments(uploads, source))
         val bytes = "0123456789".toByteArray()
         val uploadId = dataOf(actions.handle("attachment.begin", payload(conversation = true, body = uploadBody(bytes)))).getString("uploadId")
@@ -1574,7 +1582,8 @@ class RendererActionsTest {
         val source = openSource()
         val actions = RendererActions(source, RendererAttachments(uploads, source))
         val sent = "sent".toByteArray()
-        val body = uploadBody("declared".toByteArray())
+        // The declared size is the bytes really sent, so the only thing that can fail here is the hash itself.
+        val body = uploadBody("declared".toByteArray()).toMutableMap().apply { put("size", sent.size) }
         val uploadId = dataOf(actions.handle("attachment.begin", payload(conversation = true, body = body))).getString("uploadId")
         actions.handle("attachment.chunk", payload(conversation = true, body = mapOf("uploadId" to uploadId, "offset" to 0, "data" to base64Of(sent))))
         val mismatched = actions.handle("attachment.finish", payload(conversation = true, body = mapOf("uploadId" to uploadId)))
@@ -1588,7 +1597,11 @@ class RendererActionsTest {
     @Test
     fun aWriteThatDidNotLandLeavesNothingBehind() = runTest {
         val uploads = temporary.newFolder()
-        val source = openSource().apply { writeFailure = IOException("write_directory_missing") }
+        val source = openSource().apply {
+            // The host row the conversation belongs to has to be there, or the write is refused before it is tried.
+            hosts = listOf(this@RendererActionsTest.host)
+            writeFailure = IOException("write_directory_missing")
+        }
         val actions = RendererActions(source, RendererAttachments(uploads, source))
         val bytes = "payload".toByteArray()
         val uploadId = dataOf(actions.handle("attachment.begin", payload(conversation = true, body = uploadBody(bytes)))).getString("uploadId")
@@ -1867,7 +1880,12 @@ class RendererActionsTest {
         assertThat(page.getBoolean("has_more_after")).isTrue()
 
         // The start of history is a refusal, never an empty page that reads like an answer with no messages.
-        val end = RendererActions(openSource().apply { events = current; hasEarlier = false }).handle("messages.before", payload(conversation = true))
+        val end = RendererActions(
+            openSource().apply {
+                events = current
+                hasEarlier = false
+            },
+        ).handle("messages.before", payload(conversation = true))
         assertThat(end.status).isEqualTo(409)
         assertThat(codeOf(end)).isEqualTo("HISTORY_EXHAUSTED")
 
@@ -1884,7 +1902,13 @@ class RendererActionsTest {
         assertThat(failing.earlierLoads).isEqualTo(1)
 
         // Only the ready conversation has pages to read, and no conversation at all answers with its own code.
-        val unready = RendererActions(openSource().apply { events = current; hasEarlier = true; active = false }).handle("messages.before", payload(conversation = true))
+        val unready = RendererActions(
+            openSource().apply {
+                events = current
+                hasEarlier = true
+                active = false
+            },
+        ).handle("messages.before", payload(conversation = true))
         assertThat(unready.status).isEqualTo(409)
         assertThat(codeOf(unready)).isEqualTo("CONVERSATION_NOT_OPEN")
         assertThat(RendererActions(FakeSource()).handle("messages.before", payload(conversation = true)).status).isEqualTo(404)
@@ -2352,7 +2376,10 @@ class RendererActionsTest {
 
     @Test
     fun clearingHistoryIsItsOwnStoreAndAnswersWhatItCleared() = runTest {
-        val source = openSource().apply { sessions = listOf(this@RendererActionsTest.session); clearedConversations = 3 }
+        val source = openSource().apply {
+            sessions = listOf(this@RendererActionsTest.session)
+            clearedConversations = 3
+        }
         val actions = RendererActions(source)
         val cleared = dataOf(actions.handle("history.clear", payload()))
         assertThat(cleared.getBoolean("cleared")).isTrue()
@@ -2659,21 +2686,20 @@ class RendererActionsTest {
     private fun dataOf(result: ProbeResult): JSONObject = (result.body as JSONObject).getJSONObject("data")
 
     /** One content hit as the remote transcript search states it: the file and the line the match sits at. */
-    private fun contentHit(hostId: Long, agent: AgentKind, sessionId: String, directory: String, file: String, line: Int, snippet: String): AgentTranscriptHit =
-        AgentTranscriptHit(
-            hostId,
-            TranscriptSearchHit(
-                sessionKey = "${agent.wireName}:$sessionId",
-                agent = agent,
-                sessionId = sessionId,
-                directory = directory,
-                file = file,
-                line = line,
-                offset = 0,
-                snippet = snippet,
-                clipped = false,
-            ),
-        )
+    private fun contentHit(hostId: Long, agent: AgentKind, sessionId: String, directory: String, file: String, line: Int, snippet: String): AgentTranscriptHit = AgentTranscriptHit(
+        hostId,
+        TranscriptSearchHit(
+            sessionKey = "${agent.wireName}:$sessionId",
+            agent = agent,
+            sessionId = sessionId,
+            directory = directory,
+            file = file,
+            line = line,
+            offset = 0,
+            snippet = snippet,
+            clipped = false,
+        ),
+    )
 
     /** One open conversation of host 7 whose workspace listing a case decides. */
     private fun openSourceWithWorkspace(configure: FakeSource.() -> Unit): FakeSource = FakeSource().apply {

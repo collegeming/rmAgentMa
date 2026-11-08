@@ -653,8 +653,8 @@ internal class RendererActions(
         val conversationId = RendererConversationId.of(session)
         val pending = JSONArray()
         snapshot.pending()?.let { pending.put(RendererProjection.permission(it, conversationId, snapshot.epoch, snapshot.turnId)) }
-        return ProbeResult(
-            body = json(
+        return success(
+            json(
                 "epoch" to snapshot.epoch,
                 "seq" to snapshot.seq,
                 "conversation_id" to conversationId,
