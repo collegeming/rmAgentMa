@@ -386,6 +386,13 @@ class AgentSshPool @Inject constructor(
     }
 
     private suspend fun authenticate(client: SSHClient, host: Host, interactive: Boolean) {
+        // Directly checked by a test: it runs on the caller's thread with an already built client, so what it
+        // decides does not depend on the thread a mocked constructor happens to run on.
+        authenticateForTest(client, host, interactive)
+    }
+
+    /** [authenticate] on the caller's thread: a test drives the decision itself, without a real SSH connection. */
+    internal suspend fun authenticateForTest(client: SSHClient, host: Host, interactive: Boolean) {
         // A host that authenticates with a password uses the one saved for it and nothing else: no key is tried
         // against it and no prompt appears while a saved password is there. A rejected password is its own
         // answer instead of another authentication attempt, so a host the user configured this way is not asked

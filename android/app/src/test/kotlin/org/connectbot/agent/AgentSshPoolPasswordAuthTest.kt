@@ -32,12 +32,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.ArgumentMatchers.any
 import org.mockito.ArgumentMatchers.eq
-import org.mockito.Mockito.RETURNS_DEEP_STUBS
 import org.mockito.Mockito.mock
-import org.mockito.Mockito.mockConstruction
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
-import org.mockito.Mockito.withSettings
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
@@ -58,17 +55,15 @@ class AgentSshPoolPasswordAuthTest {
                 passwords = passwords,
                 challenges = challenges,
             )
-            mockConstruction(SSHClient::class.java, withSettings().defaultAnswer(RETURNS_DEEP_STUBS)).use { clients ->
-                // The link itself is left to the mock; what is asserted here is how it authenticated. The key
-                // repository is left unstubbed on purpose: an attempt to read a key for this host would fail
-                // before the saved password is used, which the verification below would catch.
-                runCatching { pool.hostSession(1L).exec("true") }
-                val client = clients.constructed().single()
-                verify(client).authPassword(eq("colle"), any(CharArray::class.java))
-                verify(passwords).getPassword(1L)
-                // No prompt is waiting for the user either: the saved password is everything this host needs.
-                assertThat(challenges.challenge.value).isNull()
-            }
+            // The decision is driven on this thread against a client this test built, so nothing here depends on
+            // where a constructor happens to run. The key repository is left unstubbed on purpose: an attempt to
+            // read a key for this host would fail before the saved password is used.
+            val client = mock(SSHClient::class.java)
+            pool.authenticateForTest(client, host = Host(id = 1L, hostname = "work.test", username = "colle", authMethod = Host.AUTH_METHOD_PASSWORD), interactive = true)
+            verify(client).authPassword(eq("colle"), any(CharArray::class.java))
+            verify(passwords).getPassword(1L)
+            // No prompt is waiting for the user either: the saved password is everything this host needs.
+            assertThat(challenges.challenge.value).isNull()
         }
     }
 
@@ -86,13 +81,11 @@ class AgentSshPoolPasswordAuthTest {
                 passwords = passwords,
                 challenges = challenges,
             )
-            mockConstruction(SSHClient::class.java, withSettings().defaultAnswer(RETURNS_DEEP_STUBS)).use { clients ->
-                runCatching { pool.hostSession(1L).exec("true") }
-                val client = clients.constructed().single()
-                // The key path ran first and found no key, so the saved password is what authenticated.
-                verify(client).authPassword(eq("colle"), any(CharArray::class.java))
-                assertThat(challenges.challenge.value).isNull()
-            }
+            // The key path runs first and finds no key, so the saved password is what authenticates.
+            val client = mock(SSHClient::class.java)
+            pool.authenticateForTest(client, host = Host(id = 1L, hostname = "work.test", username = "colle"), interactive = true)
+            verify(client).authPassword(eq("colle"), any(CharArray::class.java))
+            assertThat(challenges.challenge.value).isNull()
         }
     }
 
