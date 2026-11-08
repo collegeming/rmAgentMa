@@ -178,6 +178,9 @@ class AgentRepositoryHistoryTest {
         assertThat(refusedNew).isInstanceOf(AgentDirectoryUnknownException::class.java)
         assertThat((refusedNew as AgentDirectoryUnknownException).reason).contains("no working directory")
         verify(pool, never()).hostSession(anyLong(), anyBoolean())
+        // The repository's own maintenance loop never ends by itself; leaving it running would keep this test's
+        // virtual clock advancing forever, so the test stops it the same way a closing screen does.
+        repository.disconnectAll()
     }
 
     private companion object {
