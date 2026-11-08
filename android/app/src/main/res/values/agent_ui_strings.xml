@@ -249,7 +249,7 @@
     <!-- Opens the packaged renderer host; only a debug build carrying the verified renderer assets shows it. -->
     <string name="agent_view_renderer">渲染器</string>
     <!-- Fallback shell: the renderer did not take over the main path; %1$s is the failure code it reported. -->
-    <string name="renderer_fallback_notice">渲染器不可用（故障码：%1$s），已回退到主机列表。</string>
+    <string name="renderer_fallback_notice">渲染器无法启动（故障码：%1$s）。</string>
     <!-- Fallback shell: hand the main path to the renderer again. -->
     <string name="renderer_fallback_retry">重试渲染器</string>
     <!-- Explains that the TUI runs as its own SSH session in the terminal. -->

@@ -32,6 +32,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -132,10 +133,6 @@ class RendererHostActivity : ComponentActivity() {
 
     @Volatile
     private var closed = false
-
-    // One failure decides the exit: a second report from the dying WebView must not restart the shell twice.
-    @Volatile
-    private var leaving = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -410,17 +407,32 @@ class RendererHostActivity : ComponentActivity() {
     }
 
     /**
-     * Leaves the renderer with one stable code instead of a dead surface: the restarted activity shows that
-     * code on the Compose fallback together with its retry entry.
+     * Shows the failure where the renderer was, with the code and a reload of this same surface. The product has
+     * one main surface; a renderer that cannot serve states that here instead of handing the user back to a
+     * different shell that would have to explain itself.
      */
     private fun fail(code: String) {
-        if (leaving || closed) return
-        leaving = true
+        if (closed) return
         Timber.w("Renderer host failed: %s", code)
-        startActivity(
-            Intent(this, MainActivity::class.java).putExtra(MainActivity.EXTRA_RENDERER_FAILURE, code),
+        container.removeAllViews()
+        container.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(48, 96, 48, 48)
+                addView(
+                    TextView(this@RendererHostActivity).apply {
+                        text = getString(R.string.renderer_fallback_notice, code)
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+                    },
+                )
+                addView(
+                    Button(this@RendererHostActivity).apply {
+                        setText(R.string.renderer_fallback_retry)
+                        setOnClickListener { recreate() }
+                    },
+                )
+            },
         )
-        finish()
     }
 
     override fun onDestroy() {

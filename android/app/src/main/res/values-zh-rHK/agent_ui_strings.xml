@@ -249,7 +249,7 @@
     <!-- 開啟隨建置打包的渲染器宿主；只有帶已驗證渲染器資源的除錯建置才會顯示。 -->
     <string name="agent_view_renderer" tools:machine_translated="true">渲染器</string>
     <!-- 回退外殼：渲染器未能接管主介面；%1$s 為它回報的故障碼。 -->
-    <string name="renderer_fallback_notice" tools:machine_translated="true">渲染器無法使用（故障碼：%1$s），已回退到主機列表。</string>
+    <string name="renderer_fallback_notice" tools:machine_translated="true">渲染器無法啟動（故障碼：%1$s）。</string>
     <!-- 回退外殼：再次把主介面交給渲染器。 -->
     <string name="renderer_fallback_retry" tools:machine_translated="true">重試渲染器</string>
     <!-- 說明 TUI 會在終端機中以獨立的 SSH 會話執行。 -->

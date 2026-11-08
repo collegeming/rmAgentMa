@@ -79,16 +79,6 @@ class MainActivity : AppCompatActivity() {
         const val DISCONNECT_ACTION = "org.connectbot.action.DISCONNECT"
 
         /**
-         * Renderer failure code the debug renderer host hands back when it cannot serve its surface. The
-         * activity that receives it keeps the Compose fallback and shows the code rather than entering the
-         * renderer again, so a failing renderer cannot restart itself in a loop.
-         */
-        const val EXTRA_RENDERER_FAILURE = "org.connectbot.extra.RENDERER_FAILURE"
-
-        /** Failure code for a handover the product itself cannot perform. */
-        private const val RENDERER_UNRESOLVED = "renderer_unresolved"
-
-        /**
          * A terminal hand-over from the renderer host: the saved host whose console is to be opened and the
          * command its own terminal route runs there. The activity that receives it keeps the Compose shell for
          * this launch — the SSH terminal is an explicit auxiliary route — and opens that console with the command
@@ -107,7 +97,6 @@ class MainActivity : AppCompatActivity() {
     private var notificationSessionId: String? = null
     private var notificationReconnect = false
     private var pendingHostConnection: Host? by mutableStateOf(null)
-    private var rendererFailureCode: String? by mutableStateOf(null)
 
     // The terminal hand-over this launch carries, read once from the intent; it keeps the shell on this activity
     // instead of handing back to the renderer, because the console is what the user asked to open.
@@ -165,8 +154,6 @@ class MainActivity : AppCompatActivity() {
 
         appViewModel = ViewModelProvider(this)[AppViewModel::class.java]
 
-        // A renderer failure brings this activity back with the code its fallback banner shows.
-        rendererFailureCode = intent?.getStringExtra(EXTRA_RENDERER_FAILURE)
         terminalRequest = terminalRequestOf(intent)
 
         if (savedInstanceState == null) {
@@ -351,23 +338,18 @@ class MainActivity : AppCompatActivity() {
                 },
                 onNavigateToConsole = onNavigateToConsole,
                 onHandOverToRenderer = { handOverToRenderer() },
-                rendererFailureCode = rendererFailureCode,
-                onRetryRenderer = { rendererFailureCode = null },
                 terminalRequest = terminalRequest,
             )
         }
     }
 
-    /**
-     * Hands the main path to the packaged renderer, which lives in the debug source set only. The Compose
-     * shell stays composed as the fallback whenever the handover itself is impossible.
-     */
+    /** Hands the main path to the packaged renderer, which lives in the debug source set only. */
     private fun handOverToRenderer() {
         try {
             startActivity(Intent().setClassName(this, RENDERER_HOST_ACTIVITY))
         } catch (e: ActivityNotFoundException) {
-            Timber.e(e, "Renderer host activity is not declared; staying on the Compose shell")
-            rendererFailureCode = RENDERER_UNRESOLVED
+            // A build that packages renderer assets always declares its host; one that does not never gets here.
+            Timber.e(e, "Renderer host activity is not declared")
             return
         }
         finish()
